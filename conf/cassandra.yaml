@@ -3,11 +3,11 @@
 # explanations of configuration directives.
 
 # name of the cluster
-cluster_name: 'Test Cluster'
+cluster_name: 'Dev Cluster'
 
 # Set to true to make new [non-seed] nodes automatically migrate the
 # right data to themselves.
-auto_bootstrap: false
+auto_bootstrap: true
 
 # See http://wiki.apache.org/cassandra/HintedHandoff
 hinted_handoff_enabled: true
