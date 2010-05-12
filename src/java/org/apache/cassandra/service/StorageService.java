@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.net.InetAddress;
 import javax.management.*;
 
@@ -110,6 +111,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         GOSSIP_DIGEST_ACK2,
         DEFINITIONS_ANNOUNCE,
         DEFINITIONS_UPDATE_RESPONSE,
+        TRUNCATE,
         ;
         // remember to add new verbs at the end, since we serialize by ordinal
     }
@@ -234,6 +236,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_ANNOUNCE, new DefinitionsAnnounceVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_UPDATE_RESPONSE, new DefinitionsUpdateResponseVerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.TRUNCATE, new TruncateVerbHandler());
 
         replicationStrategies = new HashMap<String, AbstractReplicationStrategy>();
         for (String table : DatabaseDescriptor.getNonSystemTables())
@@ -341,7 +344,16 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
 
         DatabaseDescriptor.createAllDirectories();
-        GCInspector.instance.start();
+
+        try
+        {
+            GCInspector.instance.start();
+        }
+        catch (Throwable t)
+        {
+            logger_.warn("Unable to start GCInspector (currently only supported on the Sun JVM)");
+        }
+
         logger_.info("Starting up server gossip");
 
         MessagingService.instance.listen(FBUtilities.getLocalAddress());
@@ -1608,7 +1620,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // flush system and definition tables.
         Collection<Future> flushers = new ArrayList<Future>();
         flushers.addAll(Table.open(Table.SYSTEM_TABLE).flush());
-        flushers.addAll(Table.open(Table.DEFINITIONS).flush());
         for (Future f : flushers)
         {
             try
@@ -1646,5 +1657,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         TokenMetadata old = tokenMetadata_;
         tokenMetadata_ = tmd;
         return old;
+    }
+
+    @Override
+    public void truncate(String keyspace, String columnFamily) throws UnavailableException, TimeoutException, IOException
+    {
+        StorageProxy.truncateBlocking(keyspace, columnFamily);
     }
 }

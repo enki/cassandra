@@ -15,10 +15,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.cassandra.db;
 
-package org.apache.cassandra.cache;
-
-public interface ICacheExpungeHook<K,V>
+/**
+ * column family type enum
+ */
+public enum ColumnFamilyType
 {
-    public void callMe(K key , V value);
+    Standard,
+    Super;
+
+    public final static ColumnFamilyType create(String name)
+    {
+        try
+        {
+            return name == null ? null : ColumnFamilyType.valueOf(name);
+        }
+        catch (IllegalArgumentException e)
+        {
+            return null;
+        }
+    }
 }

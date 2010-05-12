@@ -26,6 +26,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,10 +36,16 @@ import org.apache.avro.generic.GenericArray;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.ipc.AvroRemoteException;
 import org.apache.avro.util.Utf8;
+import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.db.migration.AddKeyspace;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageProxy;
 import static org.apache.cassandra.utils.FBUtilities.UTF8;
 
@@ -51,121 +58,69 @@ import static org.apache.cassandra.avro.ErrorFactory.*;
 public class CassandraServer implements Cassandra {
     private static Logger logger = LoggerFactory.getLogger(CassandraServer.class);
 
-    private final static GenericArray<Column> EMPTY_SUBCOLUMNS = new GenericData.Array<Column>(0, Schema.parse("{\"type\":\"array\",\"items\":" + Column.SCHEMA$ + "}"));
+    private final static GenericArray<Column> EMPTY_SUBCOLUMNS = new GenericData.Array<Column>(0, Schema.createArray(Column.SCHEMA$));
+    private final static GenericArray<ColumnOrSuperColumn> EMPTY_COLUMNS = new GenericData.Array<ColumnOrSuperColumn>(0, Schema.createArray(ColumnOrSuperColumn.SCHEMA$));
     private final static Utf8 API_VERSION = new Utf8("0.0.0");
+    
+    // CfDef default values
+    private final static String D_CF_CFTYPE = "Standard";
+    private final static String D_CF_COMPTYPE = "BytesType";
+    private final static String D_CF_SUBCOMPTYPE = "";
+    private final static String D_CF_COMMENT = "";
+    private final static double D_CF_ROWCACHE = 0;
+    private final static boolean D_CF_PRELOAD_ROWCACHE = false;
+    private final static double D_CF_KEYCACHE = 200000;
+    
+    private ThreadLocal<AccessLevel> loginDone = new ThreadLocal<AccessLevel>()
+    {
+        @Override
+        protected AccessLevel initialValue()
+        {
+            return AccessLevel.NONE;
+        }
+    };
+    
+    // Session keyspace.
+    private ThreadLocal<String> curKeyspace = new ThreadLocal<String>();
 
-    public ColumnOrSuperColumn get(Utf8 keyspace, Utf8 key, ColumnPath columnPath, ConsistencyLevel consistencyLevel)
+    @Override
+    public ColumnOrSuperColumn get(ByteBuffer key, ColumnPath columnPath, ConsistencyLevel consistencyLevel)
     throws AvroRemoteException, InvalidRequestException, NotFoundException, UnavailableException, TimedOutException {
         if (logger.isDebugEnabled())
             logger.debug("get");
         
-        ColumnOrSuperColumn column = multigetInternal(keyspace.toString(), Arrays.asList(key.toString()), columnPath, consistencyLevel).get(key.toString());
-        
-        if ((column.column == null) && (column.super_column == null))
-        {
-            throw newNotFoundException("Path not found");
-        }
-        return column;
-    }
-
-    private Map<String, ColumnOrSuperColumn> multigetInternal(String keyspace, List<String> keys, ColumnPath cp, ConsistencyLevel level)
-    throws InvalidRequestException, UnavailableException, TimedOutException
-    {
-        AvroValidation.validateColumnPath(keyspace, cp);
+        AvroValidation.validateColumnPath(curKeyspace.get(), columnPath);
         
         // FIXME: This is repetitive.
         byte[] column, super_column;
-        column = cp.column == null ? null : cp.column.array();
-        super_column = cp.super_column == null ? null : cp.super_column.array();
+        column = columnPath.column == null ? null : columnPath.column.array();
+        super_column = columnPath.super_column == null ? null : columnPath.super_column.array();
         
-        QueryPath path = new QueryPath(cp.column_family.toString(), column == null ? null : super_column);
+        QueryPath path = new QueryPath(columnPath.column_family.toString(), column == null ? null : super_column);
         List<byte[]> nameAsList = Arrays.asList(column == null ? super_column : column);
-        List<ReadCommand> commands = new ArrayList<ReadCommand>();
-        for (String key: keys)
-        {
-            AvroValidation.validateKey(key);
-            // FIXME: string key
-            commands.add(new SliceByNamesReadCommand(keyspace, key.getBytes(UTF8), path, nameAsList));
-        }
+        AvroValidation.validateKey(key.array());
+        ReadCommand command = new SliceByNamesReadCommand(curKeyspace.get(), key.array(), path, nameAsList);
         
-        Map<String, ColumnOrSuperColumn> columnFamiliesMap = new HashMap<String, ColumnOrSuperColumn>();
-        Map<String, Collection<IColumn>> columnsMap = multigetColumns(commands, level);
+        Map<DecoratedKey<?>, ColumnFamily> cfamilies = readColumnFamily(Arrays.asList(command), consistencyLevel);
+        ColumnFamily cf = cfamilies.get(StorageService.getPartitioner().decorateKey(command.key));
         
-        for (ReadCommand command: commands)
-        {
-            ColumnOrSuperColumn columnorsupercolumn;
-
-            Collection<IColumn> columns = columnsMap.get(command.key);
-            if (columns == null)
-            {
-               columnorsupercolumn = new ColumnOrSuperColumn();
-            }
-            else
-            {
-                assert columns.size() == 1;
-                IColumn col = columns.iterator().next();
-
-
-                if (col.isMarkedForDelete())
-                {
-                    columnorsupercolumn = new ColumnOrSuperColumn();
-                }
-                else
-                {
-                    columnorsupercolumn = col instanceof org.apache.cassandra.db.Column
-                                          ? newColumnOrSuperColumn(newColumn(col.name(), col.value(), col.timestamp()))
-                                          : newColumnOrSuperColumn(newSuperColumn(col.name(), avronateSubColumns(col.getSubColumns())));
-                }
-
-            }
-            // FIXME: assuming string keys
-            columnFamiliesMap.put(new String(command.key, UTF8), columnorsupercolumn);
-        }
-
-        return columnFamiliesMap;
+        if (cf == null)
+            throw newNotFoundException();
+        
+        GenericArray<ColumnOrSuperColumn> avroColumns = avronateColumnFamily(cf, command.queryPath.superColumnName != null, false);
+        
+        if (avroColumns.size() == 0)
+            throw newNotFoundException();
+        
+        assert avroColumns.size() == 1;
+        return avroColumns.iterator().next();
     }
     
-    private Map<String, Collection<IColumn>> multigetColumns(List<ReadCommand> commands, ConsistencyLevel level)
-    throws InvalidRequestException, UnavailableException, TimedOutException
-    {
-        Map<DecoratedKey, ColumnFamily> cfamilies = readColumnFamily(commands, level);
-        Map<String, Collection<IColumn>> columnFamiliesMap = new HashMap<String, Collection<IColumn>>();
-        
-        for (ReadCommand command : commands)
-        {
-            ColumnFamily cfamily = cfamilies.get(StorageService.getPartitioner().decorateKey(command.key));
-            if (cfamily == null)
-                continue;
-
-            Collection<IColumn> columns = null;
-            if (command.queryPath.superColumnName != null)
-            {
-                IColumn column = cfamily.getColumn(command.queryPath.superColumnName);
-                if (column != null)
-                {
-                    columns = column.getSubColumns();
-                }
-            }
-            else
-            {
-                columns = cfamily.getSortedColumns();
-            }
-
-            if (columns != null && columns.size() != 0)
-            {
-                // FIXME: assuming string keys
-                columnFamiliesMap.put(new String(command.key, UTF8), columns);
-            }
-        }
-        
-        return columnFamiliesMap;
-    }
-    
-    protected Map<DecoratedKey, ColumnFamily> readColumnFamily(List<ReadCommand> commands, ConsistencyLevel consistency)
+    protected Map<DecoratedKey<?>, ColumnFamily> readColumnFamily(List<ReadCommand> commands, ConsistencyLevel consistency)
     throws InvalidRequestException, UnavailableException, TimedOutException
     {
         // TODO - Support multiple column families per row, right now row only contains 1 column family
-        Map<DecoratedKey, ColumnFamily> columnFamilyKeyMap = new HashMap<DecoratedKey, ColumnFamily>();
+        Map<DecoratedKey<?>, ColumnFamily> columnFamilyKeyMap = new HashMap<DecoratedKey<?>, ColumnFamily>();
         
         if (consistency == ConsistencyLevel.ZERO)
             throw newInvalidRequestException("Consistency level zero may not be applied to read operations");
@@ -202,7 +157,7 @@ public class CassandraServer implements Cassandra {
     }
     
     // Don't playa hate, avronate.
-    public GenericArray<Column> avronateSubColumns(Collection<IColumn> columns)
+    private GenericArray<Column> avronateSubColumns(Collection<IColumn> columns)
     {
         if (columns == null || columns.isEmpty())
             return EMPTY_SUBCOLUMNS;
@@ -220,27 +175,98 @@ public class CassandraServer implements Cassandra {
         
         return avroColumns;
     }
+    
+    private GenericArray<ColumnOrSuperColumn> avronateColumns(Collection<IColumn> columns, boolean reverseOrder)
+    {
+        ArrayList<ColumnOrSuperColumn> avroColumns = new ArrayList<ColumnOrSuperColumn>(columns.size());
+        for (IColumn column : columns)
+        {
+            if (column.isMarkedForDelete())
+                continue;
+            
+            Column avroColumn = newColumn(column.name(), column.value(), column.timestamp());
+            
+            if (column instanceof ExpiringColumn)
+                avroColumn.ttl = ((ExpiringColumn)column).getTimeToLive();
+            
+            avroColumns.add(newColumnOrSuperColumn(avroColumn));
+        }
+        
+        if (reverseOrder)
+            Collections.reverse(avroColumns);
+        
+        // FIXME: Teach GenericData.Array how to reverse so that this iteration isn't necessary.
+        GenericArray<ColumnOrSuperColumn> avroArray = new GenericData.Array<ColumnOrSuperColumn>(avroColumns.size(), Schema.createArray(ColumnOrSuperColumn.SCHEMA$));
+        for (ColumnOrSuperColumn cosc : avroColumns)
+            avroArray.add(cosc);
+        
+        return avroArray;
+    }
+    
+    private GenericArray<ColumnOrSuperColumn> avronateSuperColumns(Collection<IColumn> columns, boolean reverseOrder)
+    {
+        ArrayList<ColumnOrSuperColumn> avroSuperColumns = new ArrayList<ColumnOrSuperColumn>(columns.size());
+        for (IColumn column: columns)
+        {
+            GenericArray<Column> subColumns = avronateSubColumns(column.getSubColumns());
+            if (subColumns.size() == 0)
+                continue;
+            SuperColumn superColumn = newSuperColumn(column.name(), subColumns);
+            avroSuperColumns.add(newColumnOrSuperColumn(superColumn));
+        }
+        
+        if (reverseOrder)
+            Collections.reverse(avroSuperColumns);
+        
+        // FIXME: Teach GenericData.Array how to reverse so that this iteration isn't necessary.
+        GenericArray<ColumnOrSuperColumn> avroArray = new GenericData.Array<ColumnOrSuperColumn>(avroSuperColumns.size(), Schema.createArray(ColumnOrSuperColumn.SCHEMA$));
+        for (ColumnOrSuperColumn cosc : avroSuperColumns)
+            avroArray.add(cosc);
+        
+        return avroArray;
+    }
+    
+    private GenericArray<ColumnOrSuperColumn> avronateColumnFamily(ColumnFamily cf, boolean subColumnsOnly, boolean reverseOrder)
+    {
+        if (cf == null || cf.getColumnsMap().size() == 0)
+            return EMPTY_COLUMNS;
+        
+        if (subColumnsOnly)
+        {
+            IColumn column = cf.getColumnsMap().values().iterator().next();
+            Collection<IColumn> subColumns = column.getSubColumns();
+            if (subColumns == null || subColumns.isEmpty())
+                return EMPTY_COLUMNS;
+            else
+                return avronateColumns(subColumns, reverseOrder);
+        }
+        
+        if (cf.isSuper())
+            return avronateSuperColumns(cf.getSortedColumns(), reverseOrder);
+        else
+            return avronateColumns(cf.getSortedColumns(), reverseOrder);
+    }
 
-    public Void insert(Utf8 keyspace, Utf8 key, ColumnPath cp, ByteBuffer value, long timestamp, ConsistencyLevel consistencyLevel)
+    @Override
+    public Void insert(ByteBuffer key, ColumnParent parent, Column column, ConsistencyLevel consistencyLevel)
     throws AvroRemoteException, InvalidRequestException, UnavailableException, TimedOutException
     {
         if (logger.isDebugEnabled())
             logger.debug("insert");
 
-        // FIXME: This is repetitive.
-        byte[] column, super_column;
-        column = cp.column == null ? null : cp.column.array();
-        super_column = cp.super_column == null ? null : cp.super_column.array();
-        String column_family = cp.column_family.toString();
-        String keyspace_string = keyspace.toString();
+        AvroValidation.validateKey(key.array());
+        AvroValidation.validateColumnParent(curKeyspace.get(), parent);
+        AvroValidation.validateColumn(curKeyspace.get(), parent, column);
 
-        AvroValidation.validateKey(keyspace_string);
-        AvroValidation.validateColumnPath(keyspace_string, cp);
-
-        RowMutation rm = new RowMutation(keyspace_string, key.getBytes());
+        RowMutation rm = new RowMutation(curKeyspace.get(), key.array());
         try
         {
-            rm.add(new QueryPath(column_family, super_column, column), value.array(), timestamp);
+            rm.add(new QueryPath(parent.column_family.toString(),
+                   parent.super_column == null ? null : parent.super_column.array(),
+                   column.name.array()),
+                   column.value.array(),
+                   column.timestamp,
+                   column.ttl == null ? 0 : column.ttl);
         }
         catch (MarshalException e)
         {
@@ -416,7 +442,7 @@ public class CassandraServer implements Cassandra {
         {
             for (ByteBuffer col : del.predicate.column_names)
             {
-                if (del.super_column == null && DatabaseDescriptor.getColumnFamilyType(rm.getTable(), cfName).equals("Super"))
+                if (del.super_column == null && DatabaseDescriptor.getColumnFamilyType(rm.getTable(), cfName) == ColumnFamilyType.Super)
                     rm.delete(new QueryPath(cfName, col.array()), del.timestamp);
                 else
                     rm.delete(new QueryPath(cfName, del.super_column.array(), col.array()), del.timestamp);
@@ -445,5 +471,84 @@ public class CassandraServer implements Cassandra {
     public Utf8 get_api_version() throws AvroRemoteException
     {
         return API_VERSION;
+    }
+
+    @Override
+    public Void set_keyspace(Utf8 keyspace) throws InvalidRequestException
+    {
+        String keyspaceStr = keyspace.toString();
+        
+        if (DatabaseDescriptor.getTableDefinition(keyspaceStr) == null)
+        {
+            throw newInvalidRequestException("Keyspace does not exist");
+        }
+        
+        // If switching, invalidate previous access level; force a new login.
+        if (this.curKeyspace.get() != null && !this.curKeyspace.get().equals(keyspaceStr))
+            loginDone.set(AccessLevel.NONE);
+        
+        this.curKeyspace.set(keyspaceStr);
+        
+        return null;
+    }
+
+    @Override
+    public Void system_add_keyspace(KsDef ksDef) throws AvroRemoteException, InvalidRequestException
+    {
+        if (StageManager.getStage(StageManager.MIGRATION_STAGE).getQueue().size() > 0)
+            throw newInvalidRequestException("This node appears to be handling gossiped migrations.");
+        
+        try
+        {
+            Collection<CFMetaData> cfDefs = new ArrayList<CFMetaData>((int)ksDef.cf_defs.size());
+            for (CfDef cfDef : ksDef.cf_defs)
+            {
+                String cfType, compare, subCompare;
+                cfType = cfDef.column_type == null ? D_CF_CFTYPE : cfDef.column_type.toString();
+                compare = cfDef.comparator_type == null ? D_CF_COMPTYPE : cfDef.comparator_type.toString();
+                subCompare = cfDef.subcomparator_type == null ? D_CF_SUBCOMPTYPE : cfDef.subcomparator_type.toString();
+                
+                CFMetaData cfmeta = new CFMetaData(
+                        cfDef.keyspace.toString(),
+                        cfDef.name.toString(),
+                        ColumnFamilyType.create(cfType),
+                        DatabaseDescriptor.getComparator(compare),
+                        subCompare.length() == 0 ? null : DatabaseDescriptor.getComparator(subCompare),
+                        cfDef.comment == null ? D_CF_COMMENT : cfDef.comment.toString(), 
+                        cfDef.row_cache_size == null ? D_CF_ROWCACHE : cfDef.row_cache_size,
+                        cfDef.preload_row_cache == null ? D_CF_PRELOAD_ROWCACHE : cfDef.preload_row_cache,
+                        cfDef.key_cache_size == null ? D_CF_KEYCACHE : cfDef.key_cache_size);
+                cfDefs.add(cfmeta);
+            }
+            
+            KSMetaData ksmeta = new KSMetaData(
+                    ksDef.name.toString(),
+                    (Class<? extends AbstractReplicationStrategy>)Class.forName(ksDef.strategy_class.toString()),
+                    (int)ksDef.replication_factor,
+                    cfDefs.toArray(new CFMetaData[cfDefs.size()]));
+            AddKeyspace add = new AddKeyspace(ksmeta);
+            add.apply();
+            add.announce();
+        }
+        catch (ClassNotFoundException e)
+        {
+            InvalidRequestException ire = newInvalidRequestException(e.getMessage());
+            ire.initCause(e);
+            throw ire;
+        }
+        catch (ConfigurationException e)
+        {
+            InvalidRequestException ire = newInvalidRequestException(e.getMessage());
+            ire.initCause(e);
+            throw ire;
+        }
+        catch (IOException e)
+        {
+            InvalidRequestException ire = newInvalidRequestException(e.getMessage());
+            ire.initCause(e);
+            throw ire;
+        }
+        
+        return null;
     }
 }

@@ -31,19 +31,13 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cache.InstrumentedCache;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.utils.BloomFilter;
-import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.ICompactSerializer2;
-import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.io.util.MappedFileDataInput;
-
-import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 /**
  * SSTableReaders are open()ed by Table.onStart; after that they are created by SSTableWriter.renameAndOpen.
@@ -64,7 +58,7 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
             {
                 while (true)
                 {
-                    SSTableDeletingReference r = null;
+                    SSTableDeletingReference r;
                     try
                     {
                         r = (SSTableDeletingReference) finalizerQueue.remove();
@@ -87,6 +81,20 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
         };
         new Thread(runnable, "SSTABLE-DELETER").start();
     }};
+
+    /**
+     * maxDataAge is a timestamp in local server time (e.g. System.currentTimeMilli) which represents an uppper bound
+     * to the newest piece of data stored in the sstable. In other words, this sstable does not contain items created
+     * later than maxDataAge.
+     * 
+     * The field is not serialized to disk, so relying on it for more than what truncate does is not advised.
+     *
+     * When a new sstable is flushed, maxDataAge is set to the time of creation.
+     * When a sstable is created from compaction, maxDataAge is set to max of all merged tables.
+     *
+     * The age is in milliseconds since epoc and is local to this host.
+     */
+    public final long maxDataAge;
 
     public static int indexInterval()
     {
@@ -172,20 +180,13 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
         }
     }
 
-    /*************************************************************************/
-
-    protected SSTableReader(Descriptor desc, IPartitioner partitioner)
+    protected SSTableReader(Descriptor desc, IPartitioner partitioner, long maxDataAge)
     {
         super(desc, partitioner);
+        this.maxDataAge = maxDataAge;
     }
 
     private volatile SSTableDeletingReference phantomReference;
-
-    void addFinalizingReference(SSTableTracker tracker)
-    {
-        phantomReference = new SSTableDeletingReference(tracker, this, finalizerQueue);
-        finalizers.add(phantomReference);
-    }
 
     /**
      * For testing purposes only.
@@ -275,8 +276,20 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
 
     public ICompactSerializer2<IColumn> getColumnSerializer()
     {
-        return DatabaseDescriptor.getColumnFamilyType(getTableName(), getColumnFamilyName()).equals("Standard")
+        ColumnFamilyType cfType = DatabaseDescriptor.getColumnFamilyType(getTableName(), getColumnFamilyName());
+        return cfType == ColumnFamilyType.Standard
                ? Column.serializer()
                : SuperColumn.serializer(getColumnComparator());
+    }
+
+    /**
+     * Tests if the sstable contains data newer than the given age param (in localhost currentMilli time).
+     * This works in conjunction with maxDataAge which is an upper bound on the create of data in this sstable.
+     * @param age The age to compare the maxDataAre of this sstable. Measured in millisec since epoc on this host
+     * @return True iff this sstable contains data that's newer than the given age parameter.
+     */
+    public boolean newSince(long age)
+    {
+        return maxDataAge > age;
     }
 }

@@ -26,6 +26,7 @@ import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.commitlog.CommitLogSegment;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.BytesType;
@@ -41,6 +42,7 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.utils.UUIDGen;
 
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
@@ -57,8 +59,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
 public class DefsTest extends CleanupHelper
-{
-
+{   
     @Test
     public void saveAndRestore() throws IOException
     {
@@ -79,7 +80,7 @@ public class DefsTest extends CleanupHelper
     @Test
     public void addNewCfToBogusTable() throws InterruptedException
     {
-        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", "Standard", new UTF8Type(), null, "new cf", 0, false, 0);
+        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", ColumnFamilyType.Standard, new UTF8Type(), null, "new cf", 0, false, 0);
         try
         {
             new AddColumnFamily(newCf).apply();
@@ -104,7 +105,7 @@ public class DefsTest extends CleanupHelper
         assert DatabaseDescriptor.getDefsVersion().equals(prior);
         
         // add a cf.
-        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", "Standard", new UTF8Type(), null, "Migration CF ", 0, false, 0);
+        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", ColumnFamilyType.Standard, new UTF8Type(), null, "Migration CF ", 0, false, 0);
         Migration m1 = new AddColumnFamily(newCf1);
         m1.apply();
         UUID ver1 = m1.getVersion();
@@ -163,7 +164,7 @@ public class DefsTest extends CleanupHelper
         final String cf = "BrandNewCf";
         KSMetaData original = DatabaseDescriptor.getTableDefinition(ks);
 
-        CFMetaData newCf = new CFMetaData(original.name, cf, "Standard", new UTF8Type(), null, "A New Column Family", 0, false, 0);
+        CFMetaData newCf = new CFMetaData(original.name, cf, ColumnFamilyType.Standard, new UTF8Type(), null, "A New Column Family", 0, false, 0);
         int clSegments = CommitLog.instance().getSegmentCount();
         assert !DatabaseDescriptor.getTableDefinition(ks).cfMetaData().containsKey(newCf.cfName);
         new AddColumnFamily(newCf).apply();
@@ -279,7 +280,7 @@ public class DefsTest extends CleanupHelper
     public void addNewKS() throws ConfigurationException, IOException, ExecutionException, InterruptedException
     {
         DecoratedKey dk = Util.dk("key0");
-        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", "Standard", new UTF8Type(), null, "A new cf for a new ks", 0, false, 0);
+        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", ColumnFamilyType.Standard, new UTF8Type(), null, "A new cf for a new ks", 0, false, 0);
         KSMetaData newKs = new KSMetaData(newCf.tableName, RackUnawareStrategy.class, 5, newCf);
         
         int segmentCount = CommitLog.instance().getSegmentCount();

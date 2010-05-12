@@ -20,6 +20,9 @@ dev
  * Added preload_row_cache option (CASSANDRA-946)
  * add CRC to commitlog header (CASSANDRA-999)
  * removed multiget thrift method (CASSANDRA-739)
+ * removed deprecated batch_insert and get_range_slice methods (CASSANDRA-1065)
+ * add truncate thrift method (CASSANDRA-531)
+ * http mini-interface using mx4j (CASSANDRA-1068)
 
 
 0.6.2
@@ -33,6 +36,10 @@ dev
  * fix windows startup (CASSANDRA-948)
  * make concurrent_reads, concurrent_writes configurable at runtime via JMX
    (CASSANDRA-1060)
+ * disable GCInspector on non-Sun JVMs (CASSANDRA-1061)
+ * fix tombstone handling in sstable rows with no other data (CASSANDRA-1063)
+ * fix size of row in spanned index entries (CASSANDRA-1056)
+ * indicate stream sources/destinations prior to anticompaction (CASSANDRA-956)
 
 
 0.6.1

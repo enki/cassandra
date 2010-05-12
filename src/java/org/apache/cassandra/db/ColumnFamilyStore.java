@@ -370,6 +370,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                         // if we're not writing to the commit log, we are replaying the log, so marking
                         // the log header with "you can discard anything written before the context" is not valid
                         final int cfId = DatabaseDescriptor.getTableMetaData(table_).get(columnFamily_).cfId;
+                        logger_.info("Discarding " + cfId);
                         CommitLog.instance().discardCompletedSegments(cfId, ctx);
                     }
                 }
@@ -778,15 +779,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             IColumnIterator iter;
 
             /* add the current memtable */
-            Table.flusherLock.readLock().lock();
-            try
-            {
-                iter = filter.getMemtableColumnIterator(memtable_, getComparator());
-            }
-            finally
-            {
-                Table.flusherLock.readLock().unlock();
-            }
+            iter = filter.getMemtableColumnIterator(getMemtableThreadSafe(), getComparator());
             if (iter != null)
             {
                 returnCF.delete(iter.getColumnFamily());
@@ -794,7 +787,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
 
             /* add the memtables being flushed */
-            for (Memtable memtable : getMemtablesPendingFlush())
+            for (Memtable memtable : memtablesPendingFlush)
             {
                 iter = filter.getMemtableColumnIterator(memtable, getComparator());
                 if (iter != null)
@@ -808,18 +801,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             for (SSTableReader sstable : ssTables_)
             {
                 iter = filter.getSSTableColumnIterator(sstable);
-                if (iter.hasNext()) // initializes iter.CF
+                if (iter.getColumnFamily() != null)
                 {
                     returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
                 }
-                iterators.add(iter);
             }
 
             Comparator<IColumn> comparator = QueryFilter.getColumnComparator(getComparator());
             Iterator collated = IteratorUtils.collatedIterator(comparator, iterators);
-            if (!collated.hasNext())
-                return null;
-
             filter.collectCollatedColumns(returnCF, collated, gcBefore);
             return returnCF; // caller is responsible for final removeDeleted
         }
@@ -871,12 +861,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         final QueryFilter filter = sliceRange == null ? QueryFilter.getNamesFilter(null, queryPath, columnNameSet)
                                                       : QueryFilter.getSliceFilter(null, queryPath, sliceRange.start, sliceRange.finish, sliceRange.bitmasks, sliceRange.reversed, sliceRange.count);
 
-        Collection<Memtable> memtables = new ArrayList<Memtable>(memtablesPendingFlush);
+        Collection<Memtable> memtables = new ArrayList<Memtable>();
+        memtables.add(getMemtableThreadSafe());
+        memtables.addAll(memtablesPendingFlush);
 
         Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
         Iterables.addAll(sstables, ssTables_);
 
-        RowIterator iterator = RowIteratorFactory.getIterator(memtable_, memtables, sstables, startWith, stopAt, filter, getComparator(), gcBefore);
+        RowIterator iterator = RowIteratorFactory.getIterator(memtables, sstables, startWith, stopAt, filter, getComparator(), gcBefore);
 
         try
         {
@@ -1121,4 +1113,48 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     {
         return memtablesPendingFlush;
     }
+
+    /**
+     * Truncate practically deletes the entire column family's data
+     * @return a Future to the delete operation. Call the future's get() to make
+     * sure the column family has been deleted
+     */
+    public Future<?> truncate() throws IOException
+    {
+        // snapshot will also flush, but we want to truncate the most possible, and anything in a flush written
+        // after truncateAt won't be truncated.
+        try
+        {
+            forceBlockingFlush();
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+
+        final long truncatedAt = System.currentTimeMillis();
+        snapshot(Table.getTimestampedSnapshotName("before-truncate"));
+
+        Runnable runnable = new WrappedRunnable()
+        {
+            public void runMayThrow() throws InterruptedException, IOException
+            {
+                // putting markCompacted on the commitlogUpdater thread ensures it will run
+                // after any compactions that were in progress when truncate was called, are finished
+                List<SSTableReader> truncatedSSTables = new ArrayList<SSTableReader>();
+                for (SSTableReader sstable : ssTables_.getSSTables())
+                {
+                    if (!sstable.newSince(truncatedAt))
+                        truncatedSSTables.add(sstable);
+                }
+                markCompacted(truncatedSSTables);
+
+                // Invalidate row cache
+                invalidateRowCache();
+            }
+        };
+
+        return commitLogUpdater_.submit(runnable);
+     }
+
 }

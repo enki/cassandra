@@ -29,8 +29,10 @@ import org.apache.avro.util.Utf8;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.utils.FBUtilities;
 
 import static org.apache.cassandra.avro.ErrorFactory.newInvalidRequestException;
 import static org.apache.cassandra.avro.AvroRecordFactory.newColumnPath;
@@ -40,10 +42,22 @@ import static org.apache.cassandra.avro.AvroRecordFactory.newColumnPath;
  */
 public class AvroValidation {
     // FIXME: could use method in ThriftValidation
+    // FIXME: remove me
     static void validateKey(String key) throws InvalidRequestException
     {
         if (key.isEmpty())
             throw newInvalidRequestException("Key may not be empty");
+    }
+    
+    static void validateKey(byte[] key) throws InvalidRequestException
+    {
+        if (key == null || key.length == 0)
+            throw newInvalidRequestException("Key may not be empty");
+        
+        // check that key can be handled by FBUtilities.writeShortByteArray
+        if (key.length > FBUtilities.MAX_UNSIGNED_SHORT)
+            throw newInvalidRequestException("Key length of " + key.length +
+                    " is longer than maximum of " + FBUtilities.MAX_UNSIGNED_SHORT);
     }
     
     // FIXME: could use method in ThriftValidation
@@ -54,12 +68,12 @@ public class AvroValidation {
     }
     
     // FIXME: could use method in ThriftValidation
-    static String validateColumnFamily(String keyspace, String columnFamily) throws InvalidRequestException
+    static ColumnFamilyType validateColumnFamily(String keyspace, String columnFamily) throws InvalidRequestException
     {
         if (columnFamily.isEmpty())
             throw newInvalidRequestException("non-empty columnfamily is required");
         
-        String cfType = DatabaseDescriptor.getColumnFamilyType(keyspace, columnFamily);
+        ColumnFamilyType cfType = DatabaseDescriptor.getColumnFamilyType(keyspace, columnFamily);
         if (cfType == null)
             throw newInvalidRequestException("unconfigured columnfamily " + columnFamily);
         
@@ -70,13 +84,13 @@ public class AvroValidation {
     {
         validateKeyspace(keyspace);
         String column_family = cp.column_family.toString();
-        String cfType = validateColumnFamily(keyspace, column_family);
+        ColumnFamilyType cfType = validateColumnFamily(keyspace, column_family);
         
         byte[] column = null, super_column = null;
         if (cp.super_column != null) super_column = cp.super_column.array();
         if (cp.column != null) column = cp.column.array();
         
-        if (cfType.equals("Standard"))
+        if (cfType == ColumnFamilyType.Standard)
         {
             if (super_column != null)
                 throw newInvalidRequestException("supercolumn parameter is invalid for standard CF " + column_family);
@@ -96,6 +110,19 @@ public class AvroValidation {
             validateColumns(keyspace, column_family, null, Arrays.asList(cp.super_column));
     }
     
+    static void validateColumnParent(String keyspace, ColumnParent parent) throws InvalidRequestException
+    {
+        validateKeyspace(keyspace);
+        String cfName = parent.column_family.toString();
+        ColumnFamilyType cfType = validateColumnFamily(keyspace, cfName);
+        
+        if (cfType == ColumnFamilyType.Standard)
+            if (parent.super_column != null)
+                throw newInvalidRequestException("super column specified for standard column family");
+        if (parent.super_column != null)
+            validateColumns(keyspace, cfName, null, Arrays.asList(parent.super_column));
+    }
+    
     // FIXME: could use method in ThriftValidation
     static void validateColumns(String keyspace, String cfName, byte[] superColumnName, Iterable<ByteBuffer> columnNames)
     throws InvalidRequestException
@@ -106,7 +133,7 @@ public class AvroValidation {
                 throw newInvalidRequestException("supercolumn name length must not be greater than " + IColumn.MAX_NAME_LENGTH);
             if (superColumnName.length == 0)
                 throw newInvalidRequestException("supercolumn name must not be empty");
-            if (!DatabaseDescriptor.getColumnFamilyType(keyspace, cfName).equals("Super"))
+            if (DatabaseDescriptor.getColumnFamilyType(keyspace, cfName) == ColumnFamilyType.Standard)
                 throw newInvalidRequestException("supercolumn specified to ColumnFamily " + cfName + " containing normal columns");
         }
         
@@ -129,6 +156,22 @@ public class AvroValidation {
                 throw newInvalidRequestException(e.getMessage());
             }
         }
+    }
+    
+    static void validateColumns(String keyspace, ColumnParent parent, Iterable<ByteBuffer> columnNames)
+    throws InvalidRequestException
+    {
+        validateColumns(keyspace,
+                        parent.column_family.toString(),
+                        parent.super_column == null ? null : parent.super_column.array(),
+                        columnNames);
+    }
+    
+    static void validateColumn(String keyspace, ColumnParent parent, Column column)
+    throws InvalidRequestException
+    {
+        validateTtl(column);
+        validateColumns(keyspace, parent, Arrays.asList(column.name));
     }
 
     static void validateColumnOrSuperColumn(String keyspace, String cfName, ColumnOrSuperColumn cosc)
@@ -185,6 +228,7 @@ public class AvroValidation {
 
     static void validateDeletion(String keyspace, String  cfName, Deletion del) throws InvalidRequestException
     {
+        validateColumnFamily(keyspace, cfName);
         if (del.super_column == null && del.predicate == null)
             throw newInvalidRequestException("A Deletion must have a SuperColumn, a SlicePredicate, or both.");
 
@@ -216,5 +260,11 @@ public class AvroValidation {
         {
             throw newInvalidRequestException("Mutation must have one ColumnOrSuperColumn, or one Deletion");
         }
+    }
+    
+    static void validateTtl(Column column) throws InvalidRequestException
+    {
+        if (column.ttl != null && column.ttl < 0)
+            throw newInvalidRequestException("ttl must be a positive value");
     }
 }

@@ -356,27 +356,6 @@ public class CassandraServer implements Cassandra.Iface
         }
         doInsert(consistency_level, rm);
     }
-    
-    public void batch_insert(byte[] key, Map<String, List<ColumnOrSuperColumn>> cfmap, ConsistencyLevel consistency_level)
-    throws InvalidRequestException, UnavailableException, TimedOutException
-    {
-        if (logger.isDebugEnabled())
-            logger.debug("batch_insert");
-
-        checkKeyspaceAndLoginAuthorized(AccessLevel.READWRITE);
-
-        ThriftValidation.validateKey(key);
-
-        for (String cfName : cfmap.keySet())
-        {
-            for (ColumnOrSuperColumn cosc : cfmap.get(cfName))
-            {
-                ThriftValidation.validateColumnOrSuperColumn(keySpace.get(), cfName, cosc);
-            }
-        }
-
-        doInsert(consistency_level, RowMutation.getRowMutation(keySpace.get(), key, cfmap));
-    }
 
     public void batch_mutate(Map<byte[],Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TimedOutException
@@ -489,10 +468,10 @@ public class CassandraServer implements Cassandra.Iface
             CFMetaData columnFamilyMetaData = stringCFMetaDataEntry.getValue();
 
             Map<String, String> columnMap = new HashMap<String, String>();
-            columnMap.put("Type", columnFamilyMetaData.columnType);
+            columnMap.put("Type", columnFamilyMetaData.cfType.name());
             columnMap.put("Desc", columnFamilyMetaData.comment == null ? columnFamilyMetaData.pretty() : columnFamilyMetaData.comment);
             columnMap.put("CompareWith", columnFamilyMetaData.comparator.getClass().getName());
-            if (columnFamilyMetaData.columnType.equals("Super"))
+            if (columnFamilyMetaData.cfType == ColumnFamilyType.Super)
             {
                 columnMap.put("CompareSubcolumnsWith", columnFamilyMetaData.subcolumnComparator.getClass().getName());
             }
@@ -501,28 +480,13 @@ public class CassandraServer implements Cassandra.Iface
         return columnFamiliesMap;
     }
 
-    public List<KeySlice> get_range_slice(ColumnParent column_parent, SlicePredicate predicate, byte[] start_key, byte[] finish_key, int maxRows, ConsistencyLevel consistency_level)
-    throws InvalidRequestException, UnavailableException, TException, TimedOutException
-    {
-        if (logger.isDebugEnabled())
-            logger.debug("get_range_slice " + start_key + " to " + finish_key);
-
-        KeyRange range = new KeyRange().setStart_key(start_key).setEnd_key(finish_key).setCount(maxRows);
-        return getRangeSlicesInternal(keySpace.get(), column_parent, predicate, range, consistency_level);
-    }
-
     public List<KeySlice> get_range_slices(ColumnParent column_parent, SlicePredicate predicate, KeyRange range, ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TException, TimedOutException
     {
         if (logger.isDebugEnabled())
             logger.debug("range_slice");
 
-        return getRangeSlicesInternal(keySpace.get(), column_parent, predicate, range, consistency_level);
-    }
-
-    private List<KeySlice> getRangeSlicesInternal(String keyspace, ColumnParent column_parent, SlicePredicate predicate, KeyRange range, ConsistencyLevel consistency_level)
-            throws InvalidRequestException, UnavailableException, TimedOutException
-    {
+        String keyspace = keySpace.get();
         checkKeyspaceAndLoginAuthorized(AccessLevel.READONLY);
 
         ThriftValidation.validateColumnParent(keyspace, column_parent);
@@ -651,10 +615,15 @@ public class CassandraServer implements Cassandra.Iface
         
         try
         {
+            ColumnFamilyType cfType = ColumnFamilyType.create(cf_def.column_type);
+            if (cfType == null)
+            {
+              throw new InvalidRequestException("Invalid column type " + cf_def.column_type);
+            }
             CFMetaData cfm = new CFMetaData(
                         cf_def.table,
                         cf_def.name,
-                        ColumnFamily.getColumnType(cf_def.column_type),
+                        cfType,
                         DatabaseDescriptor.getComparator(cf_def.comparator_type),
                         cf_def.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cf_def.subcomparator_type),
                         cf_def.comment,
@@ -752,10 +721,15 @@ public class CassandraServer implements Cassandra.Iface
             Collection<CFMetaData> cfDefs = new ArrayList<CFMetaData>(ks_def.cf_defs.size());
             for (CfDef cfDef : ks_def.cf_defs)
             {
+                ColumnFamilyType cfType = ColumnFamilyType.create(cfDef.column_type);
+                if (cfType == null)
+                {
+                    throw new InvalidRequestException("Invalid column type " + cfDef.column_type);
+                }
                 CFMetaData cfm = new CFMetaData(
                         cfDef.table,
                         cfDef.name,
-                        ColumnFamily.getColumnType(cfDef.column_type),
+                        cfType,
                         DatabaseDescriptor.getComparator(cfDef.comparator_type),
                         cfDef.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cfDef.subcomparator_type),
                         cfDef.comment,
@@ -847,6 +821,25 @@ public class CassandraServer implements Cassandra.Iface
             InvalidRequestException ex = new InvalidRequestException(e.getMessage());
             ex.initCause(e);
             throw ex;
+        }
+    }
+
+    @Override
+    public void truncate(String keyspace, String cfname) throws InvalidRequestException, UnavailableException, TException
+    {
+        logger.debug("truncating {} in {}", cfname, keyspace);
+        checkKeyspaceAndLoginAuthorized(AccessLevel.FULL);
+        try
+        {
+            StorageProxy.truncateBlocking(keyspace, cfname);
+        }
+        catch (TimeoutException e)
+        {
+            throw (UnavailableException) new UnavailableException().initCause(e);
+        }
+        catch (IOException e)
+        {
+            throw (UnavailableException) new UnavailableException().initCause(e);
         }
     }
 

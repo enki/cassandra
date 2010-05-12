@@ -277,47 +277,16 @@ public class DatabaseDescriptor
                 CommitLog.setSegmentSize(conf.commitlog_rotation_threshold_in_mb * 1024 * 1024);
 
             // Hardcoded system tables
-            final CFMetaData[] systemCfDefs = new CFMetaData[]
-            {
-                new CFMetaData(Table.SYSTEM_TABLE,
-                               SystemTable.STATUS_CF,
-                               "Standard",
-                               new UTF8Type(),
-                               null,
-                               "persistent metadata for the local node",
-                               0,
-                               false,
-                               0.01),
-                new CFMetaData(Table.SYSTEM_TABLE,
-                               HintedHandOffManager.HINTS_CF,
-                               "Super",
-                               new UTF8Type(),
-                               new BytesType(),
-                               "hinted handoff data",
-                               0,
-                               false,
-                               0.01)
-            };
-            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE, null, -1, systemCfDefs);
-            CFMetaData.map(systemCfDefs[0]);
-            CFMetaData.map(systemCfDefs[1]);
+            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE, null, -1, new CFMetaData[]{CFMetaData.StatusCf,
+                                                                                                  CFMetaData.HintsCf,
+                                                                                                  CFMetaData.MigrationsCf,
+                                                                                                  CFMetaData.SchemaCf
+            });
+            CFMetaData.map(CFMetaData.StatusCf);
+            CFMetaData.map(CFMetaData.HintsCf);
+            CFMetaData.map(CFMetaData.MigrationsCf);
+            CFMetaData.map(CFMetaData.SchemaCf);
             tables.put(Table.SYSTEM_TABLE, systemMeta);
-                
-            CFMetaData[] definitionCfDefs = new CFMetaData[]
-            {
-                new CFMetaData(Table.DEFINITIONS, Migration.MIGRATIONS_CF, "Standard", new TimeUUIDType(), null, "individual schema mutations", 0, false, 0),
-                new CFMetaData(Table.DEFINITIONS, Migration.SCHEMA_CF, "Standard", new UTF8Type(), null, "current state of the schema", 0, false, 0)
-            };
-            CFMetaData.map(definitionCfDefs[0]);
-            CFMetaData.map(definitionCfDefs[1]);
-            tables.put(Table.DEFINITIONS, new KSMetaData(Table.DEFINITIONS, null, -1, definitionCfDefs));
-            
-            // NOTE: make sure that all system CFMs defined by now. calling fixMaxId at this point will set the base id
-            // to a value that leaves room for future system cfms.
-            // TODO: I've left quite a bit of space for more system CFMs to be defined (up to 1000). However, there is no
-            // way to guarantee the assignment of the right IDS to the system CFMs other than rigidly controlling the order
-            // they ar map()ed in.  It might be a good idea to explicitly set the ids in a static initializer somewhere.
-            CFMetaData.fixMaxId();
             
             /* Load the seeds for node contact points */
             if (conf.seeds == null || conf.seeds.length <= 0)
@@ -484,16 +453,11 @@ public class DatabaseDescriptor
                     throw new ConfigurationException("ColumnFamily names cannot contain hyphens");
                 }
                 
-                String columnType = org.apache.cassandra.db.ColumnFamily.getColumnType(cf.column_type);
-                if (columnType == null)
-                {
-                    throw new ConfigurationException("ColumnFamily " + cf.name + " has invalid type " + cf.column_type);
-                }
-                
                 // Parse out the column comparator
                 AbstractType comparator = getComparator(cf.compare_with);
                 AbstractType subcolumnComparator = null;
-                if (columnType.equals("Super"))
+                ColumnFamilyType cfType = cf.column_type == null ? ColumnFamilyType.Standard : cf.column_type;
+                if (cfType == ColumnFamilyType.Super)
                 {
                     subcolumnComparator = getComparator(cf.compare_subcolumns_with);
                 }
@@ -506,7 +470,7 @@ public class DatabaseDescriptor
                 {                        
                     throw new ConfigurationException("read_repair_chance must be between 0.0 and 1.0");
                 }
-                cfDefs[j++] = new CFMetaData(keyspace.name, cf.name, columnType, comparator, subcolumnComparator, cf.comment, cf.rows_cached, cf.preload_row_cache, cf.keys_cached, cf.read_repair_chance);
+                cfDefs[j++] = new CFMetaData(keyspace.name, cf.name, cfType, comparator, subcolumnComparator, cf.comment, cf.rows_cached, cf.preload_row_cache, cf.keys_cached, cf.read_repair_chance);
             }
             defs.add(new KSMetaData(keyspace.name, strategyClass, keyspace.replication_factor, cfDefs));
             
@@ -691,14 +655,14 @@ public class DatabaseDescriptor
         return ksm.cfMetaData().get(cfName);
     }
     
-    public static String getColumnType(String tableName, String cfName)
+    public static ColumnFamilyType getColumnFamilyType(String tableName, String cfName)
     {
-        assert tableName != null;
+        assert tableName != null && cfName != null;
         CFMetaData cfMetaData = getCFMetaData(tableName, cfName);
         
         if (cfMetaData == null)
             return null;
-        return cfMetaData.columnType;
+        return cfMetaData.cfType;
     }
 
     public static Set<String> getTables()
@@ -710,7 +674,6 @@ public class DatabaseDescriptor
     {
         List<String> tableslist = new ArrayList<String>(tables.keySet());
         tableslist.remove(Table.SYSTEM_TABLE);
-        tableslist.remove(Table.DEFINITIONS);
         return Collections.unmodifiableList(tableslist);
     }
 
@@ -798,15 +761,6 @@ public class DatabaseDescriptor
     public static Set<InetAddress> getSeeds()
     {
         return seeds;
-    }
-
-    public static String getColumnFamilyType(String tableName, String cfName)
-    {
-        assert tableName != null;
-        String cfType = getColumnType(tableName, cfName);
-        if ( cfType == null )
-            cfType = "Standard";
-    	return cfType;
     }
 
     /*

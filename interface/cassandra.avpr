@@ -3,6 +3,11 @@
   "protocol":   "Cassandra",
 
   "types": [
+      {"name": "AccessLevel", "type": "enum",
+          "symbols": [
+            "NONE", "READONLY", "READWRITE", "FULL"
+          ]
+      },
       {"name": "ColumnPath", "type": "record",
           "fields": [
             {"name": "column_family", "type": "string"},
@@ -20,7 +25,8 @@
           "fields": [
             {"name": "name", "type": "bytes"},
             {"name": "value", "type": "bytes"},
-            {"name": "timestamp", "type": "long"}
+            {"name": "timestamp", "type": "long"},
+            {"name": "ttl", "type": ["int", "null"]}
         ]
       },
       {"name": "SuperColumn", "type": "record",
@@ -39,8 +45,8 @@
           "fields": [
             {"name": "start", "type": "bytes"},
             {"name": "finish", "type": "bytes"},
-            {"name": "reversed", "type": "boolean", "default": false},
-            {"name": "count", "type": "int", "default": 100},
+            {"name": "reversed", "type": "boolean"},
+            {"name": "count", "type": "int"},
             {"name": "bitmasks", "type": {"type": "array", "items": "bytes"}}
           ]
       },
@@ -63,6 +69,27 @@
             {"name": "column_or_supercolumn", 
                 "type": ["ColumnOrSuperColumn", "null"]},
             {"name": "deletion", "type": ["Deletion", "null"]}
+          ]
+      },
+      {"name": "CfDef", "type": "record",
+          "fields": [
+            {"name": "keyspace", "type": "string"},
+            {"name": "name", "type": "string"},
+            {"name": "column_type", "type": ["string", "null"]},
+            {"name": "comparator_type", "type": ["string", "null"]},
+            {"name": "subcomparator_type", "type": ["string", "null"]},
+            {"name": "comment", "type": ["string", "null"]},
+            {"name": "row_cache_size", "type": ["double", "null"]},
+            {"name": "preload_row_cache", "type": ["boolean", "null"]},
+            {"name": "key_cache_size", "type": ["double", "null"]}
+          ]
+      },
+      {"name": "KsDef", "type": "record",
+          "fields": [
+            {"name": "name", "type": "string"},
+            {"name": "strategy_class", "type": "string"},
+            {"name": "replication_factor", "type": "int"},
+            {"name": "cf_defs", "type": {"type": "array", "items": "CfDef"}}
           ]
       },
       {"name": "ConsistencyLevel", "type": "enum",
@@ -95,8 +122,7 @@
   "messages": {
     "get": {
         "request": [
-            {"name": "keyspace", "type": "string"},
-            {"name": "key", "type": "string"},
+            {"name": "key", "type": "bytes"},
             {"name": "column_path", "type": "ColumnPath"},
             {"name": "consistency_level", "type": "ConsistencyLevel"}
         ],
@@ -106,11 +132,9 @@
     },
     "insert": {
         "request": [
-            {"name": "keyspace", "type": "string"},
-            {"name": "key", "type": "string"},
-            {"name": "column_path", "type": "ColumnPath"},
-            {"name": "value", "type": "bytes"},
-            {"name": "timestamp", "type": "long"},
+            {"name": "key", "type": "bytes"},
+            {"name": "column_parent", "type": "ColumnParent"},
+            {"name": "column", "type": "Column"},
             {"name": "consistency_level", "type": "ConsistencyLevel"}
         ],
         "response": "null",
@@ -148,6 +172,16 @@
     "get_api_version": {
         "request": [],
         "response": "string"
+    },
+    "system_add_keyspace": {
+        "request": [{"name": "ks_def", "type": "KsDef"}],
+        "response": "null",
+        "errors": ["InvalidRequestException"]
+    },
+    "set_keyspace": {
+        "request": [{"name": "keyspace", "type": "string"}],
+        "response": "null",
+        "errors": ["InvalidRequestException"]
     }
   }
 }

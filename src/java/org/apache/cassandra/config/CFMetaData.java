@@ -24,9 +24,17 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.cassandra.db.HintedHandOffManager;
+import org.apache.cassandra.db.SystemTable;
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.TimeUUIDType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.migration.Migration;
 import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
 
+import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.Pair;
 
@@ -36,12 +44,18 @@ public final class CFMetaData
     public final static double DEFAULT_KEY_CACHE_SIZE = 200000;
     public final static double DEFAULT_ROW_CACHE_SIZE = 0.0;
     public final static boolean DEFAULT_PRELOAD_ROW_CACHE = false;
+    private static final int MIN_CF_ID = 1000;
 
-    private static final AtomicInteger idGen = new AtomicInteger(0);
+    private static final AtomicInteger idGen = new AtomicInteger(MIN_CF_ID);
     
     private static final Map<Integer, String> currentCfNames = new HashMap<Integer, String>();
     
     private static final Map<Pair<String, String>, Integer> cfIdMap = new HashMap<Pair<String, String>, Integer>();
+    
+    public static final CFMetaData StatusCf = new CFMetaData(Table.SYSTEM_TABLE, SystemTable.STATUS_CF, ColumnFamilyType.Standard, new UTF8Type(), null, "persistent metadata for the local node", 0, false, 0.01, 0);
+    public static final CFMetaData HintsCf = new CFMetaData(Table.SYSTEM_TABLE, HintedHandOffManager.HINTS_CF, ColumnFamilyType.Super, new UTF8Type(), new BytesType(), "hinted handoff data", 0, false, 0.01, 1);
+    public static final CFMetaData MigrationsCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.MIGRATIONS_CF, ColumnFamilyType.Standard, new TimeUUIDType(), null, "individual schema mutations", 0, false, 2);
+    public static final CFMetaData SchemaCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.SCHEMA_CF, ColumnFamilyType.Standard, new UTF8Type(), null, "current state of the schema", 0, false, 3);
 
     public static final Map<Pair<String, String>, Integer> getCfIdMap()
     {
@@ -65,12 +79,12 @@ public final class CFMetaData
     public static final void fixMaxId()
     {
         // never set it to less than 1000. this ensures that we have enough system CFids for future use.
-        idGen.set(cfIdMap.size() == 0 ? 1000 : Math.max(Collections.max(cfIdMap.values()) + 1, 1000));
+        idGen.set(cfIdMap.size() == 0 ? MIN_CF_ID : Math.max(Collections.max(cfIdMap.values()) + 1, MIN_CF_ID));
     }
     
     public final String tableName;            // name of table which has this column family
     public final String cfName;               // name of the column family
-    public final String columnType;           // type: super, standard, etc.
+    public final ColumnFamilyType cfType;     // type: super, standard, etc.
     public final AbstractType comparator;       // name sorted, time stamp sorted etc.
     public final AbstractType subcolumnComparator; // like comparator, for supercolumns
     public final String comment; // for humans only
@@ -81,11 +95,11 @@ public final class CFMetaData
     public boolean preloadRowCache;
 
 
-    private CFMetaData(String tableName, String cfName, String columnType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance, int cfId)
+    private CFMetaData(String tableName, String cfName, ColumnFamilyType cfType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance, int cfId)
     {
         this.tableName = tableName;
         this.cfName = cfName;
-        this.columnType = columnType;
+        this.cfType = cfType;
         this.comparator = comparator;
         this.subcolumnComparator = subcolumnComparator;
         this.comment = comment;
@@ -109,27 +123,27 @@ public final class CFMetaData
         }
     }
     
-    public CFMetaData(String tableName, String cfName, String columnType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize)
+    public CFMetaData(String tableName, String cfName, ColumnFamilyType cfType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize)
     {
-        this(tableName, cfName, columnType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, DEFAULT_READ_REPAIR_CHANCE, nextId());
+        this(tableName, cfName, cfType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, DEFAULT_READ_REPAIR_CHANCE, nextId());
     }
 
-    public CFMetaData(String tableName, String cfName, String columnType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance)
+    public CFMetaData(String tableName, String cfName, ColumnFamilyType cfType, AbstractType comparator, AbstractType subcolumnComparator, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance)
     {
-        this(tableName, cfName, columnType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, nextId());
+        this(tableName, cfName, cfType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, nextId());
     }
 
     /** clones an existing CFMetaData using the same id. */
     public static CFMetaData rename(CFMetaData cfm, String newName)
     {
-        CFMetaData newCfm = new CFMetaData(cfm.tableName, newName, cfm.columnType, cfm.comparator, cfm.subcolumnComparator, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId);
+        CFMetaData newCfm = new CFMetaData(cfm.tableName, newName, cfm.cfType, cfm.comparator, cfm.subcolumnComparator, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId);
         return newCfm;
     }
     
     /** clones existing CFMetaData. keeps the id but changes the table name.*/
     public static CFMetaData renameTable(CFMetaData cfm, String tableName)
     {
-        return new CFMetaData(tableName, cfm.cfName, cfm.columnType, cfm.comparator, cfm.subcolumnComparator, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId);
+        return new CFMetaData(tableName, cfm.cfName, cfm.cfType, cfm.comparator, cfm.subcolumnComparator, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId);
     }
     
     /** used for evicting cf data out of static tracking collections. */
@@ -143,7 +157,7 @@ public final class CFMetaData
     public String pretty()
     {
         return tableName + "." + cfName + "\n"
-               + "Column Family Type: " + columnType + "\n"
+               + "Column Family Type: " + cfType + "\n"
                + "Columns Sorted By: " + comparator + "\n";
     }
 
@@ -153,7 +167,7 @@ public final class CFMetaData
         DataOutputStream dout = new DataOutputStream(bout);
         dout.writeUTF(cfm.tableName);
         dout.writeUTF(cfm.cfName);
-        dout.writeUTF(cfm.columnType);
+        dout.writeUTF(cfm.cfType.name());
         dout.writeUTF(cfm.comparator.getClass().getName());
         dout.writeBoolean(cfm.subcolumnComparator != null);
         if (cfm.subcolumnComparator != null)
@@ -175,7 +189,7 @@ public final class CFMetaData
         DataInputStream din = new DataInputStream(in);
         String tableName = din.readUTF();
         String cfName = din.readUTF();
-        String columnType = din.readUTF();
+        ColumnFamilyType cfType = ColumnFamilyType.create(din.readUTF());
         AbstractType comparator = null;
         try
         {
@@ -200,7 +214,7 @@ public final class CFMetaData
         double keyCacheSize = din.readDouble();
         double readRepairChance = din.readDouble();
         int cfId = din.readInt();
-        return new CFMetaData(tableName, cfName, columnType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, cfId);
+        return new CFMetaData(tableName, cfName, cfType, comparator, subcolumnComparator, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, cfId);
     }
     
 
@@ -219,7 +233,7 @@ public final class CFMetaData
         return new EqualsBuilder()
             .append(tableName, rhs.tableName)
             .append(cfName, rhs.cfName)
-            .append(columnType, rhs.columnType)
+            .append(cfType, rhs.cfType)
             .append(comparator, rhs.comparator)
             .append(subcolumnComparator, rhs.subcolumnComparator)
             .append(comment, rhs.comment)
@@ -235,7 +249,7 @@ public final class CFMetaData
         return new HashCodeBuilder(29, 1597)
             .append(tableName)
             .append(cfName)
-            .append(columnType)
+            .append(cfType)
             .append(comparator)
             .append(subcolumnComparator)
             .append(comment)

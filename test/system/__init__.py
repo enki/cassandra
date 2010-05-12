@@ -190,6 +190,29 @@ class AvroTester(BaseTester):
         self.client.transceiver.conn.close()
     
     def define_schema(self):
-        pass
+        keyspace1 = dict()
+        keyspace1['name'] = 'Keyspace1'
+        keyspace1['replication_factor'] = 1
+        keyspace1['strategy_class'] = \
+                'org.apache.cassandra.locator.RackUnawareStrategy'
+
+        keyspace1['cf_defs'] = [{
+            'keyspace': 'Keyspace1',
+            'name': 'Standard1',
+        }]
+
+        keyspace1['cf_defs'].append({
+            'keyspace': 'Keyspace1',
+            'name': 'Super1',
+            'column_type': 'Super',
+            'comparator_type': 'BytesType',
+            'subcomparator_type': 'LongType',
+            'comment': '',
+            'row_cache_size': 1000,
+            'preload_row_cache': False,
+            'key_cache_size': 0
+        })
+
+        self.client.request('system_add_keyspace', {'ks_def': keyspace1})
 
 # vim:ai sw=4 ts=4 tw=0 et
