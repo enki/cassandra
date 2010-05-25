@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericArray;
@@ -50,6 +51,8 @@ import org.apache.cassandra.service.StorageProxy;
 import static org.apache.cassandra.utils.FBUtilities.UTF8;
 
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.thrift.*;
+import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import static org.apache.cassandra.avro.AvroRecordFactory.*;
@@ -195,7 +198,7 @@ public class CassandraServer implements Cassandra {
         if (reverseOrder)
             Collections.reverse(avroColumns);
         
-        // FIXME: Teach GenericData.Array how to reverse so that this iteration isn't necessary.
+        // FIXME: update for AVRO-540 when upgrading to Avro 1.4.0
         GenericArray<ColumnOrSuperColumn> avroArray = new GenericData.Array<ColumnOrSuperColumn>(avroColumns.size(), Schema.createArray(ColumnOrSuperColumn.SCHEMA$));
         for (ColumnOrSuperColumn cosc : avroColumns)
             avroArray.add(cosc);
@@ -217,8 +220,8 @@ public class CassandraServer implements Cassandra {
         
         if (reverseOrder)
             Collections.reverse(avroSuperColumns);
-        
-        // FIXME: Teach GenericData.Array how to reverse so that this iteration isn't necessary.
+
+        // FIXME: update for AVRO-540 when upgrading to Avro 1.4.0
         GenericArray<ColumnOrSuperColumn> avroArray = new GenericData.Array<ColumnOrSuperColumn>(avroSuperColumns.size(), Schema.createArray(ColumnOrSuperColumn.SCHEMA$));
         for (ColumnOrSuperColumn cosc : avroSuperColumns)
             avroArray.add(cosc);
@@ -468,11 +471,6 @@ public class CassandraServer implements Cassandra {
         return null;
     }
 
-    public Utf8 get_api_version() throws AvroRemoteException
-    {
-        return API_VERSION;
-    }
-
     @Override
     public Void set_keyspace(Utf8 keyspace) throws InvalidRequestException
     {
@@ -550,5 +548,37 @@ public class CassandraServer implements Cassandra {
         }
         
         return null;
+    }
+
+    @Override
+    public GenericArray<Utf8> describe_keyspaces() throws AvroRemoteException
+    {
+        Set<String> keyspaces = DatabaseDescriptor.getTables();
+        Schema schema = Schema.createArray(Schema.create(Schema.Type.STRING));
+        GenericArray<Utf8> avroResults = new GenericData.Array<Utf8>(keyspaces.size(), schema);
+        
+        for (String ksp : keyspaces)
+            avroResults.add(new Utf8(ksp));
+        
+        return avroResults;
+    }
+
+    @Override
+    public Utf8 describe_cluster_name() throws AvroRemoteException
+    {
+        return new Utf8(DatabaseDescriptor.getClusterName());
+    }
+    
+
+    @Override
+    public Utf8 describe_version() throws AvroRemoteException
+    {
+        return API_VERSION;
+    }
+    
+    public Map<String, List<String>> check_schema_agreement()
+    {
+        logger.debug("checking schema agreement");      
+        return StorageProxy.checkSchemaAgreement();
     }
 }

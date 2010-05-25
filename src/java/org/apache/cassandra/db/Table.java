@@ -81,8 +81,6 @@ public class Table
     public final String name;
     /* ColumnFamilyStore per column family */
     private final Map<Integer, ColumnFamilyStore> columnFamilyStores = new HashMap<Integer, ColumnFamilyStore>();
-    /* map to make it easier to look up cfs by name */
-    private final Map<String, Integer> cfNameMap = new HashMap<String, Integer>();
     // cache application CFs since Range queries ask for them a _lot_
     private SortedSet<String> applicationColumnFamilies;
     private final TimerTask flushTask;
@@ -118,11 +116,6 @@ public class Table
         }
     }
     
-    public Set<String> getColumnFamilies()
-    {
-        return cfNameMap.keySet();
-    }
-
     public Collection<ColumnFamilyStore> getColumnFamilyStores()
     {
         return Collections.unmodifiableCollection(columnFamilyStores.values());
@@ -130,7 +123,10 @@ public class Table
 
     public ColumnFamilyStore getColumnFamilyStore(String cfName)
     {
-        return columnFamilyStores.get(cfNameMap.get(cfName));
+        Integer id = CFMetaData.getId(name, cfName);
+        if (id == null)
+            throw new IllegalArgumentException(String.format("Unknown table/cf pair (%s.%s)", name, cfName));
+        return columnFamilyStores.get(id);
     }
 
     /**
@@ -261,8 +257,7 @@ public class Table
         for (CFMetaData cfm : DatabaseDescriptor.getTableDefinition(table).cfMetaData().values())
         {
             columnFamilyStores.put(cfm.cfId, ColumnFamilyStore.createColumnFamilyStore(table, cfm.cfName));
-            cfNameMap.put(cfm.cfName, cfm.cfId);
-        }
+         }
 
         // check 10x as often as the lifetime, so we can exceed lifetime by 10% at most
         int checkMs = DatabaseDescriptor.getMemtableLifetimeMS() / 10;
@@ -286,7 +281,6 @@ public class Table
         ColumnFamilyStore cfs = columnFamilyStores.remove(cfId);
         if (cfs != null)
         {
-            cfNameMap.remove(cfs.getColumnFamilyName());
             try
             {
                 cfs.forceBlockingFlush();
@@ -307,7 +301,6 @@ public class Table
     {
         assert !columnFamilyStores.containsKey(cfId) : cfId;
         columnFamilyStores.put(cfId, ColumnFamilyStore.createColumnFamilyStore(name, cfName));
-        cfNameMap.put(cfName, cfId);
     }
     
     /** basically a combined drop and add */
@@ -319,7 +312,7 @@ public class Table
 
     public Row getRow(QueryFilter filter) throws IOException
     {
-        ColumnFamilyStore cfStore = columnFamilyStores.get(cfNameMap.get(filter.getColumnFamilyName()));
+        ColumnFamilyStore cfStore = getColumnFamilyStore(filter.getColumnFamilyName());
         ColumnFamily columnFamily = cfStore.getColumnFamily(filter);
         return new Row(filter.key, columnFamily);
     }
@@ -349,7 +342,7 @@ public class Table
                 ColumnFamilyStore cfs = columnFamilyStores.get(columnFamily.id());
                 if (cfs == null)
                 {
-                    logger.error("Attempting to mutate non-existant column family " + columnFamily.name());
+                    logger.error("Attempting to mutate non-existant column family " + columnFamily.id());
                 }
                 else
                 {
@@ -393,7 +386,7 @@ public class Table
             Collection<IColumn> columns = columnFamily.getSortedColumns();
             for (IColumn column : columns)
             {
-                ColumnFamilyStore cfStore = columnFamilyStores.get(cfNameMap.get(new String(column.name(), "UTF-8")));
+                ColumnFamilyStore cfStore = getColumnFamilyStore(new String(column.name(), "UTF-8"));
                 cfStore.applyBinary(key, column.value());
             }
         }

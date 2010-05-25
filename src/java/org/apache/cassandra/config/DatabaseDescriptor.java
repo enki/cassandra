@@ -32,6 +32,7 @@ import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.cassandra.locator.IEndpointSnitch;
@@ -42,7 +43,9 @@ import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.error.YAMLException;
 
 import java.io.File;
+import java.io.FileFilter;
 import java.io.FileInputStream;
+import java.io.FilenameFilter;
 import java.io.IOError;
 import java.io.IOException;
 import java.io.InputStream;
@@ -84,7 +87,7 @@ public class DatabaseDescriptor
 
     private final static String STORAGE_CONF_FILE = "cassandra.yaml";
 
-    private static final UUID INITIAL_VERSION = new UUID(4096, 0); // has type nibble set to 1, everything else to zero.
+    public static final UUID INITIAL_VERSION = new UUID(4096, 0); // has type nibble set to 1, everything else to zero.
     private static UUID defsVersion = INITIAL_VERSION;
 
     /**
@@ -365,7 +368,39 @@ public class DatabaseDescriptor
         // don't load from xml anymore.
         UUID uuid = Migration.getLastMigrationId();
         if (uuid == null)
-            logger.warn("Couldn't detect any schema definitions in local storage. I hope you've got a plan.");
+        {
+            logger.info("Couldn't detect any schema definitions in local storage.");
+            // peek around the data directories to see if anything is there.
+            boolean hasExistingTables = false;
+            for (String dataDir : DatabaseDescriptor.getAllDataFileLocations())
+            {
+                File dataPath = new File(dataDir);
+                if (dataPath.exists() && dataPath.isDirectory())
+                {
+                    // see if there are other directories present.
+                    int dirCount = dataPath.listFiles(new FileFilter()
+                    {
+                        @Override
+                        public boolean accept(File pathname)
+                        {
+                            return pathname.isDirectory();
+                        }
+                    }).length;
+                    if (dirCount > 0)
+                        hasExistingTables = true;
+                }
+                if (hasExistingTables)
+                {
+                    break;
+                }
+            }
+            
+            if (hasExistingTables)
+                logger.info("Found table data in data directories. Consider using JMX to call org.apache.cassandra.service.StorageService.loadSchemaFromYaml().");
+            else
+                logger.info("Consider using JMX to org.apache.cassandra.service.StorageService.loadSchemaFromYaml() or set up a schema using the system_* calls provided via thrift.");
+            
+        }
         else
         {
             logger.info("Loading schema version " + uuid.toString());
@@ -388,9 +423,9 @@ public class DatabaseDescriptor
                 Table.open(def.name);
             }
             
-            // since we loaded definitions from local storage, log a warning if definitions exist in xml.
+            // since we loaded definitions from local storage, log a warning if definitions exist in yaml.
             
-            if (conf.keyspaces.size() > 0)
+            if (conf.keyspaces != null && conf.keyspaces.size() > 0)
                 logger.warn("Schema definitions were defined both locally and in " + STORAGE_CONF_FILE +
                     ". Definitions in " + STORAGE_CONF_FILE + " were ignored.");
             
@@ -655,6 +690,14 @@ public class DatabaseDescriptor
         return ksm.cfMetaData().get(cfName);
     }
     
+    public static CFMetaData getCFMetaData(int cfid)
+    {
+        Pair<String,String> cf = CFMetaData.getCF(cfid);
+        if (cf == null)
+            return null;
+        return getCFMetaData(cf.left, cf.right);
+    }
+
     public static ColumnFamilyType getColumnFamilyType(String tableName, String cfName)
     {
         assert tableName != null && cfName != null;

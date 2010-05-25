@@ -5,8 +5,8 @@
 # name of the cluster
 cluster_name: 'Dev Cluster'
 
-# Set to true to make new [non-seed] nodes automatically migrate the
-# right data to themselves.
+# Set to true to make new [non-seed] nodes automatically migrate data
+# to themselves from the pre-existing nodes in the cluster.
 auto_bootstrap: true
 
 # See http://wiki.apache.org/cassandra/HintedHandoff
@@ -24,7 +24,7 @@ partitioner: org.apache.cassandra.dht.RandomPartitioner
 
 # directories where Cassandra should store data on disk.
 data_file_directories:
-    - /var/lib/cassandra/data
+	    - /var/lib/cassandra/data
 
 # Addresses of hosts that are deemed contact points. 
 # Cassandra nodes use this list of hosts to find each other and learn

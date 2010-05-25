@@ -53,6 +53,10 @@ except ImportError:
     print "Cassandra thrift bindings not found, please run 'ant gen-thrift-py'"
     sys.exit(2)
 
+try:
+    from thrift.protocol import fastbinary
+except ImportError:
+    print "WARNING: thrift binary extension not found, benchmark will not be accurate!"
 
 parser = OptionParser()
 parser.add_option('-n', '--num-keys', type="int", dest="numkeys",
@@ -87,7 +91,7 @@ parser.add_option('-i', '--progress-interval', type="int", default=10,
                   dest="interval", help="progress report interval (seconds)")
 parser.add_option('-g', '--get-range-slice-count', type="int", default=1000,
                   dest="rangecount",
-                  help="amount of keys to get_range_slice per call")
+                  help="amount of keys to get_range_slices per call")
 
 (options, args) = parser.parse_args()
  
@@ -249,14 +253,13 @@ class RangeSlicer(Operation):
         p = SlicePredicate(slice_range=SliceRange('', '', False, columns_per_key))
         if 'super' == options.cftype:
             while current < end:
-                start = fmt % current
-                finish = fmt % last
+                keyrange = KeyRange(fmt % current, fmt % last, count = options.rangecount)
                 res = []
                 for j in xrange(supers_per_key):
                     parent = ColumnParent('Super1', chr(ord('A') + j)) 
                     begin = time.time()
                     try:
-                        res = self.cclient.get_range_slice(parent, p, start,finish, options.rangecount, ConsistencyLevel.ONE)
+                        res = self.cclient.get_range_slices(parent, p, keyrange, ConsistencyLevel.ONE)
                         if not res: raise RuntimeError("Key %s not found" % key)
                     except KeyboardInterrupt:
                         raise
@@ -275,9 +278,10 @@ class RangeSlicer(Operation):
             while current < end:
                 start = fmt % current 
                 finish = fmt % last
+                keyrange = KeyRange(start, finish, count = options.rangecount)
                 begin = time.time()
                 try:
-                    r = self.cclient.get_range_slice(parent, p, start, finish, options.rangecount, ConsistencyLevel.ONE)
+                    r = self.cclient.get_range_slices(parent, p, keyrange, ConsistencyLevel.ONE)
                     if not r: raise RuntimeError("Range not found:", start, finish)
                 except KeyboardInterrupt:
                     raise

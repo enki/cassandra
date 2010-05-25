@@ -199,7 +199,7 @@ struct ColumnPath {
                   must a valid value under the rules of the Comparator defined for the given ColumnFamily.
     @param finish. The column name to stop the slice at. This attribute is not required, though there is no default value,
                    and can be safely set to an empty byte array to not stop until 'count' results are seen. Otherwise, it
-                   must also be a value value to the ColumnFamily Comparator.
+                   must also be a valid value to the ColumnFamily Comparator.
     @param reversed. Whether the results should be ordered in reversed order. Similar to ORDER BY blah DESC in SQL.
     @param count. How many keys to return. Similar to LIMIT 100 in SQL. May be arbitrarily large, but Thrift will
                   materialize the whole result into memory before returning it to the client, so be aware that you may
@@ -435,6 +435,14 @@ service Cassandra {
     
   // Meta-APIs -- APIs to get information about the node or cluster,
   // rather than user data.  The nodeprobe program provides usage examples.
+  
+  /** 
+   * ask the cluster if they all are using the same migration id. returns a map of version->hosts-on-that-version.
+   * hosts that did not respond will be under the key DatabaseDescriptor.INITIAL_VERSION. agreement can be determined
+   * by checking if the size of the map is 1. 
+   */
+  map<string, list<string>> check_schema_agreement()
+       throws (1: InvalidRequestException ire),
 
   /** list the defined keyspaces in this cluster */
   set<string> describe_keyspaces(),
@@ -467,23 +475,29 @@ service Cassandra {
   list<string> describe_splits(1:required string start_token, 
   	                           2:required string end_token,
                                3:required i32 keys_per_split),
-  
-  void system_add_column_family(1:required CfDef cf_def)
+
+  /** adds a column family. returns the new schema id. */
+  string system_add_column_family(1:required CfDef cf_def)
     throws (1:InvalidRequestException ire),
     
-  void system_drop_column_family(1:required string keyspace, 2:required string column_family)
+  /** drops a column family. returns the new schema id. */
+  string system_drop_column_family(1:required string keyspace, 2:required string column_family)
     throws (1:InvalidRequestException ire), 
     
-  void system_rename_column_family(1:required string keyspace, 2:required string old_name, 3:required string new_name)
+  /** renames a column family. returns the new schema id. */
+  string system_rename_column_family(1:required string keyspace, 2:required string old_name, 3:required string new_name)
     throws (1:InvalidRequestException ire),
   
-  void system_add_keyspace(1:required KsDef ks_def)
+  /** adds a keyspace and any column families that are part of it. returns the new schema id. */
+  string system_add_keyspace(1:required KsDef ks_def)
     throws (1:InvalidRequestException ire),
   
-  void system_drop_keyspace(1:required string keyspace)
+  /** drops a keyspace and any column families that are part of it. returns the new schema id. */
+  string system_drop_keyspace(1:required string keyspace)
     throws (1:InvalidRequestException ire),
     
-  void system_rename_keyspace(1:required string old_name, 2:required string new_name)
+  /** renames a keyspace. returns the new schema id. */
+  string system_rename_keyspace(1:required string old_name, 2:required string new_name)
     throws (1:InvalidRequestException ire),
   
 }

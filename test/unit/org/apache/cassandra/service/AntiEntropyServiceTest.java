@@ -41,6 +41,7 @@ import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.config.DatabaseDescriptorTest;
 import org.apache.cassandra.Util;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -63,7 +64,7 @@ public class AntiEntropyServiceTest extends CleanupHelper
         StorageService.instance.initServer();
         // generate a fake endpoint for which we can spoof receiving/sending trees
         REMOTE = InetAddress.getByName("127.0.0.2");
-        cfname = Table.open(tablename).getColumnFamilies().iterator().next();
+        cfname = Table.open(tablename).getColumnFamilyStores().iterator().next().columnFamily_;
     }
 
     @Before
@@ -75,6 +76,16 @@ public class AntiEntropyServiceTest extends CleanupHelper
         tmd.updateNormalToken(StorageService.getPartitioner().getRandomToken(), LOCAL);
         tmd.updateNormalToken(StorageService.getPartitioner().getMinimumToken(), REMOTE);
         assert tmd.isMember(REMOTE);
+    }
+
+    @After
+    public void teardown() throws Exception
+    {
+        // block for AES to clear before we teardown the token metadata for the next test.
+        StageManager.getStage(StageManager.AE_SERVICE_STAGE).submit(new Runnable()
+        {
+            public void run() { /* no-op */ }
+        }).get();
     }
 
     @Test
@@ -182,6 +193,25 @@ public class AntiEntropyServiceTest extends CleanupHelper
     }
 
     @Test
+    public void testManualRepair() throws Throwable
+    {
+        AntiEntropyService.RepairSession sess = AntiEntropyService.instance.getRepairSession(tablename, cfname);
+        sess.start();
+        sess.blockUntilRunning();
+
+        // ensure that the session doesn't end without a response from REMOTE
+        sess.join(100);
+        assert sess.isAlive();
+
+        // deliver fake responses from LOCAL and REMOTE
+        AntiEntropyService.instance.completedRequest(new CFPair(tablename, cfname), LOCAL);
+        AntiEntropyService.instance.completedRequest(new CFPair(tablename, cfname), REMOTE);
+
+        // block until the repair has completed
+        sess.join();
+    }
+
+    @Test
     public void testNotifyNeighbors() throws Throwable
     {
         // generate empty tree
@@ -231,13 +261,13 @@ public class AntiEntropyServiceTest extends CleanupHelper
     public void testDifferencer() throws Throwable
     {
         // generate a tree
-        Validator validator = new Validator(new CFPair("Keyspace1", "lcf"));
+        Validator validator = new Validator(new CFPair(tablename, cfname));
         validator.prepare();
-
-        // create a clone with no values filled
         validator.complete();
         MerkleTree ltree = validator.tree;
-        validator = new Validator(new CFPair("Keyspace1", "rcf"));
+
+        // and a clone
+        validator = new Validator(new CFPair(tablename, cfname));
         validator.prepare();
         validator.complete();
         MerkleTree rtree = validator.tree;

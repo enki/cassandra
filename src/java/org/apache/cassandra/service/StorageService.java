@@ -50,7 +50,6 @@ import org.apache.cassandra.locator.*;
 import org.apache.cassandra.net.*;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
-import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
@@ -112,6 +111,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         DEFINITIONS_ANNOUNCE,
         DEFINITIONS_UPDATE_RESPONSE,
         TRUNCATE,
+        SCHEMA_CHECK,
         ;
         // remember to add new verbs at the end, since we serialize by ordinal
     }
@@ -237,6 +237,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_ANNOUNCE, new DefinitionsAnnounceVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_UPDATE_RESPONSE, new DefinitionsUpdateResponseVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.TRUNCATE, new TruncateVerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.SCHEMA_CHECK, new SchemaCheckVerbHandler());
 
         replicationStrategies = new HashMap<String, AbstractReplicationStrategy>();
         for (String table : DatabaseDescriptor.getNonSystemTables())
@@ -923,11 +924,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         for (String tableName : DatabaseDescriptor.getTables())
         {
             Table table = Table.open(tableName);
-            for (String cfName : table.getColumnFamilies())
-            {
-                ColumnFamilyStore cfs = table.getColumnFamilyStore(cfName);
+            for (ColumnFamilyStore cfs : table.getColumnFamilyStores())
                 bytes += cfs.getLiveDiskSpaceUsed();
-            }
         }
         return bytes;
     }
@@ -1065,12 +1063,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.debug("Cleared out all snapshot directories");
     }
 
-    public Iterable<ColumnFamilyStore> getValidColumnFamilies(String tableName, String... columnFamilies) throws IOException
+    public Iterable<ColumnFamilyStore> getValidColumnFamilies(String tableName, String... cfNames) throws IOException
     {
         Table table = getValidTable(tableName);
-        Set<ColumnFamilyStore> valid = new HashSet<ColumnFamilyStore>();
 
-        for (String cfName : columnFamilies.length == 0 ? table.getColumnFamilies() : Arrays.asList(columnFamilies))
+        if (cfNames.length == 0)
+            // all stores are interesting
+            return table.getColumnFamilyStores();
+
+        // filter out interesting stores
+        Set<ColumnFamilyStore> valid = new HashSet<ColumnFamilyStore>();
+        for (String cfName : cfNames)
         {
             ColumnFamilyStore cfStore = table.getColumnFamilyStore(cfName);
             if (cfStore == null)
@@ -1109,15 +1112,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public void forceTableRepair(final String tableName, final String... columnFamilies) throws IOException
     {
-        // request that all relevant endpoints generate trees
-        final MessagingService ms = MessagingService.instance;
-        final Set<InetAddress> endpoints = AntiEntropyService.getNeighbors(tableName);
-        endpoints.add(FBUtilities.getLocalAddress());
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
+        AntiEntropyService.RepairSession sess = AntiEntropyService.instance.getRepairSession(tableName, columnFamilies);
+        
+        try
         {
-            Message request = TreeRequestVerbHandler.makeVerb(tableName, cfStore.getColumnFamilyName());
-            for (InetAddress endpoint : endpoints)
-                ms.sendOneWay(request, endpoint);
+            sess.start();
+            // block until the repair has completed
+            sess.join();
+        }
+        catch (InterruptedException e)
+        {
+            throw new IOException("Repair session " + sess + " failed.", e);
         }
     }
 
@@ -1331,7 +1336,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     private void startLeaving()
     {
-        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEAVING + Delimiter + getLocalToken().toString()));
+        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEAVING + Delimiter + partitioner_.getTokenFactory().toString(getLocalToken())));
         tokenMetadata_.addLeavingEndpoint(FBUtilities.getLocalAddress());
         calculatePendingRanges();
     }
@@ -1374,7 +1379,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         tokenMetadata_.removeEndpoint(FBUtilities.getLocalAddress());
         calculatePendingRanges();
 
-        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEFT + Delimiter + LEFT_NORMALLY + Delimiter + getLocalToken().toString()));
+        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEFT + Delimiter + LEFT_NORMALLY + Delimiter + partitioner_.getTokenFactory().toString(getLocalToken())));
         try
         {
             Thread.sleep(2 * Gossiper.intervalInMillis_);
@@ -1518,12 +1523,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // not good. REMOVE_TOKEN|LEFT_NORMALLY is used to distinguish
         // between ``removetoken command and normal state left, so it is
         // not so bad.
-        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEFT + Delimiter + REMOVE_TOKEN + Delimiter + token.toString()));
-    }
-
-    public WriteResponseHandler getWriteResponseHandler(int blockFor, ConsistencyLevel consistency_level, String table)
-    {
-        return getReplicationStrategy(table).getWriteResponseHandler(blockFor, consistency_level, table);
+        Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_LEFT + Delimiter + REMOVE_TOKEN + Delimiter + partitioner_.getTokenFactory().toString(token)));
     }
 
     public boolean isClientMode()
