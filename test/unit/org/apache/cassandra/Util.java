@@ -27,6 +27,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 
+import org.apache.cassandra.db.filter.IdentityQueryFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.commons.lang.ArrayUtils;
 
@@ -44,9 +45,9 @@ public class Util
         return StorageService.getPartitioner().decorateKey(key.getBytes(UTF8));
     }
 
-    public static Column column(String name, String value, long timestamp)
+    public static Column column(String name, String value, IClock clock)
     {
-        return new Column(name.getBytes(), value.getBytes(), timestamp);
+        return new Column(name.getBytes(), value.getBytes(), clock);
     }
 
     public static Range range(IPartitioner p, String left, String right)
@@ -54,9 +55,9 @@ public class Util
         return new Range(p.getToken(left.getBytes()), p.getToken(right.getBytes()));
     }
 
-    public static void addMutation(RowMutation rm, String columnFamilyName, String superColumnName, long columnName, String value, long timestamp)
+    public static void addMutation(RowMutation rm, String columnFamilyName, String superColumnName, long columnName, String value, IClock clock)
     {
-        rm.add(new QueryPath(columnFamilyName, superColumnName.getBytes(), getBytes(columnName)), value.getBytes(), timestamp);
+        rm.add(new QueryPath(columnFamilyName, superColumnName.getBytes(), getBytes(columnName)), value.getBytes(), clock);
     }
 
     public static byte[] getBytes(long v)
@@ -67,14 +68,13 @@ public class Util
         return bytes;
     }
     
-    public static RangeSliceReply getRangeSlice(ColumnFamilyStore cfs) throws IOException, ExecutionException, InterruptedException
+    public static List<Row> getRangeSlice(ColumnFamilyStore cfs) throws IOException, ExecutionException, InterruptedException
     {
         Token min = StorageService.getPartitioner().getMinimumToken();
         return cfs.getRangeSlice(null,
                                  new Bounds(min, min),
                                  10000,
-                                 new SliceRange(ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, false, 10000),
-                                 null);
+                                 new IdentityQueryFilter());
     }
 
     /**

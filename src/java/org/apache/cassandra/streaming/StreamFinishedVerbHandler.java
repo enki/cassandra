@@ -44,7 +44,7 @@ public class StreamFinishedVerbHandler implements IVerbHandler
 
         try
         {
-            CompletedFileStatus streamStatus = CompletedFileStatus.serializer().deserialize(new DataInputStream(bufIn));
+            FileStatus streamStatus = FileStatus.serializer().deserialize(new DataInputStream(bufIn));
 
             switch (streamStatus.getAction())
             {
@@ -53,13 +53,12 @@ public class StreamFinishedVerbHandler implements IVerbHandler
                     break;
 
                 case STREAM:
-                    if (logger.isDebugEnabled())
-                        logger.debug("Need to re-stream file " + streamStatus.getFile());
+                    logger.warn("Need to re-stream file " + streamStatus.getFile() + " to " + message.getFrom());
                     StreamOutManager.get(message.getFrom()).startNext();
                     break;
 
                 default:
-                    break;
+                    throw new RuntimeException("Cannot handle FileStatus.Action: " + streamStatus.getAction());
             }
         }
         catch (IOException ex)

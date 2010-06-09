@@ -33,7 +33,7 @@ public class IncomingStreamReader
 {
     private static Logger logger = LoggerFactory.getLogger(IncomingStreamReader.class);
     private PendingFile pendingFile;
-    private CompletedFileStatus streamStatus;
+    private FileStatus streamStatus;
     private SocketChannel socketChannel;
 
     public IncomingStreamReader(SocketChannel socketChannel)
@@ -68,8 +68,8 @@ public class IncomingStreamReader
         catch (IOException ex)
         {
             /* Ask the source node to re-stream this file. */
-            streamStatus.setAction(CompletedFileStatus.StreamCompletionAction.STREAM);
-            handleStreamCompletion(remoteAddress.getAddress());
+            streamStatus.setAction(FileStatus.Action.STREAM);
+            handleFileStatus(remoteAddress.getAddress());
             /* Delete the orphaned file. */
             File file = new File(pendingFile.getFilename());
             file.delete();
@@ -84,22 +84,21 @@ public class IncomingStreamReader
         if (bytesRead == pendingFile.getExpectedBytes())
         {
             if (logger.isDebugEnabled())
-            {
                 logger.debug("Removing stream context " + pendingFile);
-            }
             fc.close();
-            handleStreamCompletion(remoteAddress.getAddress());
+            streamStatus.setAction(FileStatus.Action.DELETE);
+            handleFileStatus(remoteAddress.getAddress());
         }
     }
 
-    private void handleStreamCompletion(InetAddress remoteHost) throws IOException
+    private void handleFileStatus(InetAddress remoteHost) throws IOException
     {
         /*
          * Streaming is complete. If all the data that has to be received inform the sender via
          * the stream completion callback so that the source may perform the requisite cleanup.
         */
-        IStreamComplete streamComplete = StreamInManager.getStreamCompletionHandler(remoteHost);
-        if (streamComplete != null)
-            streamComplete.onStreamCompletion(remoteHost, pendingFile, streamStatus);
+        FileStatusHandler handler = StreamInManager.getFileStatusHandler(remoteHost);
+        if (handler != null)
+            handler.onStatusChange(remoteHost, pendingFile, streamStatus);
     }
 }

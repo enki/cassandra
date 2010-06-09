@@ -39,6 +39,8 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.clock.AbstractReconciler;
+import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.dht.AbstractBounds;
@@ -93,10 +95,6 @@ public class CassandraServer implements Cassandra.Iface
         {
             throw new InvalidRequestException("Consistency level zero may not be applied to read operations");
         }
-        if (consistency_level == ConsistencyLevel.ALL)
-        {
-            throw new InvalidRequestException("Consistency level all is not yet supported on read operations");
-        }
         if (consistency_level == ConsistencyLevel.ANY)
         {
             throw new InvalidRequestException("Consistency level any may not be applied to read operations");
@@ -137,7 +135,7 @@ public class CassandraServer implements Cassandra.Iface
             {
                 continue;
             }
-            Column thrift_column = new Column(column.name(), column.value(), column.timestamp());
+            Column thrift_column = new Column(column.name(), column.value(), thriftifyIClock(column.clock()));
             if (column instanceof ExpiringColumn)
             {
                 thrift_column.setTtl(((ExpiringColumn) column).getTimeToLive());
@@ -157,7 +155,7 @@ public class CassandraServer implements Cassandra.Iface
             {
                 continue;
             }
-            Column thrift_column = new Column(column.name(), column.value(), column.timestamp());
+            Column thrift_column = new Column(column.name(), column.value(), thriftifyIClock(column.clock()));
             if (column instanceof ExpiringColumn)
             {
                 thrift_column.setTtl(((ExpiringColumn) column).getTimeToLive());
@@ -191,6 +189,16 @@ public class CassandraServer implements Cassandra.Iface
             Collections.reverse(thriftSuperColumns);
 
         return thriftSuperColumns;
+    }
+
+    private static Clock thriftifyIClock(IClock clock)
+    {
+        Clock thrift_clock = new Clock();
+        if (clock instanceof TimestampClock)
+        {
+            thrift_clock.setTimestamp(((TimestampClock)clock).timestamp());
+        }
+        return thrift_clock;
     }
 
     private Map<byte[], List<ColumnOrSuperColumn>> getSlice(List<ReadCommand> commands, ConsistencyLevel consistency_level)
@@ -344,11 +352,12 @@ public class CassandraServer implements Cassandra.Iface
         ThriftValidation.validateKey(key);
         ThriftValidation.validateColumnParent(keySpace.get(), column_parent);
         ThriftValidation.validateColumn(keySpace.get(), column_parent, column);
+        IClock cassandra_clock = ThriftValidation.validateClock(column.clock);
 
         RowMutation rm = new RowMutation(keySpace.get(), key);
         try
         {
-            rm.add(new QueryPath(column_parent.column_family, column_parent.super_column, column.name), column.value, column.timestamp, column.ttl);
+            rm.add(new QueryPath(column_parent.column_family, column_parent.super_column, column.name), column.value, cassandra_clock, column.ttl);
         }
         catch (MarshalException e)
         {
@@ -418,7 +427,7 @@ public class CassandraServer implements Cassandra.Iface
         }
     }
 
-    public void remove(byte[] key, ColumnPath column_path, long timestamp, ConsistencyLevel consistency_level)
+    public void remove(byte[] key, ColumnPath column_path, Clock clock, ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TimedOutException
     {
         if (logger.isDebugEnabled())
@@ -428,9 +437,11 @@ public class CassandraServer implements Cassandra.Iface
 
         ThriftValidation.validateKey(key);
         ThriftValidation.validateColumnPathOrParent(keySpace.get(), column_path);
-        
+
+        IClock cassandra_clock = ThriftValidation.validateClock(clock);
+
         RowMutation rm = new RowMutation(keySpace.get(), key);
-        rm.delete(new QueryPath(column_path), timestamp);
+        rm.delete(new QueryPath(column_path), cassandra_clock);
 
         doInsert(consistency_level, rm);
     }
@@ -469,6 +480,7 @@ public class CassandraServer implements Cassandra.Iface
 
             Map<String, String> columnMap = new HashMap<String, String>();
             columnMap.put("Type", columnFamilyMetaData.cfType.name());
+            columnMap.put("ClockType", columnFamilyMetaData.clockType.name());
             columnMap.put("Desc", columnFamilyMetaData.comment == null ? columnFamilyMetaData.pretty() : columnFamilyMetaData.comment);
             columnMap.put("CompareWith", columnFamilyMetaData.comparator.getClass().getName());
             if (columnFamilyMetaData.cfType == ColumnFamilyType.Super)
@@ -547,26 +559,29 @@ public class CassandraServer implements Cassandra.Iface
         return Constants.VERSION;
     }
 
-    public List<TokenRange> describe_ring(String keyspace)
+    public List<TokenRange> describe_ring(String keyspace)throws InvalidRequestException
     {
+        if (!DatabaseDescriptor.getNonSystemTables().contains(keyspace))
+            throw new InvalidRequestException("There is no ring for the keyspace: " + keyspace);
         List<TokenRange> ranges = new ArrayList<TokenRange>();
+        Token.TokenFactory tf = StorageService.getPartitioner().getTokenFactory();
         for (Map.Entry<Range, List<String>> entry : StorageService.instance.getRangeToEndpointMap(keyspace).entrySet())
         {
             Range range = entry.getKey();
             List<String> endpoints = entry.getValue();
-            ranges.add(new TokenRange(range.left.toString(), range.right.toString(), endpoints));
+            ranges.add(new TokenRange(tf.toString(range.left), tf.toString(range.right), endpoints));
         }
         return ranges;
     }
 
-    public List<String> describe_splits(String start_token, String end_token, int keys_per_split) throws TException
+    public List<String> describe_splits(String keyspace, String cfName, String start_token, String end_token, int keys_per_split) throws TException
     {
         Token.TokenFactory tf = StorageService.getPartitioner().getTokenFactory();
-        List<Token> tokens = StorageService.instance.getSplits(new Range(tf.fromString(start_token), tf.fromString(end_token)), keys_per_split);
+        List<Token> tokens = StorageService.instance.getSplits(keyspace, cfName, new Range(tf.fromString(start_token), tf.fromString(end_token)), keys_per_split);
         List<String> splits = new ArrayList<String>(tokens.size());
         for (Token token : tokens)
         {
-            splits.add(token.toString());
+            splits.add(tf.toString(token));
         }
         return splits;
     }
@@ -587,6 +602,15 @@ public class CassandraServer implements Cassandra.Iface
         
         loginDone.set(level);
         return level;
+    }
+
+    public void logout()
+    {
+        keySpace.remove();
+        loginDone.remove();
+
+        if (logger.isDebugEnabled())
+            logger.debug("logout complete");
     }
 
     protected void checkKeyspaceAndLoginAuthorized(AccessLevel level) throws InvalidRequestException
@@ -615,22 +639,7 @@ public class CassandraServer implements Cassandra.Iface
         
         try
         {
-            ColumnFamilyType cfType = ColumnFamilyType.create(cf_def.column_type);
-            if (cfType == null)
-            {
-              throw new InvalidRequestException("Invalid column type " + cf_def.column_type);
-            }
-            CFMetaData cfm = new CFMetaData(
-                        cf_def.table,
-                        cf_def.name,
-                        cfType,
-                        DatabaseDescriptor.getComparator(cf_def.comparator_type),
-                        cf_def.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cf_def.subcomparator_type),
-                        cf_def.comment,
-                        cf_def.row_cache_size,
-                        cf_def.preload_row_cache,
-                        cf_def.key_cache_size);
-            AddColumnFamily add = new AddColumnFamily(cfm);
+            AddColumnFamily add = new AddColumnFamily(convertToCFMetaData(cf_def));
             add.apply();
             add.announce();
             return DatabaseDescriptor.getDefsVersion().toString();
@@ -649,7 +658,7 @@ public class CassandraServer implements Cassandra.Iface
         }
     }
 
-    public String system_drop_column_family(String keyspace, String column_family) throws InvalidRequestException, TException
+    public String system_drop_column_family(String column_family) throws InvalidRequestException, TException
     {
         checkKeyspaceAndLoginAuthorized(AccessLevel.FULL);
         
@@ -659,7 +668,7 @@ public class CassandraServer implements Cassandra.Iface
 
         try
         {
-            DropColumnFamily drop = new DropColumnFamily(keyspace, column_family, true);
+            DropColumnFamily drop = new DropColumnFamily(keySpace.get(), column_family, true);
             drop.apply();
             drop.announce();
             return DatabaseDescriptor.getDefsVersion().toString();
@@ -678,7 +687,7 @@ public class CassandraServer implements Cassandra.Iface
         }
     }
 
-    public String system_rename_column_family(String keyspace, String old_name, String new_name) throws InvalidRequestException, TException
+    public String system_rename_column_family(String old_name, String new_name) throws InvalidRequestException, TException
     {
         checkKeyspaceAndLoginAuthorized(AccessLevel.FULL);
         
@@ -688,7 +697,7 @@ public class CassandraServer implements Cassandra.Iface
 
         try
         {
-            RenameColumnFamily rename = new RenameColumnFamily(keyspace, old_name, new_name);
+            RenameColumnFamily rename = new RenameColumnFamily(keySpace.get(), old_name, new_name);
             rename.apply();
             rename.announce();
             return DatabaseDescriptor.getDefsVersion().toString();
@@ -724,22 +733,7 @@ public class CassandraServer implements Cassandra.Iface
             Collection<CFMetaData> cfDefs = new ArrayList<CFMetaData>(ks_def.cf_defs.size());
             for (CfDef cfDef : ks_def.cf_defs)
             {
-                ColumnFamilyType cfType = ColumnFamilyType.create(cfDef.column_type);
-                if (cfType == null)
-                {
-                    throw new InvalidRequestException("Invalid column type " + cfDef.column_type);
-                }
-                CFMetaData cfm = new CFMetaData(
-                        cfDef.table,
-                        cfDef.name,
-                        cfType,
-                        DatabaseDescriptor.getComparator(cfDef.comparator_type),
-                        cfDef.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cfDef.subcomparator_type),
-                        cfDef.comment,
-                        cfDef.row_cache_size,
-                        cfDef.preload_row_cache,
-                        cfDef.key_cache_size);
-                cfDefs.add(cfm);
+                cfDefs.add(convertToCFMetaData(cfDef));
             }
             
             KSMetaData ksm = new KSMetaData(
@@ -829,15 +823,50 @@ public class CassandraServer implements Cassandra.Iface
             throw ex;
         }
     }
-
-    @Override
-    public void truncate(String keyspace, String cfname) throws InvalidRequestException, UnavailableException, TException
+    
+    private CFMetaData convertToCFMetaData(CfDef cf_def) throws InvalidRequestException, ConfigurationException
     {
-        logger.debug("truncating {} in {}", cfname, keyspace);
+        ColumnFamilyType cfType = ColumnFamilyType.create(cf_def.column_type);
+        if (cfType == null)
+        {
+          throw new InvalidRequestException("Invalid column type " + cf_def.column_type);
+        }
+        ClockType clockType = ClockType.create(cf_def.clock_type);
+        if (clockType == null)
+        {
+            throw new InvalidRequestException("Invalid clock type " + cf_def.clock_type);
+        }
+        AbstractReconciler reconciler = DatabaseDescriptor.getReconciler(cf_def.reconciler);
+        if (reconciler == null)
+        {
+            if (clockType == ClockType.Timestamp)    
+                reconciler = new TimestampReconciler(); // default
+            else
+                throw new ConfigurationException("No reconciler specified for column family " + cf_def.name);
+
+        }
+        
+        return new CFMetaData(
+                    cf_def.table,
+                    cf_def.name,
+                    cfType,
+                    clockType,
+                    DatabaseDescriptor.getComparator(cf_def.comparator_type),
+                    cf_def.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cf_def.subcomparator_type),
+                    reconciler,
+                    cf_def.comment,
+                    cf_def.row_cache_size,
+                    cf_def.preload_row_cache,
+                    cf_def.key_cache_size);
+    }
+
+    public void truncate(String cfname) throws InvalidRequestException, UnavailableException, TException
+    {
+        logger.debug("truncating {} in {}", cfname, keySpace.get());
         checkKeyspaceAndLoginAuthorized(AccessLevel.FULL);
         try
         {
-            StorageProxy.truncateBlocking(keyspace, cfname);
+            StorageProxy.truncateBlocking(keySpace.get(), cfname);
         }
         catch (TimeoutException e)
         {
@@ -862,7 +891,6 @@ public class CassandraServer implements Cassandra.Iface
         keySpace.set(keyspace); 
     }
 
-    @Override
     public Map<String, List<String>> check_schema_agreement() throws TException, InvalidRequestException
     {
         logger.debug("checking schema agreement");      

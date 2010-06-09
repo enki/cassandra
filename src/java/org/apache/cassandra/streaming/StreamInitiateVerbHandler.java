@@ -79,15 +79,14 @@ public class StreamInitiateVerbHandler implements IVerbHandler
                 PendingFile remoteFile = pendingFile.getKey();
                 PendingFile localFile = pendingFile.getValue();
 
-                CompletedFileStatus streamStatus = new CompletedFileStatus(remoteFile.getFilename(),
-                                                                           remoteFile.getExpectedBytes());
+                FileStatus streamStatus = new FileStatus(remoteFile.getFilename(), remoteFile.getExpectedBytes());
 
                 if (logger.isDebugEnabled())
                   logger.debug("Preparing to receive stream from " + message.getFrom() + ": " + remoteFile + " -> " + localFile);
                 addStreamContext(message.getFrom(), localFile, streamStatus);
             }
 
-            StreamInManager.registerStreamCompletionHandler(message.getFrom(), new StreamCompletionHandler());
+            StreamInManager.registerFileStatusHandler(message.getFrom(), new FileStatusHandler());
             if (logger.isDebugEnabled())
               logger.debug("Sending a stream initiate done message ...");
             Message doneMessage = new Message(FBUtilities.getLocalAddress(), "", StorageService.Verb.STREAM_INITIATE_DONE, new byte[0] );
@@ -129,7 +128,7 @@ public class StreamInitiateVerbHandler implements IVerbHandler
         return mapping;
     }
 
-    private void addStreamContext(InetAddress host, PendingFile pendingFile, CompletedFileStatus streamStatus)
+    private void addStreamContext(InetAddress host, PendingFile pendingFile, FileStatus streamStatus)
     {
         if (logger.isDebugEnabled())
           logger.debug("Adding stream context " + pendingFile + " for " + host + " ...");

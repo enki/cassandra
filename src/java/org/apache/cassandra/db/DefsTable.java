@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db;
 
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.commitlog.CommitLog;
@@ -51,12 +52,12 @@ public class DefsTable
         for (String tableName : DatabaseDescriptor.getNonSystemTables())
         {
             KSMetaData ks = DatabaseDescriptor.getTableDefinition(tableName);
-            rm.add(new QueryPath(Migration.SCHEMA_CF, null, ks.name.getBytes()), KSMetaData.serialize(ks), now);
+            rm.add(new QueryPath(Migration.SCHEMA_CF, null, ks.name.getBytes()), KSMetaData.serialize(ks), new TimestampClock(now));
         }
         rm.apply();
         
         rm = new RowMutation(Table.SYSTEM_TABLE, Migration.LAST_MIGRATION_KEY);
-        rm.add(new QueryPath(Migration.SCHEMA_CF, null, Migration.LAST_MIGRATION_KEY), UUIDGen.decompose(version), now);
+        rm.add(new QueryPath(Migration.SCHEMA_CF, null, Migration.LAST_MIGRATION_KEY), UUIDGen.decompose(version), new TimestampClock(now));
         rm.apply();
     }
 

@@ -34,6 +34,7 @@ import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.clock.AbstractReconciler;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.ICompactSerializer2;
@@ -143,7 +144,7 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
         // FIXME: version conditional readers here
         if (true)
         {
-            sstable = RowIndexedReader.open(descriptor, partitioner);
+            sstable = RowIndexedReader.internalOpen(descriptor, partitioner);
         }
 
         if (logger.isDebugEnabled())
@@ -156,28 +157,6 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
     {
         phantomReference = new SSTableDeletingReference(tracker, this, finalizerQueue);
         finalizers.add(phantomReference);
-    }
-
-    protected static MappedByteBuffer mmap(String filename, long start, int size) throws IOException
-    {
-        RandomAccessFile raf;
-        try
-        {
-            raf = new RandomAccessFile(filename, "r");
-        }
-        catch (FileNotFoundException e)
-        {
-            throw new IOError(e);
-        }
-
-        try
-        {
-            return raf.getChannel().map(FileChannel.MapMode.READ_ONLY, start, size);
-        }
-        finally
-        {
-            raf.close();
-        }
     }
 
     protected SSTableReader(Descriptor desc, IPartitioner partitioner, long maxDataAge)
@@ -214,7 +193,7 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
      * FIXME: should not be public: use Scanner.
      */
     @Deprecated
-    public abstract PositionSize getPosition(DecoratedKey decoratedKey) throws IOException;
+    public abstract long getPosition(DecoratedKey decoratedKey) throws IOException;
 
     /**
      * Like getPosition, but if key is not found will return the location of the
@@ -258,10 +237,6 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
      */
     public abstract SSTableScanner getScanner(int bufferSize, QueryFilter filter);
     
-    /**
-     * FIXME: should not be public: use Scanner.
-     */
-    @Deprecated
     public abstract FileDataInput getFileDataInput(DecoratedKey decoratedKey, int bufferSize);
 
     public AbstractType getColumnComparator()
@@ -277,9 +252,11 @@ public abstract class SSTableReader extends SSTable implements Comparable<SSTabl
     public ICompactSerializer2<IColumn> getColumnSerializer()
     {
         ColumnFamilyType cfType = DatabaseDescriptor.getColumnFamilyType(getTableName(), getColumnFamilyName());
+        ClockType clockType = DatabaseDescriptor.getClockType(getTableName(), getColumnFamilyName());
+        AbstractReconciler reconciler = DatabaseDescriptor.getReconciler(getTableName(), getColumnFamilyName());
         return cfType == ColumnFamilyType.Standard
-               ? Column.serializer()
-               : SuperColumn.serializer(getColumnComparator());
+               ? Column.serializer(clockType)
+               : SuperColumn.serializer(getColumnComparator(), clockType, reconciler);
     }
 
     /**

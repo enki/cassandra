@@ -23,10 +23,12 @@ import java.io.IOException;
 import java.util.*;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SuperColumn;
 import org.apache.cassandra.db.ColumnFamilyType;
+import org.apache.cassandra.db.TimestampClock;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -64,6 +66,7 @@ public class SSTableImport
     {
         private String name;
         private String value;
+        // TODO: fix when we adding other clock type
         private long timestamp;
         private boolean isDeleted;
         
@@ -73,6 +76,7 @@ public class SSTableImport
             assert colSpec.size() == 4;
             name = (String)colSpec.get(0);
             value = (String)colSpec.get(1);
+            // TODO: fix when we adding other clock type
             timestamp = (Long)colSpec.get(2);
             isDeleted = (Boolean)colSpec.get(3);
         }
@@ -93,9 +97,9 @@ public class SSTableImport
             JsonColumn col = new JsonColumn(c);
             QueryPath path = new QueryPath(cfm.cfName, null, hexToBytes(col.name));
             if (col.isDeleted) {
-                cfamily.addColumn(path, hexToBytes(col.value), col.timestamp);
+                cfamily.addColumn(path, hexToBytes(col.value), new TimestampClock(col.timestamp));
             } else {
-                cfamily.addTombstone(path, hexToBytes(col.value), col.timestamp);
+                cfamily.addTombstone(path, hexToBytes(col.value), new TimestampClock(col.timestamp));
             }
         }
     }
@@ -123,14 +127,14 @@ public class SSTableImport
                 JsonColumn col = new JsonColumn(c);
                 QueryPath path = new QueryPath(cfm.cfName, superName, hexToBytes(col.name));
                 if (col.isDeleted) {
-                    cfamily.addColumn(path, hexToBytes(col.value), col.timestamp);
+                    cfamily.addColumn(path, hexToBytes(col.value), new TimestampClock(col.timestamp));
                 } else {
-                    cfamily.addTombstone(path, hexToBytes(col.value), col.timestamp);
+                    cfamily.addTombstone(path, hexToBytes(col.value), new TimestampClock(col.timestamp));
                 }
             }
             
             SuperColumn superColumn = (SuperColumn)cfamily.getColumn(superName);
-            superColumn.markForDeleteAt((int)(System.currentTimeMillis()/1000), deletedAt);
+            superColumn.markForDeleteAt((int)(System.currentTimeMillis()/1000), new TimestampClock(deletedAt));
         }
     }
 
@@ -192,7 +196,7 @@ public class SSTableImport
      * @throws IOException on failure to open/read/write files or output streams
      * @throws ParseException on failure to parse JSON input
      */
-    public static void main(String[] args) throws IOException, ParseException
+    public static void main(String[] args) throws IOException, ParseException, ConfigurationException
     {
         String usage = String.format("Usage: %s -K keyspace -c column_family <json> <sstable>%n",
                 SSTableImport.class.getName());
@@ -218,6 +222,14 @@ public class SSTableImport
         String ssTable = cmd.getArgs()[1];
         String keyspace = cmd.getOptionValue(KEYSPACE_OPTION);
         String cfamily = cmd.getOptionValue(COLFAM_OPTION);
+
+        DatabaseDescriptor.loadSchemas();
+        if (DatabaseDescriptor.getNonSystemTables().size() < 1)
+        {
+            String msg = "no non-system tables are defined";
+            System.err.println(msg);
+            throw new ConfigurationException(msg);
+        }
 
         importJson(json, keyspace, cfamily, ssTable);
         

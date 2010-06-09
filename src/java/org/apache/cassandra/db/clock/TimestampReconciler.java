@@ -15,35 +15,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.cassandra.db.clock;
 
-package org.apache.cassandra.locator;
-
-import java.io.IOException;
-
-import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.db.Column;
+import org.apache.cassandra.db.IClock.ClockRelationship;
 
 /**
- * PropertyFileSnitchMBean
- *
- * PropertyFileSnitchMBean is the management interface for Digg's EndpointSnitch MBean
- *
- * @author Sammy Yu <syu@sammyyu.net>
- *
+ * Keeps the column with the highest timestamp. If both are equal
+ * return the left column.
  */
-public interface PropertyFileSnitchMBean {
-    /**
-     * The object name of the mbean.
-     */
-    public static String MBEAN_OBJECT_NAME = "org.apache.cassandra.locator:type=EndpointSnitch";
+public class TimestampReconciler extends AbstractReconciler
+{
 
-    /**
-     * Reload the rack configuration
-     */
-    public void reloadConfiguration() throws ConfigurationException;
-
-    /**
-     * Display the current configuration
-     */
-    public String displayConfiguration();
-
+    public Column reconcile(Column left, Column right)
+    {
+        ClockRelationship cr = left.clock().compare(right.clock());
+        switch (cr)
+        {
+        case EQUAL:
+        case GREATER_THAN:
+            return left;
+        case LESS_THAN:
+            return right;
+        default:
+            throw new IllegalArgumentException(
+                    "Timestamp clocks must either be equal, greater then or less than: " + cr);
+        }
+    }
 }

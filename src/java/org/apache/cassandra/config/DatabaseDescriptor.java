@@ -21,6 +21,8 @@ package org.apache.cassandra.config;
 import org.apache.cassandra.auth.AllowAllAuthenticator;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.clock.AbstractReconciler;
+import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
@@ -50,6 +52,7 @@ import java.io.IOError;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.util.*;
 import java.net.InetAddress;
@@ -202,6 +205,12 @@ public class DatabaseDescriptor
                 throw new ConfigurationException("Invalid partitioner class " + conf.partitioner);
             }
 
+            /* phi convict threshold for FailureDetector */
+            if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
+            {
+                throw new ConfigurationException("phi_convict_threshold must be between 5 and 16");
+            }
+            
             /* Thread per pool */
             if (conf.concurrent_reads != null && conf.concurrent_reads < 2) 
             {
@@ -212,7 +221,17 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("concurrent_writes must be at least 2");
             }
-            
+
+            /* Memtable flush writer threads */
+            if (conf.memtable_flush_writers != null && conf.memtable_flush_writers < 1)
+            {
+                throw new ConfigurationException("memtable_flush_writers must be at least 1");
+            }
+            else if (conf.memtable_flush_writers == null)
+            {
+                conf.memtable_flush_writers = conf.data_file_directories.length;
+            }
+
             /* Local IP or hostname to bind services to */
             if (conf.listen_address != null)
             {
@@ -501,11 +520,22 @@ public class DatabaseDescriptor
                     throw new ConfigurationException("compare_subcolumns_with is only a valid attribute on super columnfamilies (not regular columnfamily " + cf.name + ")");
                 }
                 
+                if (cf.clock_type == null)
+                    cf.clock_type = ClockType.Timestamp; // default
+                
+                AbstractReconciler reconciler = getReconciler(cf.reconciler);
+                if (reconciler == null)
+                {
+                    if (cf.clock_type == ClockType.Timestamp)    
+                        reconciler = new TimestampReconciler(); // default
+                    else
+                        throw new ConfigurationException("No reconciler specified for column family " + cf.name);
+                }
                 if (cf.read_repair_chance < 0.0 || cf.read_repair_chance > 1.0)
                 {                        
                     throw new ConfigurationException("read_repair_chance must be between 0.0 and 1.0");
                 }
-                cfDefs[j++] = new CFMetaData(keyspace.name, cf.name, cfType, comparator, subcolumnComparator, cf.comment, cf.rows_cached, cf.preload_row_cache, cf.keys_cached, cf.read_repair_chance);
+                cfDefs[j++] = new CFMetaData(keyspace.name, cf.name, cfType, cf.clock_type, comparator, subcolumnComparator, reconciler, cf.comment, cf.rows_cached, cf.preload_row_cache, cf.keys_cached, cf.read_repair_chance);
             }
             defs.add(new KSMetaData(keyspace.name, strategyClass, keyspace.replication_factor, cfDefs));
             
@@ -525,8 +555,8 @@ public class DatabaseDescriptor
     }
 
     public static AbstractType getComparator(String compareWith) throws ConfigurationException
-//    throws ConfigurationException, TransformerException, NoSuchMethodException, InvocationTargetException, IllegalAccessException, InstantiationException
     {
+        logger.info(compareWith);
         Class<? extends AbstractType> typeClass;
         
         if (compareWith == null)
@@ -545,9 +575,48 @@ public class DatabaseDescriptor
                 throw new ConfigurationException("Unable to load class " + className);
             }
         }
+
         try
         {
-            return typeClass.getConstructor().newInstance();
+            Field field = typeClass.getDeclaredField("instance");
+            return (AbstractType) field.get(null);
+        }
+        catch (NoSuchFieldException e)
+        {
+            ConfigurationException ex = new ConfigurationException(e.getMessage());
+            ex.initCause(e);
+            throw ex;
+        }
+        catch (IllegalAccessException e)
+        {
+            ConfigurationException ex = new ConfigurationException(e.getMessage());
+            ex.initCause(e);
+            throw ex;
+        }
+    }
+
+    public static AbstractReconciler getReconciler(String reconcileWith) throws ConfigurationException
+    {
+        if (reconcileWith == null || "".equals(reconcileWith))
+        {
+            return null;
+        }
+        
+        Class<? extends AbstractReconciler> reconcilerClass;
+        {
+            String className = reconcileWith.contains(".") ? reconcileWith :  TimestampReconciler.class.getPackage().getName() + "." + reconcileWith;
+            try
+            {
+                reconcilerClass = (Class<? extends AbstractReconciler>)Class.forName(className);
+            }
+            catch (ClassNotFoundException e)
+            {
+                throw new ConfigurationException("Unable to load class " + className);
+            }
+        }
+        try
+        {
+            return reconcilerClass.getConstructor().newInstance();
         }
         catch (InstantiationException e)
         {
@@ -708,6 +777,15 @@ public class DatabaseDescriptor
         return cfMetaData.cfType;
     }
 
+    public static ClockType getClockType(String tableName, String cfName)
+    {
+        assert tableName != null && cfName != null;
+        CFMetaData cfMetaData = getCFMetaData(tableName, cfName);
+
+        assert (cfMetaData != null);
+        return cfMetaData.clockType;
+    }
+
     public static Set<String> getTables()
     {
         return tables.keySet();
@@ -745,6 +823,11 @@ public class DatabaseDescriptor
         return conf.rpc_timeout_in_ms;
     }
 
+    public static int getPhiConvictThreshold()
+    {
+        return conf.phi_convict_threshold;
+    }
+
     public static int getConsistencyThreads()
     {
         return consistencyThreads;
@@ -758,6 +841,11 @@ public class DatabaseDescriptor
     public static int getConcurrentWriters()
     {
         return conf.concurrent_writes;
+    }
+
+    public static int getFlushWriters()
+    {
+            return conf.memtable_flush_writers;
     }
 
     public static long getRowWarningThreshold()
@@ -860,6 +948,15 @@ public class DatabaseDescriptor
     public static int getStageQueueSize()
     {
         return stageQueueSize_;
+    }
+
+    public static AbstractReconciler getReconciler(String tableName, String cfName)
+    {
+        assert tableName != null;
+        CFMetaData cfmd = getCFMetaData(tableName, cfName);
+        if (cfmd == null)
+            throw new NullPointerException("Unknown ColumnFamily " + cfName + " in keyspace " + tableName);
+        return cfmd.reconciler;
     }
 
     /**

@@ -24,9 +24,11 @@ import java.io.PrintStream;
 import java.util.*;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.TimestampClock;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.SSTable;
@@ -95,7 +97,7 @@ public class SSTableExport
             json.append(", ");
             json.append(quote(bytesToHex(column.value())));
             json.append(", ");
-            json.append(column.timestamp());
+            json.append(((TimestampClock) column.clock()).timestamp());
             json.append(", ");
             json.append(column.isMarkedForDelete());
             json.append("]");
@@ -125,7 +127,7 @@ public class SSTableExport
                 json.append(asKey(bytesToHex(column.name())));
                 json.append("{");
                 json.append(asKey("deletedAt"));
-                json.append(column.getMarkedForDeleteAt());
+                json.append(((TimestampClock) column.getMarkedForDeleteAt()).timestamp());
                 json.append(", ");
                 json.append(asKey("subColumns"));
                 json.append(serializeColumns(column.getSubColumns(), comparator));
@@ -338,7 +340,7 @@ public class SSTableExport
      * @param args command lines arguments
      * @throws IOException on failure to open/read/write files or output streams
      */
-    public static void main(String[] args) throws IOException
+    public static void main(String[] args) throws IOException, ConfigurationException
     {
         String usage = String.format("Usage: %s <sstable> [-k key [-k key [...]] -x key [-x key [...]]]%n", SSTableExport.class.getName());
         
@@ -365,7 +367,15 @@ public class SSTableExport
         String[] keys = cmd.getOptionValues(KEY_OPTION);
         String[] excludes = cmd.getOptionValues(EXCLUDEKEY_OPTION);
         String ssTableFileName = new File(cmd.getArgs()[0]).getAbsolutePath();
-        
+
+        DatabaseDescriptor.loadSchemas();
+        if (DatabaseDescriptor.getNonSystemTables().size() < 1)
+        {
+            String msg = "no non-system tables are defined";
+            System.err.println(msg);
+            throw new ConfigurationException(msg);
+        }
+
         if (cmd.hasOption(ENUMERATEKEYS_OPTION))
             enumeratekeys(ssTableFileName, System.out);
         else {

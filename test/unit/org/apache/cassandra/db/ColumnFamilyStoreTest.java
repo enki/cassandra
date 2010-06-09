@@ -58,8 +58,8 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         List<RowMutation> rms = new LinkedList<RowMutation>();
         RowMutation rm;
         rm = new RowMutation("Keyspace1", "key1".getBytes());
-        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), 0);
-        rm.add(new QueryPath("Standard1", null, "Column2".getBytes()), "asdf".getBytes(), 0);
+        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), new TimestampClock(0));
+        rm.add(new QueryPath("Standard1", null, "Column2".getBytes()), "asdf".getBytes(), new TimestampClock(0));
         rms.add(rm);
         ColumnFamilyStore store = Util.writeColumnFamily(rms);
 
@@ -79,7 +79,7 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         RowMutation rm;
 
         rm = new RowMutation("Keyspace1", "key1".getBytes());
-        rm.delete(new QueryPath("Standard2", null, null), System.currentTimeMillis());
+        rm.delete(new QueryPath("Standard2", null, null), new TimestampClock(System.currentTimeMillis()));
         rm.apply();
 
         Runnable r = new WrappedRunnable()
@@ -112,7 +112,7 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         {
             String key = String.valueOf(j);
             RowMutation rm = new RowMutation("Keyspace1", key.getBytes());
-            rm.add(new QueryPath(columnFamilyName, null, "0".getBytes()), new byte[0], j);
+            rm.add(new QueryPath(columnFamilyName, null, "0".getBytes()), new byte[0], new TimestampClock(j));
             rms.add(rm);
         }
         ColumnFamilyStore store = Util.writeColumnFamily(rms);
@@ -138,12 +138,11 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         ColumnFamilyStore cfs = insertKey1Key2();
 
         IPartitioner p = StorageService.getPartitioner();
-        RangeSliceReply result = cfs.getRangeSlice(ArrayUtils.EMPTY_BYTE_ARRAY,
-                                                   Util.range(p, "key15", "key1"),
-                                                   10,
-                                                   null,
-                                                   Arrays.asList("asdf".getBytes()));
-        assertEquals(2, result.rows.size());
+        List<Row> result = cfs.getRangeSlice(ArrayUtils.EMPTY_BYTE_ARRAY,
+                                             Util.range(p, "key15", "key1"),
+                                             10,
+                                             new NamesQueryFilter("asdf".getBytes()));
+        assertEquals(2, result.size());
     }
 
     @Test
@@ -152,13 +151,12 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         ColumnFamilyStore cfs = insertKey1Key2();
 
         IPartitioner p = StorageService.getPartitioner();
-        RangeSliceReply result = cfs.getRangeSlice(ArrayUtils.EMPTY_BYTE_ARRAY,
-                                                   Util.range(p, "key1", "key2"),
-                                                   10,
-                                                   null,
-                                                   Arrays.asList("asdf".getBytes()));
-        assertEquals(1, result.rows.size());
-        assert Arrays.equals(result.rows.get(0).key.key, "key2".getBytes());
+        List<Row> result = cfs.getRangeSlice(ArrayUtils.EMPTY_BYTE_ARRAY,
+                                             Util.range(p, "key1", "key2"),
+                                             10,
+                                             new NamesQueryFilter("asdf".getBytes()));
+        assertEquals(1, result.size());
+        assert Arrays.equals(result.get(0).key.key, "key2".getBytes());
     }
 
     private ColumnFamilyStore insertKey1Key2() throws IOException, ExecutionException, InterruptedException
@@ -166,12 +164,12 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         List<RowMutation> rms = new LinkedList<RowMutation>();
         RowMutation rm;
         rm = new RowMutation("Keyspace2", "key1".getBytes());
-        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), 0);
+        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), new TimestampClock(0));
         rms.add(rm);
         Util.writeColumnFamily(rms);
 
         rm = new RowMutation("Keyspace2", "key2".getBytes());
-        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), 0);
+        rm.add(new QueryPath("Standard1", null, "Column1".getBytes()), "asdf".getBytes(), new TimestampClock(0));
         rms.add(rm);
         return Util.writeColumnFamily(rms);
     }

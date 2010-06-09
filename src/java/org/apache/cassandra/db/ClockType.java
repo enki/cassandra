@@ -15,18 +15,34 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.cassandra.db;
 
-package org.apache.cassandra.streaming;
+import org.apache.cassandra.io.ICompactSerializer2;
 
-import java.io.IOException;
-
-import java.net.InetAddress;
-
-interface IStreamComplete
+public enum ClockType
 {
-    /*
-     * This callback if registered with the StreamContextManager is 
-     * called when the stream from a host is completely handled. 
-    */
-    public void onStreamCompletion(InetAddress from, PendingFile pendingFile, CompletedFileStatus streamStatus) throws IOException;
+    Timestamp;
+
+    public final static ClockType create(String name)
+    {
+        assert name != null;
+        try
+        {
+            return ClockType.valueOf(name);
+        }
+        catch (IllegalArgumentException e)
+        {
+            return null;
+        }
+    }
+
+    public final IClock minClock()
+    {
+        return TimestampClock.MIN_VALUE;
+    }
+
+    public final ICompactSerializer2<IClock> serializer()
+    {
+        return TimestampClock.SERIALIZER;
+    }
 }

@@ -22,6 +22,7 @@ import java.io.IOError;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Constructor;
+import java.net.UnknownHostException;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -594,7 +595,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (tokenMetadata_.isMember(endpoint))
             logger_.info("Node " + endpoint + " state jump to normal");
 
-        tokenMetadata_.updateNormalToken(token, endpoint);
+        // we don't want to update if this node is responsible for the token and it has a later startup time than endpoint.
+        InetAddress currentNode = tokenMetadata_.getEndpoint(token);
+        if (currentNode == null || (FBUtilities.getLocalAddress().equals(currentNode) && Gossiper.instance.compareEndpointStartup(endpoint, currentNode) > 0))
+            tokenMetadata_.updateNormalToken(token, endpoint);
+        else
+            logger_.info("Will not change my token ownership to " + endpoint);
         calculatePendingRanges();
         if (!isClientMode)
             SystemTable.updateToken(endpoint, token);
@@ -956,6 +962,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         HintedHandOffManager.instance.deliverHints(endpoint);
     }
 
+    public final void deliverHints(String host) throws UnknownHostException
+    {
+        HintedHandOffManager.instance.deliverHints(host);
+    }
+
     public Token getLocalToken()
     {
         return storageMetadata_.getToken();
@@ -1259,16 +1270,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         throw new UnavailableException(); // no nodes that could contain key are alive
     }
 
-    public Map<String, String> getStringEndpointMap()
-    {
-        HashMap<String, String> map = new HashMap<String, String>();
-        for (Token t : tokenMetadata_.sortedTokens())
-        {
-            map.put(t.toString(), tokenMetadata_.getEndpoint(t).getHostAddress());
-        }
-        return map;
-    }
-
     public void setLog4jLevel(String classQualifier, String rawLevel)
     {
         Level level = Level.toLevel(rawLevel);
@@ -1279,20 +1280,19 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     /**
      * @return list of Tokens (_not_ keys!) breaking up the data this node is responsible for into pieces of roughly keysPerSplit
      */ 
-    public List<Token> getSplits(Range range, int keysPerSplit)
+    public List<Token> getSplits(String table, String cfName, Range range, int keysPerSplit)
     {
         List<Token> tokens = new ArrayList<Token>();
         // we use the actual Range token for the first and last brackets of the splits to ensure correctness
         tokens.add(range.left);
 
         List<DecoratedKey> keys = new ArrayList<DecoratedKey>();
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+        Table t = Table.open(table);
+        ColumnFamilyStore cfs = t.getColumnFamilyStore(cfName);
+        for (DecoratedKey sample : cfs.allKeySamples())
         {
-            for (DecoratedKey sample : cfs.allKeySamples())
-            {
-                if (range.contains(sample.token))
-                    keys.add(sample);
-            }
+            if (range.contains(sample.token))
+                keys.add(sample);
         }
         FBUtilities.sortSampledKeys(keys, range);
         int splits = keys.size() * SSTableReader.indexInterval() / keysPerSplit;

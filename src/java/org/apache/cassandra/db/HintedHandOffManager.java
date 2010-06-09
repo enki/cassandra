@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db;
 
+import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.Arrays;
 import java.util.concurrent.TimeoutException;
@@ -83,26 +84,10 @@ public class HintedHandOffManager
     public static final HintedHandOffManager instance = new HintedHandOffManager();
 
     private static final Logger logger_ = LoggerFactory.getLogger(HintedHandOffManager.class);
-    final static long INTERVAL_IN_MS = 3600 * 1000; // check for ability to deliver hints this often
     public static final String HINTS_CF = "HintsColumnFamily";
     private static final int PAGE_SIZE = 10000;
 
     private final ExecutorService executor_ = new JMXEnabledThreadPoolExecutor("HINTED-HANDOFF-POOL");
-
-    protected HintedHandOffManager()
-    {
-        new Thread(new WrappedRunnable()
-        {
-            public void runMayThrow() throws Exception
-            {
-                while (true)
-                {
-                    Thread.sleep(INTERVAL_IN_MS);
-                    deliverAllHints();
-                }
-            }
-        }, "Hint delivery").start();
-    }
 
     private static boolean sendMessage(InetAddress endpoint, String tableName, byte[] key) throws IOException
     {
@@ -143,77 +128,15 @@ public class HintedHandOffManager
     private static void deleteEndpoint(byte[] endpointAddress, String tableName, byte[] key, long timestamp) throws IOException
     {
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, tableName.getBytes(UTF8));
-        rm.delete(new QueryPath(HINTS_CF, key, endpointAddress), timestamp);
+        rm.delete(new QueryPath(HINTS_CF, key, endpointAddress), new TimestampClock(timestamp));
         rm.apply();
     }
 
     private static void deleteHintKey(String tableName, byte[] key) throws IOException
     {
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, tableName.getBytes(UTF8));
-        rm.delete(new QueryPath(HINTS_CF, key, null), System.currentTimeMillis());
+        rm.delete(new QueryPath(HINTS_CF, key, null), new TimestampClock(System.currentTimeMillis()));
         rm.apply();
-    }
-
-    /** hintStore must be the hints columnfamily from the system table */
-    private static void deliverAllHints() throws DigestMismatchException, IOException, InvalidRequestException, TimeoutException
-    {
-        if (logger_.isDebugEnabled())
-          logger_.debug("Started deliverAllHints");
-
-        // 1. Scan through all the keys that we need to handoff
-        // 2. For each key read the list of recipients and send
-        // 3. Delete that recipient from the key if write was successful
-        // 4. If all writes were success for a given key we can even delete the key .
-        // 5. Now force a flush
-        // 6. Do major compaction to clean up all deletes etc.
-        // 7. I guess we are done
-        ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
-        for (String tableName : DatabaseDescriptor.getTables())
-        {
-            DecoratedKey tableNameKey = StorageService.getPartitioner().decorateKey(tableName.getBytes(UTF8));
-            byte[] startColumn = ArrayUtils.EMPTY_BYTE_ARRAY;
-            while (true)
-            {
-                QueryFilter filter = QueryFilter.getSliceFilter(tableNameKey, new QueryPath(HINTS_CF), startColumn, ArrayUtils.EMPTY_BYTE_ARRAY, null, false, PAGE_SIZE);
-                ColumnFamily hintColumnFamily = ColumnFamilyStore.removeDeleted(hintStore.getColumnFamily(filter), Integer.MAX_VALUE);
-                if (pagingFinished(hintColumnFamily, startColumn))
-                    break;
-                Collection<IColumn> keys = hintColumnFamily.getSortedColumns();
-
-                for (IColumn keyColumn : keys)
-                {
-                    Collection<IColumn> endpoints = keyColumn.getSubColumns();
-                    byte[] keyBytes = keyColumn.name();
-                    int deleted = 0;
-                    for (IColumn endpoint : endpoints)
-                    {
-                        if (sendMessage(InetAddress.getByAddress(endpoint.name()), tableName, keyBytes))
-                        {
-                            deleteEndpoint(endpoint.name(), tableName, keyColumn.name(), System.currentTimeMillis());
-                            deleted++;
-                        }
-                    }
-                    if (deleted == endpoints.size())
-                    {
-                        deleteHintKey(tableName, keyColumn.name());
-                    }
-
-                    startColumn = keyColumn.name();
-                }
-            }
-        }
-        hintStore.forceFlush();
-        try
-        {
-            CompactionManager.instance.submitMajor(hintStore).get();
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException(e);
-        }
-
-        if (logger_.isDebugEnabled())
-          logger_.debug("Finished deliverAllHints");
     }
 
     private static boolean pagingFinished(ColumnFamily hintColumnFamily, byte[] startColumn)
@@ -232,6 +155,8 @@ public class HintedHandOffManager
         // 1. Scan through all the keys that we need to handoff
         // 2. For each key read the list of recipients if the endpoint matches send
         // 3. Delete that recipient from the key if write was successful
+        // 4. Now force a flush
+        // 5. Do major compaction to clean up all deletes etc.
         ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
         for (String tableName : DatabaseDescriptor.getTables())
         {
@@ -265,6 +190,15 @@ public class HintedHandOffManager
                 }
             }
         }
+        hintStore.forceFlush();
+        try
+        {
+            CompactionManager.instance.submitMajor(hintStore, 0, Integer.MAX_VALUE).get();
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
 
         if (logger_.isDebugEnabled())
           logger_.debug("Finished hinted handoff for endpoint " + endpoint);
@@ -294,7 +228,7 @@ public class HintedHandOffManager
             RowMutation drop = new RowMutation(Table.SYSTEM_TABLE, oldTableKey.key);
             for (byte[] key : cf.getColumnNames())
             {
-                drop.delete(new QueryPath(HINTS_CF, key), now);
+                drop.delete(new QueryPath(HINTS_CF, key), new TimestampClock(now));
                 startCol = key;
             }
             drop.apply();
@@ -316,5 +250,10 @@ public class HintedHandOffManager
             }
         };
     	executor_.submit(r);
+    }
+
+    public void deliverHints(String to) throws UnknownHostException
+    {
+        deliverHints(InetAddress.getByName(to));
     }
 }

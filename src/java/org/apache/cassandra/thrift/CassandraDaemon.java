@@ -22,24 +22,30 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.InetAddress;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
+import org.apache.cassandra.db.SystemTable;
+import org.apache.thrift.server.TServer;
 import org.apache.cassandra.config.ConfigurationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.log4j.PropertyConfigurator;
-
 import org.apache.cassandra.utils.Mx4jTool;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.migration.Migration;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
-import org.apache.thrift.server.TThreadPoolServer;
 import org.apache.thrift.transport.TServerSocket;
 import org.apache.thrift.transport.TTransportException;
 import org.apache.thrift.transport.TTransportFactory;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.TProcessorFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.db.Table;
@@ -57,7 +63,7 @@ import org.apache.cassandra.db.CompactionManager;
 public class CassandraDaemon
 {
     private static Logger logger = LoggerFactory.getLogger(CassandraDaemon.class);
-    private TThreadPoolServer serverEngine;
+    private TServer serverEngine;
 
     private void setup() throws IOException, TTransportException
     {
@@ -82,6 +88,17 @@ public class CassandraDaemon
                 }
             }
         });
+        
+        // check the system table for mismatched partitioner.
+        try
+        {
+            SystemTable.checkHealth();
+        }
+        catch (ConfigurationException e)
+        {
+            logger.error("Fatal exception during initialization", e);
+            System.exit(100);
+        }
 
         try
         {
@@ -104,12 +121,22 @@ public class CassandraDaemon
         // replay the log if necessary and check for compaction candidates
         CommitLog.recover();
         CompactionManager.instance.checkAllColumnFamilies();
-
+        
+        // check to see if CL.recovery modified the lastMigrationId. if it did, we need to re apply migrations. this isn't
+        // the same as merely reloading the schema (which wouldn't perform file deletion after a DROP). The solution
+        // is to read those migrations from disk and apply them.
+        UUID currentMigration = DatabaseDescriptor.getDefsVersion();
+        UUID lastMigration = Migration.getLastMigrationId();
+        if ((lastMigration != null) && (lastMigration.timestamp() > currentMigration.timestamp()))
+        {
+            MigrationManager.applyMigrations(currentMigration, lastMigration);
+        }
+        
         // start server internals
         StorageService.instance.initServer();
         
         // now we start listening for clients
-        CassandraServer cassandraServer = new CassandraServer();
+        final CassandraServer cassandraServer = new CassandraServer();
         Cassandra.Processor processor = new Cassandra.Processor(cassandraServer);
 
         // Transport
@@ -134,16 +161,34 @@ public class CassandraDaemon
             outTransportFactory = new TTransportFactory();
         }
 
+
         // ThreadPool Server
-        TThreadPoolServer.Options options = new TThreadPoolServer.Options();
+        CustomTThreadPoolServer.Options options = new CustomTThreadPoolServer.Options();
         options.minWorkerThreads = 64;
-        serverEngine = new TThreadPoolServer(new TProcessorFactory(processor),
+
+        SynchronousQueue<Runnable> executorQueue = new SynchronousQueue<Runnable>();
+
+        ExecutorService executorService = new ThreadPoolExecutor(options.minWorkerThreads,
+                                                                 options.maxWorkerThreads,
+                                                                 60,
+                                                                 TimeUnit.SECONDS,
+                                                                 executorQueue)
+        {
+            @Override
+            protected void afterExecute(Runnable r, Throwable t)
+            {
+                super.afterExecute(r, t);
+                cassandraServer.logout();
+            }
+        };
+        serverEngine = new CustomTThreadPoolServer(new TProcessorFactory(processor),
                                              tServerSocket,
                                              inTransportFactory,
                                              outTransportFactory,
                                              tProtocolFactory,
                                              tProtocolFactory,
-                                             options);
+                                             options,
+                                             executorService);
     }
 
     /** hook for JSVC */

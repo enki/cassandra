@@ -32,9 +32,11 @@ import org.apache.avro.ipc.SocketServer;
 import org.apache.avro.ipc.HttpServer;
 import org.apache.avro.specific.SpecificResponder;
 import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.CompactionManager;
 import org.apache.cassandra.db.DefsTable;
+import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.migration.Migration;
@@ -83,6 +85,17 @@ public class CassandraDaemon {
             }
         });
         
+        // check the system table for mismatched partitioner.
+        try
+        {
+            SystemTable.checkHealth();
+        }
+        catch (ConfigurationException e)
+        {
+            logger.error("Fatal exception during initialization", e);
+            System.exit(100);
+        }
+        
         try
         {
             DatabaseDescriptor.loadSchemas();
@@ -110,7 +123,7 @@ public class CassandraDaemon {
         // is to read those migrations from disk and apply them.
         UUID currentMigration = DatabaseDescriptor.getDefsVersion();
         UUID lastMigration = Migration.getLastMigrationId();
-        if (lastMigration.timestamp() > currentMigration.timestamp())
+        if ((lastMigration != null) && (lastMigration.timestamp() > currentMigration.timestamp()))
         {
             MigrationManager.applyMigrations(currentMigration, lastMigration);
         }

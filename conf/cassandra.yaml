@@ -6,8 +6,12 @@
 cluster_name: 'Dev Cluster'
 
 # Set to true to make new [non-seed] nodes automatically migrate data
-# to themselves from the pre-existing nodes in the cluster.
-auto_bootstrap: true
+# to themselves from the pre-existing nodes in the cluster.  Defaults
+# to false because you can only bootstrap N machines at a time from
+# an existing cluster of N, so if you are bringing up a cluster of
+# 10 machines with 3 seeds you would have to do it in stages.  Leaving
+# this off for the initial start simplifies that.
+auto_bootstrap: false
 
 # See http://wiki.apache.org/cassandra/HintedHandoff
 hinted_handoff_enabled: true
@@ -50,6 +54,13 @@ disk_access_mode: auto
 # CommitLogSyncDelay. -->
 concurrent_reads: 8
 concurrent_writes: 32
+
+# This sets the amount of memtable flush writer threads.  These will
+# be blocked by disk io, and each one will hold a memtable in memory
+# while blocked. If you have a large heap and many data directories,
+# you can increase this value for better flush performance.
+# By default this will be set to the amount of data directories defined.
+#memtable_flush_writers: 1
 
 # Buffer size to use when performing contiguous column slices. 
 # Increase this to the size of the column slices you typically perform
@@ -109,6 +120,10 @@ commitlog_sync_period_in_ms: 10000
 # Time to wait for a reply from other nodes before failing the command 
 rpc_timeout_in_ms: 10000
 
+# phi value that must be reached for a host to be marked down.
+# most users should never need to adjust this.
+# phi_convict_threshold: 8
+
 # time to wait before garbage collecting tombstones (deletion markers)
 gc_grace_seconds: 864000
 
@@ -132,10 +147,24 @@ endpoint_snitch: org.apache.cassandra.locator.SimpleSnitch
 # - replica_placement_strategy: the class that determines how replicas
 #   are distributed among nodes.  Must implement IReplicaPlacementStrategy.
 #   Out of the box, Cassandra provides 
-#   org.apache.cassandra.locator.RackUnawareStrategy and
-#   org.apache.cassandra.locator.RackAwareStrategy.  RackAwareStrategy
-#   place one replica in each of two datacenter, and other replicas in
-#   different racks in one.
+#     * org.apache.cassandra.locator.RackUnawareStrategy 
+#     * org.apache.cassandra.locator.RackAwareStrategy
+#     * org.apache.cassandra.locator.DatacenterShardStrategy
+#
+#   RackUnawareStrategy is the simplest; it simply places the first
+#   replica at the node whose token is closest to the key (as determined
+#   by the Partitioner), and additional replicas on subsequent nodes
+#   along the ring in increasing Token order.
+# 
+#   RackAwareStrategy is special cased for replication_factor of 3.  It
+#   places one replica in each of two datacenters, and the third on a
+#   different rack in in the first.
+#
+#   DatacenterShardStrategy is a generalization of RackAwareStrategy.
+#   For each datacenter, you can specify (in `datacenter.properties`)
+#   how many replicas you want on a per-keyspace basis.  Replicas are
+#   placed on different racks within each DC, if possible.
+# 
 # - replication_factor: Number of replicas of each row
 # - column_families: column families associated with this keyspace
 #
@@ -185,6 +214,8 @@ keyspaces:
 
         - name: StandardByUUID1
           compare_with: TimeUUIDType
+          clock_type: Timestamp
+          reconciler: TimestampReconciler          
 
         - name: Super1
           column_type: Super

@@ -31,35 +31,40 @@ import org.apache.cassandra.net.Message;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
-class CompletedFileStatus
+class FileStatus
 {
-    private static ICompactSerializer<CompletedFileStatus> serializer_;
+    private static ICompactSerializer<FileStatus> serializer_;
 
-    public static enum StreamCompletionAction
+    static enum Action
     {
+        // was received successfully, and can be deleted from the source node
         DELETE,
+        // needs to be streamed (or restreamed)
         STREAM
     }
 
     static
     {
-        serializer_ = new CompletedFileStatusSerializer();
+        serializer_ = new FileStatusSerializer();
     }
 
-    public static ICompactSerializer<CompletedFileStatus> serializer()
+    public static ICompactSerializer<FileStatus> serializer()
     {
         return serializer_;
     }
 
-    private String file_;
-    private long expectedBytes_;
-    private StreamCompletionAction action_;
+    private final String file_;
+    private final long expectedBytes_;
+    private Action action_;
 
-    public CompletedFileStatus(String file, long expectedBytes)
+    /**
+     * Create a FileStatus with the default Action: STREAM.
+     */
+    public FileStatus(String file, long expectedBytes)
     {
         file_ = file;
         expectedBytes_ = expectedBytes;
-        action_ = StreamCompletionAction.DELETE;
+        action_ = Action.STREAM;
     }
 
     public String getFile()
@@ -72,12 +77,12 @@ class CompletedFileStatus
         return expectedBytes_;
     }
 
-    public void setAction(StreamCompletionAction action)
+    public void setAction(Action action)
     {
         action_ = action;
     }
 
-    public StreamCompletionAction getAction()
+    public Action getAction()
     {
         return action_;
     }
@@ -86,34 +91,32 @@ class CompletedFileStatus
     {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream( bos );
-        CompletedFileStatus.serializer().serialize(this, dos);
+        FileStatus.serializer().serialize(this, dos);
         return new Message(FBUtilities.getLocalAddress(), "", StorageService.Verb.STREAM_FINISHED, bos.toByteArray());
     }
 
-    private static class CompletedFileStatusSerializer implements ICompactSerializer<CompletedFileStatus>
+    private static class FileStatusSerializer implements ICompactSerializer<FileStatus>
     {
-        public void serialize(CompletedFileStatus streamStatus, DataOutputStream dos) throws IOException
+        public void serialize(FileStatus streamStatus, DataOutputStream dos) throws IOException
         {
             dos.writeUTF(streamStatus.getFile());
             dos.writeLong(streamStatus.getExpectedBytes());
             dos.writeInt(streamStatus.getAction().ordinal());
         }
 
-        public CompletedFileStatus deserialize(DataInputStream dis) throws IOException
+        public FileStatus deserialize(DataInputStream dis) throws IOException
         {
             String targetFile = dis.readUTF();
             long expectedBytes = dis.readLong();
-            CompletedFileStatus streamStatus = new CompletedFileStatus(targetFile, expectedBytes);
+            FileStatus streamStatus = new FileStatus(targetFile, expectedBytes);
 
             int ordinal = dis.readInt();
-            if ( ordinal == StreamCompletionAction.DELETE.ordinal() )
-            {
-                streamStatus.setAction(StreamCompletionAction.DELETE);
-            }
-            else if ( ordinal == StreamCompletionAction.STREAM.ordinal() )
-            {
-                streamStatus.setAction(StreamCompletionAction.STREAM);
-            }
+            if (ordinal == Action.DELETE.ordinal())
+                streamStatus.setAction(Action.DELETE);
+            else if (ordinal == Action.STREAM.ordinal())
+                streamStatus.setAction(Action.STREAM);
+            else
+                throw new IOException("Bad FileStatus.Action: " + ordinal);
 
             return streamStatus;
         }

@@ -25,9 +25,12 @@ import java.util.*;
 
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.thrift.SliceRange;
 import org.apache.cassandra.utils.ReducingIterator;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.IClock.ClockRelationship;
 
 public class QueryFilter
 {
@@ -36,7 +39,7 @@ public class QueryFilter
     private final IFilter filter;
     private final IFilter superFilter;
 
-    protected QueryFilter(DecoratedKey key, QueryPath path, IFilter filter)
+    public QueryFilter(DecoratedKey key, QueryPath path, IFilter filter)
     {
         this.key = key;
         this.path = path;
@@ -112,8 +115,8 @@ public class QueryFilter
                     // filterSuperColumn only looks at immediate parent (the supercolumn) when determining if a subcolumn
                     // is still live, i.e., not shadowed by the parent's tombstone.  so, bump it up temporarily to the tombstone
                     // time of the cf, if that is greater.
-                    long deletedAt = c.getMarkedForDeleteAt();
-                    if (returnCF.getMarkedForDeleteAt() > deletedAt)
+                    IClock deletedAt = c.getMarkedForDeleteAt();
+                    if (returnCF.getMarkedForDeleteAt().compare(deletedAt) == ClockRelationship.GREATER_THAN)
                         ((SuperColumn)c).markForDeleteAt(c.getLocalDeletionTime(), returnCF.getMarkedForDeleteAt());
 
                     c = filter.filterSuperColumn((SuperColumn)c, gcBefore);
@@ -137,9 +140,9 @@ public class QueryFilter
         // the column itself must be not gc-able (it is live, or a still relevant tombstone, or has live subcolumns), (1)
         // and if its container is deleted, the column must be changed more recently than the container tombstone (2)
         // (since otherwise, the only thing repair cares about is the container tombstone)
-        long maxChange = column.mostRecentLiveChangeAt();
-        return (!column.isMarkedForDelete() || column.getLocalDeletionTime() > gcBefore || maxChange > column.getMarkedForDeleteAt()) // (1)
-               && (!container.isMarkedForDelete() || maxChange > container.getMarkedForDeleteAt()); // (2)
+        IClock maxChange = column.mostRecentLiveChangeAt();
+        return (!column.isMarkedForDelete() || column.getLocalDeletionTime() > gcBefore || (ClockRelationship.GREATER_THAN == maxChange.compare(column.getMarkedForDeleteAt()))) // (1)
+               && (!container.isMarkedForDelete() || (ClockRelationship.GREATER_THAN == maxChange.compare(container.getMarkedForDeleteAt()))); // (2)
     }
 
     /**
@@ -175,6 +178,19 @@ public class QueryFilter
     public static QueryFilter getNamesFilter(DecoratedKey key, QueryPath path, SortedSet<byte[]> columns)
     {
         return new QueryFilter(key, path, new NamesQueryFilter(columns));
+    }
+
+    public static IFilter getFilter(SlicePredicate predicate, AbstractType comparator)
+    {
+        if (predicate.column_names != null)
+        {
+            final SortedSet<byte[]> columnNameSet = new TreeSet<byte[]>(comparator);
+            columnNameSet.addAll(predicate.column_names);
+            return new NamesQueryFilter(columnNameSet);
+        }
+
+        SliceRange range = predicate.slice_range;
+        return new SliceQueryFilter(range.start, range.finish, range.bitmasks, range.reversed, range.count);
     }
 
     /**
