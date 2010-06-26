@@ -18,35 +18,29 @@
 
 package org.apache.cassandra.db.commitlog;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
 import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Config;
-import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.RowMutation;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 import org.apache.cassandra.io.DeletionService;
+import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.WrappedRunnable;
-import org.apache.cassandra.concurrent.StageManager;
-
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.Checksum;
-import java.util.zip.CRC32;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 /*
  * Commit Log tracks every write operation into the system. The aim
@@ -161,9 +155,8 @@ public class CommitLog
 
     public static void recover() throws IOException
     {
-        String directory = DatabaseDescriptor.getLogFileLocation();
-        File file = new File(directory);
-        File[] files = file.listFiles(new FilenameFilter()
+        String directory = DatabaseDescriptor.getCommitLogLocation();
+        File[] files = new File(directory).listFiles(new FilenameFilter()
         {
             public boolean accept(File dir, String name)
             {
@@ -176,7 +169,11 @@ public class CommitLog
         Arrays.sort(files, new FileUtils.FileComparator());
         logger.info("Replaying " + StringUtils.join(files, ", "));
         recover(files);
-        FileUtils.delete(files);
+        for (File f : files)
+        {
+            FileUtils.delete(CommitLogHeader.getHeaderPathFromSegmentPath(f.getAbsolutePath())); // may not actually exist
+            FileUtils.deleteWithConfirm(f);
+        }
         logger.info("Log replay complete");
     }
 
@@ -184,19 +181,30 @@ public class CommitLog
     {
         Set<Table> tablesRecovered = new HashSet<Table>();
         final AtomicInteger counter = new AtomicInteger(0);
+        byte[] bytes = new byte[4096];
+
         for (File file : clogs)
         {
+            CommitLogHeader clHeader = null;
             int bufferSize = (int)Math.min(file.length(), 32 * 1024 * 1024);
             BufferedRandomAccessFile reader = new BufferedRandomAccessFile(file.getAbsolutePath(), "r", bufferSize);
-            final CommitLogHeader clHeader = CommitLogHeader.readCommitLogHeader(reader);
-            /* seek to the lowest position where any CF has non-flushed data */
-            int lowPos = CommitLogHeader.getLowestPosition(clHeader);
-            if (lowPos == 0)
-                break;
 
-            reader.seek(lowPos);
+            int replayPosition = 0;
+            String headerPath = CommitLogHeader.getHeaderPathFromSegmentPath(file.getAbsolutePath());
+            try
+            {
+                clHeader = CommitLogHeader.readCommitLogHeader(headerPath);
+                replayPosition = clHeader.getReplayPosition();
+            }
+            catch (IOException ioe)
+            {
+                logger.info(headerPath + " incomplete, missing or corrupt.  Everything is ok, don't panic.  CommitLog will be replayed from the beginning");
+                logger.debug("exception was", ioe);
+            }
+            reader.seek(replayPosition);
+
             if (logger.isDebugEnabled())
-                logger.debug("Replaying " + file + " starting at " + lowPos);
+                logger.debug("Replaying " + file + " starting at " + reader.getFilePointer());
 
             /* read the logs populate RowMutation and apply */
             while (!reader.isEOF())
@@ -205,30 +213,38 @@ public class CommitLog
                     logger.debug("Reading mutation at " + reader.getFilePointer());
 
                 long claimedCRC32;
-                byte[] bytes;
+
+                Checksum checksum = new CRC32();
+                int serializedSize;
                 try
                 {
-                    bytes = new byte[reader.readInt()]; // readInt can throw EOFException too
-                    reader.readFully(bytes);
+                    // any of the reads may hit EOF
+                    serializedSize = reader.readInt();
+                    long claimedSizeChecksum = reader.readLong();
+                    checksum.update(serializedSize);
+                    if (checksum.getValue() != claimedSizeChecksum || serializedSize <= 0)
+                        break; // entry wasn't synced correctly/fully.  that's ok.
+
+                    if (serializedSize > bytes.length)
+                        bytes = new byte[(int) (1.2 * serializedSize)];
+                    reader.readFully(bytes, 0, serializedSize);
                     claimedCRC32 = reader.readLong();
                 }
-                catch (EOFException e)
+                catch(EOFException eof)
                 {
-                    // last CL entry didn't get completely written.  that's ok.
-                    break;
+                    break; // last CL entry didn't get completely written.  that's ok.
                 }
 
-                ByteArrayInputStream bufIn = new ByteArrayInputStream(bytes);
-                Checksum checksum = new CRC32();
-                checksum.update(bytes, 0, bytes.length);
+                checksum.update(bytes, 0, serializedSize);
                 if (claimedCRC32 != checksum.getValue())
                 {
-                    // this part of the log must not have been fsynced.  probably the rest is bad too,
-                    // but just in case there is no harm in trying them.
+                    // this entry must not have been fsynced.  probably the rest is bad too,
+                    // but just in case there is no harm in trying them (since we still read on an entry boundary)
                     continue;
                 }
 
                 /* deserialize the commit log entry */
+                ByteArrayInputStream bufIn = new ByteArrayInputStream(bytes, 0, serializedSize);
                 final RowMutation rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn));
                 if (logger.isDebugEnabled())
                     logger.debug(String.format("replaying mutation for %s.%s: %s",
@@ -239,6 +255,7 @@ public class CommitLog
                 tablesRecovered.add(table);
                 final Collection<ColumnFamily> columnFamilies = new ArrayList<ColumnFamily>(rm.getColumnFamilies());
                 final long entryLocation = reader.getFilePointer();
+                final CommitLogHeader finalHeader = clHeader;
                 Runnable runnable = new WrappedRunnable()
                 {
                     public void runMayThrow() throws IOException
@@ -254,7 +271,7 @@ public class CommitLog
                                 // null means the cf has been dropped
                                 continue;
                             
-                            if (clHeader.isDirty(columnFamily.id()) && entryLocation >= clHeader.getPosition(columnFamily.id()))
+                            if (finalHeader == null || (finalHeader.isDirty(columnFamily.id()) && entryLocation >= finalHeader.getPosition(columnFamily.id())))
                                 newRm.add(columnFamily);
                         }
                         if (!newRm.isEmpty())
@@ -268,6 +285,7 @@ public class CommitLog
                 StageManager.getStage(StageManager.MUTATION_STAGE).submit(runnable);
             }
             reader.close();
+            logger.info("Finished reading " + file);
         }
 
         // wait for all the writes to finish on the mutation stage
@@ -419,6 +437,7 @@ public class CommitLog
             {
                 logger.info("Discarding obsolete commit log:" + segment);
                 segment.close();
+                DeletionService.submitDelete(segment.getHeaderPath());
                 DeletionService.submitDelete(segment.getPath());
                 // usually this will be the first (remaining) segment, but not always, if segment A contains
                 // writes to a CF that is unflushed but is followed by segment B whose CFs are all flushed.

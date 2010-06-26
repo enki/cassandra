@@ -20,11 +20,14 @@ package org.apache.cassandra.db.filter;
  * 
  */
 
-
 import java.io.IOError;
 import java.io.IOException;
 import java.util.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
@@ -32,12 +35,9 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.FileMark;
 import org.apache.cassandra.utils.BloomFilter;
 import org.apache.cassandra.utils.FBUtilities;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class SSTableNamesIterator extends SimpleAbstractColumnIterator implements IColumnIterator
 {
@@ -47,7 +47,7 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
     private Iterator<IColumn> iter;
     public final SortedSet<byte[]> columns;
     public final DecoratedKey decoratedKey;
-    
+
     public SSTableNamesIterator(SSTableReader ssTable, DecoratedKey key, SortedSet<byte[]> columnNames)
     {
         this (ssTable, null, key, columnNames);
@@ -55,15 +55,17 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
 
     public SSTableNamesIterator(SSTableReader ssTable, FileDataInput file, DecoratedKey key, SortedSet<byte[]> columnNames)
     {
-        assert columnNames != null;
-
-        this.columns = columnNames;
-        this.decoratedKey = key;
-
-        // open the sstable file, if we don't have one passed to use from range scan
-        if (file == null)
+        boolean closeFileWhenDone = file == null;
+        
+        try
         {
-            try
+            assert columnNames != null;
+
+            this.columns = columnNames;
+            this.decoratedKey = key;
+
+            // open the sstable file, if we don't have one passed to use from range scan
+            if (file == null)
             {
                 file = ssTable.getFileDataInput(decoratedKey, DatabaseDescriptor.getIndexedReadBufferSizeInKB() * 1024);
                 if (file == null)
@@ -71,17 +73,10 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
                 DecoratedKey keyInDisk = ssTable.getPartitioner().convertFromDiskFormat(FBUtilities.readShortByteArray(file));
                 assert keyInDisk.equals(decoratedKey)
                        : String.format("%s != %s in %s", keyInDisk, decoratedKey, file.getPath());
-                file.readInt(); // data size
+                SSTableReader.readRowSize(file, ssTable.getDescriptor());
             }
-            catch (IOException e)
-            {
-               throw new IOError(e);
-            }
-        }
 
-        // read the requested columns into `cf`
-        try
-        {
+            // read the requested columns into `cf`
             /* Read the bloom filter summarizing the columns */
             BloomFilter bf = IndexHelper.defreezeBloomFilter(file);
             List<IndexHelper.IndexInfo> indexList = IndexHelper.deserializeIndex(file);
@@ -118,14 +113,14 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
                 ranges.add(indexInfo);
             }
 
-            file.mark();
+            FileMark mark = file.mark();
             for (IndexHelper.IndexInfo indexInfo : ranges)
             {
-                file.reset();
-                long curOffsert = file.skipBytes((int)indexInfo.offset);
+                file.reset(mark);
+                long curOffsert = file.skipBytes((int) indexInfo.offset);
                 assert curOffsert == indexInfo.offset;
                 // TODO only completely deserialize columns we are interested in
-                while (file.bytesPastMark() < indexInfo.offset + indexInfo.width)
+                while (file.bytesPastMark(mark) < indexInfo.offset + indexInfo.width)
                 {
                     final IColumn column = cf.getColumnSerializer().deserialize(file);
                     // we check vs the original Set, not the filtered List, for efficiency
@@ -135,16 +130,30 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
                     }
                 }
             }
-        }
-        catch (IOException e)
-        {
-           throw new IOError(e); 
-        }
 
-        // create an iterator view of the columns we read
-        iter = cf.getSortedColumns().iterator();
+            // create an iterator view of the columns we read
+            iter = cf.getSortedColumns().iterator();
+        }
+        catch (IOException ioe)
+        {
+            throw new IOError(ioe);
+        }
+        finally
+        {
+            if (closeFileWhenDone && file != null)
+            {
+                try
+                {
+                    file.close();
+                }
+                catch (IOException ioe)
+                {
+                    logger.warn("error closing " + file.getPath());
+                }
+            }
+        }
     }
-     
+
     public DecoratedKey getKey()
     {
         return decoratedKey;

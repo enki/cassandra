@@ -22,20 +22,24 @@ import java.io.IOError;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Constructor;
+import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.net.InetAddress;
-import javax.management.*;
+import java.util.concurrent.*;
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
 
+import org.apache.commons.lang.StringUtils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
-import org.apache.cassandra.concurrent.*;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
@@ -43,27 +47,25 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.migration.AddKeyspace;
 import org.apache.cassandra.db.migration.Migration;
-import org.apache.cassandra.dht.*;
+import org.apache.cassandra.dht.BootStrapper;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.DeletionService;
 import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.locator.*;
-import org.apache.cassandra.net.*;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
+import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.net.ResponseVerbHandler;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
 import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
-import org.apache.cassandra.io.util.FileUtils;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.log4j.Level;
-import org.apache.commons.lang.StringUtils;
-
-import com.google.common.collect.Multimap;
-import com.google.common.collect.HashMultimap;
 
 /*
  * This abstraction contains the token/identifier of this node
@@ -231,9 +233,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance.registerVerbHandlers(Verb.TREE_REQUEST, new TreeRequestVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.TREE_RESPONSE, new AntiEntropyService.TreeResponseVerbHandler());
 
-        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_SYN, new Gossiper.GossipDigestSynVerbHandler());
-        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK, new Gossiper.GossipDigestAckVerbHandler());
-        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK2, new Gossiper.GossipDigestAck2VerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_SYN, new GossipDigestSynVerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK, new GossipDigestAckVerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK2, new GossipDigestAck2VerbHandler());
         
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_ANNOUNCE, new DefinitionsAnnounceVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.DEFINITIONS_UPDATE_RESPONSE, new DefinitionsUpdateResponseVerbHandler());
@@ -308,10 +310,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         initialized = true;
         isClientMode = true;
         logger_.info("Starting up client gossip");
-        MessagingService.instance.listen(FBUtilities.getLocalAddress());
+        setMode("Client", false);
         Gossiper.instance.register(this);
         Gossiper.instance.start(FBUtilities.getLocalAddress(), (int)(System.currentTimeMillis() / 1000)); // needed for node-ring gathering.
-        setMode("Client", false);
+        MessagingService.instance.listen(FBUtilities.getLocalAddress());
         
         // sleep a while to allow gossip to warm up (the other nodes need to know about this one before they can reply).
         try
@@ -358,18 +360,16 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         logger_.info("Starting up server gossip");
 
-        MessagingService.instance.listen(FBUtilities.getLocalAddress());
-
-        StorageLoadBalancer.instance.startBroadcasting();
-        
-        MigrationManager.announce(DatabaseDescriptor.getDefsVersion(), DatabaseDescriptor.getSeeds());
-
         // have to start the gossip service before we can see any info on other nodes.  this is necessary
         // for bootstrap to get the load info it needs.
         // (we won't be part of the storage ring though until we add a nodeId to our state, below.)
         Gossiper.instance.register(this);
         Gossiper.instance.register(migrationManager);
         Gossiper.instance.start(FBUtilities.getLocalAddress(), storageMetadata_.getGeneration()); // needed for node-ring gathering.
+
+        MessagingService.instance.listen(FBUtilities.getLocalAddress());
+        StorageLoadBalancer.instance.startBroadcasting();
+        MigrationManager.announce(DatabaseDescriptor.getDefsVersion(), DatabaseDescriptor.getSeeds());
 
         if (DatabaseDescriptor.isAutoBootstrap()
                 && DatabaseDescriptor.getSeeds().contains(FBUtilities.getLocalAddress())
@@ -441,7 +441,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         isBootstrapMode = true;
         SystemTable.updateToken(token); // DON'T use setToken, that makes us part of the ring locally which is incorrect until we are done bootstrapping
         Gossiper.instance.addLocalApplicationState(MOVE_STATE, new ApplicationState(STATE_BOOTSTRAPPING + Delimiter + partitioner_.getTokenFactory().toString(token)));
-        setMode("Joining: sleeping " + RING_DELAY + " for pending range setup", true);
+        setMode("Joining: sleeping " + RING_DELAY + " ms for pending range setup", true);
         try
         {
             Thread.sleep(RING_DELAY);
@@ -491,6 +491,22 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         for (Map.Entry<Range,List<InetAddress>> entry : getRangeToAddressMap(keyspace).entrySet())
         {
             map.put(entry.getKey(), stringify(entry.getValue()));
+        }
+        return map;
+    }
+
+    public Map<Range, List<String>> getPendingRangeToEndpointMap(String keyspace)
+    {
+        // some people just want to get a visual representation of things. Allow null and set it to the first
+        // non-system table.
+        if (keyspace == null)
+            keyspace = DatabaseDescriptor.getNonSystemTables().get(0);
+
+        Map<Range, List<String>> map = new HashMap<Range, List<String>>();
+        for (Map.Entry<Range, Collection<InetAddress>> entry : tokenMetadata_.getPendingRanges(keyspace).entrySet())
+        {
+            List<InetAddress> l = new ArrayList<InetAddress>(entry.getValue());
+            map.put(entry.getKey(), stringify(l));
         }
         return map;
     }
@@ -668,6 +684,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 if (!tokenMetadata_.getToken(endpoint).equals(token))
                     logger_.warn("Node " + endpoint + " 'left' token mismatch. Long network partition?");
                 tokenMetadata_.removeEndpoint(endpoint);
+                HintedHandOffManager.deleteHintsForEndPoint(endpoint);
             }
         }
         else
@@ -698,13 +715,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     /**
      * endpoint was completely removed from ring (as a result of removetoken command). Remove it
-     * from token metadata and gossip and restore replica count.
+     * from token metadata and gossip and restore replica count.  Also delete any hints for it.
      */
     private void removeEndpointLocally(InetAddress endpoint)
     {
         restoreReplicaCount(endpoint);
         Gossiper.instance.removeEndpoint(endpoint);
         tokenMetadata_.removeEndpoint(endpoint);
+        HintedHandOffManager.deleteHintsForEndPoint(endpoint);
     }
 
     /**
@@ -766,8 +784,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // all leaving nodes are gone.
         for (Range range : affectedRanges)
         {
-            List<InetAddress> currentEndpoints = strategy.getNaturalEndpoints(range.right, tm, table);
-            List<InetAddress> newEndpoints = strategy.getNaturalEndpoints(range.right, allLeftMetadata, table);
+            Set<InetAddress> currentEndpoints = strategy.calculateNaturalEndpoints(range.right, tm, table);
+            Set<InetAddress> newEndpoints = strategy.calculateNaturalEndpoints(range.right, allLeftMetadata, table);
             newEndpoints.removeAll(currentEndpoints);
             pendingRanges.putAll(range, newEndpoints);
         }
@@ -872,11 +890,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (logger_.isDebugEnabled())
             logger_.debug("Node " + endpoint + " ranges [" + StringUtils.join(ranges, ", ") + "]");
 
-        Map<Range, ArrayList<InetAddress>> currentReplicaEndpoints = new HashMap<Range, ArrayList<InetAddress>>();
+        Map<Range, Set<InetAddress>> currentReplicaEndpoints = new HashMap<Range, Set<InetAddress>>();
 
         // Find (for each range) all nodes that store replicas for these ranges as well
         for (Range range : ranges)
-            currentReplicaEndpoints.put(range, getReplicationStrategy(table).getNaturalEndpoints(range.right, tokenMetadata_, table));
+            currentReplicaEndpoints.put(range, getReplicationStrategy(table).calculateNaturalEndpoints(range.right, tokenMetadata_, table));
 
         TokenMetadata temp = tokenMetadata_.cloneAfterAllLeft();
 
@@ -894,7 +912,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // range.
         for (Range range : ranges)
         {
-            ArrayList<InetAddress> newReplicaEndpoints = getReplicationStrategy(table).getNaturalEndpoints(range.right, temp, table);
+            Set<InetAddress> newReplicaEndpoints = getReplicationStrategy(table).calculateNaturalEndpoints(range.right, temp, table);
             newReplicaEndpoints.removeAll(currentReplicaEndpoints.get(range));
             if (logger_.isDebugEnabled())
                 if (newReplicaEndpoints.isEmpty())
@@ -979,6 +997,16 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getLocalToken().toString();
     }
 
+    public Set<String> getLeavingNodes()
+    {
+        return stringify(tokenMetadata_.getLeavingEndpoints());
+    }
+
+    public Set<String> getJoiningNodes()
+    {
+        return stringify(tokenMetadata_.getBootstrapTokens().values());
+    }
+
     public Set<String> getLiveNodes()
     {
         return stringify(Gossiper.instance.getLiveMembers());
@@ -989,7 +1017,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return stringify(Gossiper.instance.getUnreachableMembers());
     }
 
-    private Set<String> stringify(Set<InetAddress> endpoints)
+    private Set<String> stringify(Collection<InetAddress> endpoints)
     {
         Set<String> stringEndpoints = new HashSet<String>();
         for (InetAddress ep : endpoints)
@@ -1326,7 +1354,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         FBUtilities.sortSampledKeys(keys, range);
 
         if (keys.size() < 3)
-            return partitioner_.getRandomToken();
+            return partitioner_.midpoint(range.left, range.right);
         else
             return keys.get(keys.size() / 2).token;
     }
@@ -1356,7 +1384,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (logger_.isDebugEnabled())
             logger_.debug("DECOMMISSIONING");
         startLeaving();
-        setMode("Leaving: sleeping " + RING_DELAY + " for pending range setup", true);
+        setMode("Leaving: sleeping " + RING_DELAY + " ms for pending range setup", true);
         Thread.sleep(RING_DELAY);
 
         Runnable finishLeaving = new Runnable()
@@ -1473,7 +1501,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (logger_.isDebugEnabled())
             logger_.debug("Leaving: old token was " + getLocalToken());
         startLeaving();
-         setMode("Leaving: sleeping " + RING_DELAY + " for pending range setup", true);
+        setMode("Leaving: sleeping " + RING_DELAY + " ms for pending range setup", true);
         Thread.sleep(RING_DELAY);
 
         Runnable finishMoving = new WrappedRunnable()
@@ -1481,11 +1509,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             public void runMayThrow() throws IOException
             {
                 Token bootstrapToken = token;
-		if (bootstrapToken == null)
-		{
-		    StorageLoadBalancer.instance.waitForLoadInfo();
-		    bootstrapToken = BootStrapper.getBalancedToken(tokenMetadata_, StorageLoadBalancer.instance.getLoadInfo());
-		}
+                if (bootstrapToken == null)
+                {
+                    StorageLoadBalancer.instance.waitForLoadInfo();
+                    bootstrapToken = BootStrapper.getBalancedToken(tokenMetadata_, StorageLoadBalancer.instance.getLoadInfo());
+                }
                 logger_.info("re-bootstrapping to new token {}", bootstrapToken);
                 startBootstrap(bootstrapToken);
             }

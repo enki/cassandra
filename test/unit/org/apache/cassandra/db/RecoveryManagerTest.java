@@ -34,8 +34,7 @@ import static org.apache.cassandra.db.TableTest.assertColumns;
 public class RecoveryManagerTest extends CleanupHelper
 {
     @Test
-    public void testNothing() throws IOException {
-        // TODO nothing to recover
+    public void testNothingToRecover() throws IOException {
         CommitLog.recover();
     }
 

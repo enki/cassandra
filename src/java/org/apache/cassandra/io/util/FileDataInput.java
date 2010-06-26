@@ -33,9 +33,9 @@ public interface FileDataInput extends DataInput, Closeable
 
     public long bytesRemaining() throws IOException;
 
-    public void mark();
+    public FileMark mark();
 
-    public void reset() throws IOException;
+    public void reset(FileMark mark) throws IOException;
 
-    public int bytesPastMark();
+    public int bytesPastMark(FileMark mark);
 }

@@ -35,6 +35,7 @@ import java.net.InetAddress;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.SimpleCondition;
 
 import org.slf4j.Logger;
@@ -96,7 +97,6 @@ public class StreamOutManager
     private final Map<String, PendingFile> fileMap = new HashMap<String, PendingFile>();
     
     private final InetAddress to;
-    private long totalBytes = 0L;
     private final SimpleCondition condition = new SimpleCondition();
     
     private StreamOutManager(InetAddress to)
@@ -106,47 +106,34 @@ public class StreamOutManager
     
     public void addFilesToStream(PendingFile[] pendingFiles)
     {
+        // reset the condition in case this SOM is getting reused before it can be removed.
+        condition.reset();
         for (PendingFile pendingFile : pendingFiles)
         {
             if (logger.isDebugEnabled())
               logger.debug("Adding file " + pendingFile.getFilename() + " to be streamed.");
             files.add(pendingFile);
             fileMap.put(pendingFile.getFilename(), pendingFile);
-            totalBytes += pendingFile.getExpectedBytes();
         }
-    }
-
-    public void update(String path, long pos)
-    {
-        PendingFile pf = fileMap.get(path);
-        if (pf != null)
-            pf.update(pos);
     }
     
     public void startNext()
     {
         if (files.size() > 0)
         {
-            File file = new File(files.get(0).getFilename());
+            PendingFile pf = files.get(0);
             if (logger.isDebugEnabled())
-              logger.debug("Streaming " + file.length() + " length file " + file + " ...");
-            MessagingService.instance.stream(file.getAbsolutePath(), 0L, file.length(), FBUtilities.getLocalAddress(), to);
+              logger.debug("Streaming " + pf + " ...");
+            MessagingService.instance.stream(pf, to);
         }
     }
 
-    public void finishAndStartNext(String file) throws IOException
+    public void finishAndStartNext() throws IOException
     {
-        File f = new File(file);
-        if (logger.isDebugEnabled())
-          logger.debug("Deleting file " + file + " after streaming " + f.length() + "/" + totalBytes + " bytes.");
-        FileUtils.delete(file);
         PendingFile pf = files.remove(0);
-        if (pf != null)
-            fileMap.remove(pf.getFilename());
+        fileMap.remove(pf.getFilename());
         if (files.size() > 0)
-        {
             startNext();
-        }
         else
         {
             if (logger.isDebugEnabled())

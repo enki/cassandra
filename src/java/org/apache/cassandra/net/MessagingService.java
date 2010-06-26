@@ -18,14 +18,19 @@
 
 package org.apache.cassandra.net;
 
-import org.apache.cassandra.concurrent.*;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.gms.IFailureDetectionEventListener;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.io.SerializerType;
 import org.apache.cassandra.net.sink.SinkManager;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.streaming.PendingFile;
+import org.apache.cassandra.utils.ExpiringMap;
+import org.apache.cassandra.utils.GuidGenerator;
+import org.apache.cassandra.utils.SimpleCondition;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 import org.slf4j.Logger;
@@ -33,15 +38,16 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOError;
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousCloseException;
 import java.nio.channels.ServerSocketChannel;
 import java.security.MessageDigest;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -73,8 +79,9 @@ public class MessagingService implements IFailureDetectionEventListener
     private static Logger logger_ = LoggerFactory.getLogger(MessagingService.class);
     
     public static final MessagingService instance = new MessagingService();
-    
+
     private SocketThread socketThread;
+    private SimpleCondition listenGate;
 
     public Object clone() throws CloneNotSupportedException
     {
@@ -83,7 +90,8 @@ public class MessagingService implements IFailureDetectionEventListener
     }
 
     protected MessagingService()
-    {        
+    {
+        listenGate = new SimpleCondition();
         verbHandlers_ = new HashMap<StorageService.Verb, IVerbHandler>();
         /*
          * Leave callbacks in the cachetable long enough that any related messages will arrive
@@ -104,7 +112,7 @@ public class MessagingService implements IFailureDetectionEventListener
 
         streamExecutor_ = new JMXEnabledThreadPoolExecutor("MESSAGE-STREAMING-POOL");
     }
-    
+
     public byte[] hash(String type, byte data[])
     {
         byte result[];
@@ -139,6 +147,19 @@ public class MessagingService implements IFailureDetectionEventListener
         ss.bind(new InetSocketAddress(localEp, DatabaseDescriptor.getStoragePort()));
         socketThread = new SocketThread(ss, "ACCEPT-" + localEp);
         socketThread.start();
+        listenGate.signalAll();
+    }
+
+    public void waitUntilListening()
+    {
+        try
+        {
+            listenGate.await();
+        }
+        catch (InterruptedException ie)
+        {
+            logger_.debug("await interrupted");
+        }
     }
 
     public static OutboundTcpConnectionPool getConnectionPool(InetAddress to)
@@ -305,17 +326,14 @@ public class MessagingService implements IFailureDetectionEventListener
     /**
      * Stream a file from source to destination. This is highly optimized
      * to not hold any of the contents of the file in memory.
-     * @param file name of file to stream.
-     * @param startPosition position inside the file
-     * @param endPosition
+     * @param file file to stream.
      * @param to endpoint to which we need to stream the file.
     */
 
-    public void stream(String file, long startPosition, long endPosition, InetAddress from, InetAddress to)
+    public void stream(PendingFile file, InetAddress to)
     {
         /* Streaming asynchronously on streamExector_ threads. */
-        Runnable streamingTask = new FileStreamTask(file, startPosition, endPosition, from, to);
-        streamExecutor_.execute(streamingTask);
+        streamExecutor_.execute(new FileStreamTask(file, to));
     }
     
     /** blocks until the processing pools are empty and done. */

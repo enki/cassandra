@@ -27,6 +27,16 @@ dev
  * replace constant-size 2GB mmaped segments and special casing for index 
    entries spanning segment boundaries, with SegmentedFile that computes 
    segments that always contain entire entries/rows (CASSANDRA-1117)
+ * avoid reading large rows into memory during compaction (CASSANDRA-16)
+ * added hadoop OutputFormat (CASSANDRA-1101)
+ * efficient Streaming (no more anticompaction) (CASSANDRA-579)
+ * split commitlog header into separate file and add size checksum to
+   mutations (CASSANDRA-1179)
+ * avoid allocating a new byte[] for each mutation on replay (CASSANDRA-1219)
+ * revise HH schema to be per-endpoint (CASSANDRA-1142)
+ * remove gossip message size limit (CASSANDRA-1138)
+ * add joining/leaving status to nodetool ring (CASSANDRA-1115)
+ * allow multiple repair sessions per node (CASSANDRA-1190)
 
 
 0.6.3
@@ -36,10 +46,25 @@ dev
  * don't reject reads at CL.ALL (CASSANDRA-1152)
  * reject deletions to supercolumns in CFs containing only standard
    columns (CASSANDRA-1139)
+ * prefer sun jdk to openjdk in debian init script (CASSANDRA-1174)
  * detect partioner config changes between restarts and fail fast 
    (CASSANDRA-1146)
  * use generation time to resolve node token reassignment disagreements
    (CASSANDRA-1118)
+ * restructure the startup ordering of Gossiper and MessageService to avoid
+   timing anomalies (CASSANDRA-1160)
+ * detect incomplete commit log hearders (CASSANDRA-1119)
+ * force anti-entropy service to stream files on the stream stage to avoid
+   sending streams out of order (CASSANDRA-1169)
+ * remove inactive stream managers after AES streams files (CASSANDRA-1169)
+ * add JMX metrics for row-level bloom filter false positives (CASSANDRA-1212)
+ * added a redhat init script to contrib (CASSANDRA-1201)
+ * use midpoint when bootstrapping a new machine into range with not
+   much data yet instead of random token (CASSANDRA-1112)
+ * kill server on OOM in executor stage as well as Thrift (CASSANDRA-1226)
+ * remove opportunistic repairs, when two machines with overlapping replica
+   responsibilities happen to finish major compactions of the same CF near
+   the same time.  repairs are now fully manual (CASSANDRA-1190)
 
 
 0.6.2

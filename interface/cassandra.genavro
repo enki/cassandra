@@ -1,4 +1,22 @@
 /**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
  * Cassandra protocol
  */
 @namespace("org.apache.cassandra.avro")
@@ -45,7 +63,7 @@ protocol Cassandra {
         bytes finish;
         boolean reversed;
         int count;
-        array<bytes> bitmasks;
+        union { array<bytes>, null } bitmasks;
     }
 
     record SlicePredicate {
@@ -71,10 +89,12 @@ protocol Cassandra {
         union { string, null } clock_type;
         union { string, null } comparator_type;
         union { string, null } subcomparator_type;
+        union { string, null } reconciler;
         union { string, null } comment;
         union { double, null } row_cache_size;
         union { boolean, null } preload_row_cache;
         union { double, null } key_cache_size;
+        union { double, null } read_repair_chance;
     }
 
     record KsDef {
@@ -82,7 +102,17 @@ protocol Cassandra {
         string strategy_class;
         int replication_factor;
         array<CfDef> cf_defs;
-    } 
+    }
+    
+    record MutationsMapEntry {
+        bytes key;
+        map<array<Mutation>> mutations;
+    }
+
+    record CoscsMapEntry {
+         bytes key;
+         array<ColumnOrSuperColumn> columns;
+    }
 
     enum ConsistencyLevel {
         ZERO, ONE, QUORUM, DCQUORUM, DCQUORUMSYNC, ALL
@@ -109,21 +139,52 @@ protocol Cassandra {
                             ConsistencyLevel consistency_level)
     throws InvalidRequestException, NotFoundException, UnavailableException,
            TimedOutException;
+    
+    /**
+     * Get the group of columns contained by a column_parent (either a
+     * ColumnFamily name or a ColumnFamily/SuperColumn name pair) specified
+     * by the given SlicePredicate. If no matching values are found, an empty
+     * list is returned.
+     */
+    array<ColumnOrSuperColumn> get_slice(bytes key,
+                                         ColumnParent column_parent,
+                                         SlicePredicate predicate,
+                                         ConsistencyLevel consistency_level)
+    throws InvalidRequestException, UnavailableException, TimedOutException;
+
+    /**
+     * Performs a get_slice for column_parent and predicate against the given
+     * set of keys in parallel.
+     */
+    array<CoscsMapEntry> multiget_slice(array<bytes> keys,
+                                        ColumnParent column_parent,
+                                        SlicePredicate predicate,
+                                        ConsistencyLevel consistency_level)
+    throws InvalidRequestException, UnavailableException, TimedOutException;
+
+    /**
+     * Returns the number of columns matching a predicate for a particular
+     * key, ColumnFamily, and optionally SuperColumn.
+     */
+    int get_count(bytes key,
+                  ColumnParent column_parent,
+                  SlicePredicate predicate,
+                  ConsistencyLevel consistency_level)
+    throws InvalidRequestException, UnavailableException, TimedOutException;
 
     void insert(bytes key,
                 ColumnParent column_parent,
                 Column column,
                 ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TimedOutException;
-
-    void batch_insert(string keyspace,
-                      string key,
-                      map<array<ColumnOrSuperColumn>> cfmap,
-                      ConsistencyLevel consistency_level)
+    
+    void remove(bytes key,
+                ColumnPath column_path,
+                Clock clock,
+                ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TimedOutException;
 
-    void batch_mutate(string keyspace,
-                      map<map<array<Mutation>>> mutation_map,
+    void batch_mutate(array<MutationsMapEntry> mutation_map,
                       ConsistencyLevel consistency_level)
     throws InvalidRequestException, UnavailableException, TimedOutException;
 

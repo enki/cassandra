@@ -33,6 +33,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.io.util.FileMark;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.AbstractIterator;
@@ -51,12 +52,25 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
     private ColumnGroupReader reader;
     private boolean closeFileWhenDone = false;
     private DecoratedKey decoratedKey;
-    
+
     public SSTableSliceIterator(SSTableReader ssTable, DecoratedKey key, byte[] startColumn, byte[] finishColumn, Predicate<IColumn> predicate, boolean reversed)
     {
         this(ssTable, null, key, startColumn, finishColumn, predicate, reversed); 
     }
-    
+
+    /**
+     * An iterator for a slice within an SSTable
+     * @param ssTable The SSTable to iterate over
+     * @param file Optional parameter that input is read from.  If null is passed, this class creates an appropriate one automatically.
+     * If this class creates, it will close the underlying file when #close() is called.
+     * If a caller passes a non-null argument, this class will NOT close the underlying file when the iterator is closed (i.e. the caller is responsible for closing the file)
+     * In all cases the caller should explicitly #close() this iterator.
+     * @param key The key the requested slice resides under
+     * @param startColumn The start of the slice
+     * @param finishColumn The end of the slice
+     * @param predicate The predicate used for filtering columns
+     * @param reversed Results are returned in reverse order iff reversed is true.
+     */
     public SSTableSliceIterator(SSTableReader ssTable, FileDataInput file, DecoratedKey key, byte[] startColumn, byte[] finishColumn, Predicate<IColumn> predicate, boolean reversed) 
     {
         this.reversed = reversed;
@@ -68,6 +82,7 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
 
         if (file == null)
         {
+            closeFileWhenDone = true; //if we create it, we close it
             file = ssTable.getFileDataInput(decoratedKey, DatabaseDescriptor.getSlicedReadBufferSizeInKB() * 1024);
             if (file == null)
                 return;
@@ -76,7 +91,7 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
                 DecoratedKey keyInDisk = ssTable.getPartitioner().convertFromDiskFormat(FBUtilities.readShortByteArray(file));
                 assert keyInDisk.equals(decoratedKey)
                        : String.format("%s != %s in %s", keyInDisk, decoratedKey, file.getPath());
-                file.readInt(); // row size
+                SSTableReader.readRowSize(file, ssTable.getDescriptor());
             }
             catch (IOException e)
             {
@@ -158,6 +173,7 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
 
         private int curRangeIndex;
         private Deque<IColumn> blockColumns = new ArrayDeque<IColumn>();
+        private final FileMark mark;
 
         public ColumnGroupReader(SSTableReader ssTable, FileDataInput input)
         {
@@ -174,7 +190,7 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
             {
                 throw new IOError(e);
             }
-            file.mark();
+            this.mark = file.mark();
             curRangeIndex = IndexHelper.indexFor(startColumn, indexes, comparator, reversed);
             if (reversed && curRangeIndex == indexes.size())
                 curRangeIndex--;
@@ -227,10 +243,10 @@ class SSTableSliceIterator extends AbstractIterator<IColumn> implements IColumnI
 
             boolean outOfBounds = false;
 
-            file.reset();
+            file.reset(mark);
             long curOffset = file.skipBytes((int) curColPosition.offset); 
             assert curOffset == curColPosition.offset;
-            while (file.bytesPastMark() < curColPosition.offset + curColPosition.width && !outOfBounds)
+            while (file.bytesPastMark(mark) < curColPosition.offset + curColPosition.width && !outOfBounds)
             {
                 IColumn column = emptyColumnFamily.getColumnSerializer().deserialize(file);
                 if (reversed)

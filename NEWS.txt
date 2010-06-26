@@ -13,6 +13,10 @@ Features
     - DatacenterShardStrategy is ready for use, enabling 
       ConsitencyLevel.DCQUORUM and DCQUORUMSYNC.  See comments in
       `cassandra.yaml.`
+    - row size limit increased from 2GB to 2 billion columns
+    - Hadoop OutputFormat support
+    - Streaming data for repair or node movement no longer requires 
+      anticompaction step first
 
 Configuraton
 ------------
@@ -35,6 +39,7 @@ Configuraton
     - EndPointSnitch was renamed to RackInferringSnitch.  A new SimpleSnitch
       has been added.
     - auto_bootstrap now defaults to true
+    - row_warning_threshold_in_mb replaced with in_memory_compaction_limit_in_mb
 
 JMX
 ---
@@ -47,6 +52,27 @@ Thrift API
     - The return type for login() is now AccessLevel.
     - The get_string_property() method has been removed.
     - The get_string_list_property() method has been removed.
+
+Other
+-----
+    - If extending AbstractType, make sure you follow the singleton pattern
+      followed by Cassandra core AbstractType extensions.
+      e.g. BytesType has a variable called 'instance' and an empty constructor
+      with default access
+
+
+0.6.1
+=====
+
+Upgrading
+---------
+    - We try to keep minor versions 100% compatible (data format,
+      commitlog format, network format) within the major series, but
+      we introduced a network-level incompatibility in this 0.6.1.
+      Thus, if you are upgrading from 0.6.0 to any higher version
+      (0.6.1, 0.6.2, etc.) then you will need to restart your entire
+      cluster with the new version, instead of being able to do a
+      rolling restart.
 
 
 0.6.0

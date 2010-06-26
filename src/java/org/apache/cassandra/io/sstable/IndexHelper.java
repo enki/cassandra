@@ -25,6 +25,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.BloomFilter;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.io.util.FileDataInput;
+import org.apache.cassandra.io.util.FileMark;
 
 /**
  * Provides helper to serialize, deserialize and use column indexes.
@@ -70,12 +71,12 @@ public class IndexHelper
         ArrayList<IndexInfo> indexList = new ArrayList<IndexInfo>();
 
 		int columnIndexSize = in.readInt();
-        in.mark();
-        while (in.bytesPastMark() < columnIndexSize)
+        FileMark mark = in.mark();
+        while (in.bytesPastMark(mark) < columnIndexSize)
         {
             indexList.add(IndexInfo.deserialize(in));
         }
-        assert in.bytesPastMark() == columnIndexSize;
+        assert in.bytesPastMark(mark) == columnIndexSize;
 
         return indexList;
 	}
@@ -86,7 +87,7 @@ public class IndexHelper
      * @return bloom filter summarizing the column information
      * @throws java.io.IOException
      */
-    public static BloomFilter defreezeBloomFilter(FileDataInput file) throws IOException
+    public static BloomFilter defreezeBloomFilter(DataInput file) throws IOException
     {
         int size = file.readInt();
         byte[] bytes = new byte[size];
