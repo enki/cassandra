@@ -18,33 +18,32 @@
 
 package org.apache.cassandra.db;
 
+import java.io.IOException;
+import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Collection;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ExecutorService;
-import java.io.IOException;
+import java.util.concurrent.TimeoutException;
 
+import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
-
-import java.net.InetAddress;
-
-import org.apache.commons.lang.ArrayUtils;
-
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.service.*;
+import org.apache.cassandra.service.DigestMismatchException;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.service.WriteResponseHandler;
 import org.apache.cassandra.thrift.InvalidRequestException;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.utils.FBUtilities;
-import static org.apache.cassandra.utils.FBUtilities.UTF8;
 import org.apache.cassandra.utils.WrappedRunnable;
+import org.cliffc.high_scale_lib.NonBlockingHashSet;
+
+import static com.google.common.base.Charsets.UTF_8;
 
 
 /**
@@ -83,6 +82,8 @@ public class HintedHandOffManager
     public static final String HINTS_CF = "HintsColumnFamily";
     private static final int PAGE_SIZE = 10000;
     private static final String SEPARATOR = "-";
+
+    private final NonBlockingHashSet<InetAddress> queuedDeliveries = new NonBlockingHashSet<InetAddress>();
 
     private final ExecutorService executor_ = new JMXEnabledThreadPoolExecutor("HINTED-HANDOFF-POOL");
 
@@ -153,8 +154,8 @@ public class HintedHandOffManager
 
     public static byte[] makeCombinedName(String tableName, String columnFamily)
     {
-        byte[] withsep = ArrayUtils.addAll(tableName.getBytes(FBUtilities.UTF8), SEPARATOR.getBytes());
-        return ArrayUtils.addAll(withsep, columnFamily.getBytes(FBUtilities.UTF8));
+        byte[] withsep = ArrayUtils.addAll(tableName.getBytes(UTF_8), SEPARATOR.getBytes());
+        return ArrayUtils.addAll(withsep, columnFamily.getBytes(UTF_8));
     }
 
     private static String[] getTableAndCFNames(byte[] joined)
@@ -170,9 +171,10 @@ public class HintedHandOffManager
 
     }
             
-    private static void deliverHintsToEndpoint(InetAddress endpoint) throws IOException, DigestMismatchException, InvalidRequestException, TimeoutException
+    private void deliverHintsToEndpoint(InetAddress endpoint) throws IOException, DigestMismatchException, InvalidRequestException, TimeoutException
     {
         logger_.info("Started hinted handoff for endpoint " + endpoint);
+        queuedDeliveries.remove(endpoint);
 
         // 1. Get the key of the endpoint we need to handoff
         // 2. For each column read the list of rows: subcolumns are KS + SEPARATOR + CF
@@ -228,7 +230,7 @@ public class HintedHandOffManager
     /** called when a keyspace is dropped or rename. newTable==null in the case of a drop. */
     public static void renameHints(String oldTable, String newTable) throws IOException
     {
-        DecoratedKey oldTableKey = StorageService.getPartitioner().decorateKey(oldTable.getBytes(UTF8));
+        DecoratedKey oldTableKey = StorageService.getPartitioner().decorateKey(oldTable.getBytes(UTF_8));
         // we're basically going to fetch, drop and add the scf for the old and new table. we need to do it piecemeal 
         // though since there could be GB of data.
         ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
@@ -242,7 +244,7 @@ public class HintedHandOffManager
                 break;
             if (newTable != null)
             {
-                RowMutation insert = new RowMutation(Table.SYSTEM_TABLE, newTable.getBytes(UTF8));
+                RowMutation insert = new RowMutation(Table.SYSTEM_TABLE, newTable.getBytes(UTF_8));
                 insert.add(cf);
                 insert.apply();
             }
@@ -263,6 +265,9 @@ public class HintedHandOffManager
     */
     public void deliverHints(final InetAddress to)
     {
+        if (!queuedDeliveries.add(to))
+            return;
+
         Runnable r = new WrappedRunnable()
         {
             public void runMayThrow() throws Exception
