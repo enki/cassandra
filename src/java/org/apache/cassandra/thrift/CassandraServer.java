@@ -22,32 +22,21 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.cassandra.auth.AllowAllAuthenticator;
-import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.db.migration.AddColumnFamily;
-import org.apache.cassandra.db.migration.AddKeyspace;
-import org.apache.cassandra.db.migration.DropColumnFamily;
-import org.apache.cassandra.db.migration.DropKeyspace;
-import org.apache.cassandra.db.migration.RenameColumnFamily;
-import org.apache.cassandra.db.migration.RenameKeyspace;
-import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.auth.AllowAllAuthenticator;
+import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.clock.AbstractReconciler;
 import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.MarshalException;
-import org.apache.cassandra.dht.AbstractBounds;
-import org.apache.cassandra.dht.Bounds;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.db.migration.*;
+import org.apache.cassandra.dht.*;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.thrift.TException;
@@ -501,6 +490,12 @@ public class CassandraServer implements Cassandra.Iface
         String keyspace = keySpace.get();
         checkKeyspaceAndLoginAuthorized(AccessLevel.READONLY);
 
+        return getRangeSlicesInternal(keyspace, column_parent, range, predicate, consistency_level);
+    }
+
+    private List<KeySlice> getRangeSlicesInternal(String keyspace, ColumnParent column_parent, KeyRange range, SlicePredicate predicate, ConsistencyLevel consistency_level)
+    throws InvalidRequestException, UnavailableException, TimedOutException
+    {
         ThriftValidation.validateColumnParent(keyspace, column_parent);
         ThriftValidation.validatePredicate(keyspace, column_parent, predicate);
         ThriftValidation.validateKeyRange(range);
@@ -533,6 +528,11 @@ public class CassandraServer implements Cassandra.Iface
             throw new RuntimeException(e);
         }
 
+        return thriftifyKeySlices(rows, column_parent, predicate);
+    }
+
+    private List<KeySlice> thriftifyKeySlices(List<Row> rows, ColumnParent column_parent, SlicePredicate predicate)
+    {
         List<KeySlice> keySlices = new ArrayList<KeySlice>(rows.size());
         boolean reversed = predicate.slice_range != null && predicate.slice_range.reversed;
         for (Row row : rows)
@@ -542,6 +542,71 @@ public class CassandraServer implements Cassandra.Iface
         }
 
         return keySlices;
+    }
+
+    public List<KeySlice> scan(ColumnParent column_parent, RowPredicate row_predicate, SlicePredicate column_predicate, ConsistencyLevel consistency_level) throws InvalidRequestException, UnavailableException, TimedOutException, TException
+    {
+        if (logger.isDebugEnabled())
+            logger.debug("scan");
+
+        checkKeyspaceAndLoginAuthorized(AccessLevel.READONLY);
+
+        if (row_predicate.keys != null)
+        {
+            Map<byte[], List<ColumnOrSuperColumn>> rowMap = multigetSliceInternal(keySpace.get(), row_predicate.keys, column_parent, column_predicate, consistency_level);
+            List<KeySlice> rows = new ArrayList<KeySlice>(rowMap.size());
+            for (Map.Entry<byte[], List<ColumnOrSuperColumn>> entry : rowMap.entrySet())
+            {
+                rows.add(new KeySlice(entry.getKey(), entry.getValue()));
+            }
+            return rows;
+        }
+
+        if (row_predicate.key_range != null)
+        {
+            return getRangeSlicesInternal(keySpace.get(), column_parent, row_predicate.key_range, column_predicate, consistency_level);
+        }
+
+        if (row_predicate.index_clause != null)
+        {
+            return scanIndexInternal(keySpace.get(), column_parent, row_predicate.index_clause, column_predicate, consistency_level);
+        }
+
+        throw new InvalidRequestException("row predicate must specify keys, key_range, or index_clause");
+    }
+
+    private List<KeySlice> scanIndexInternal(String keyspace, ColumnParent column_parent, IndexClause index_clause, SlicePredicate predicate, ConsistencyLevel consistency_level)
+    throws InvalidRequestException, TimedOutException
+    {
+        ThriftValidation.validateColumnParent(keyspace, column_parent);
+        ThriftValidation.validatePredicate(keyspace, column_parent, predicate);
+        ThriftValidation.validateIndexClauses(keyspace, column_parent.column_family, index_clause);
+
+        List<Row> rows = null;
+        try
+        {
+            rows = StorageProxy.scan(new IndexScanCommand(keyspace, column_parent.column_family, index_clause, predicate), consistency_level);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
+        catch (TimeoutException e)
+        {
+            throw new TimedOutException();
+        }
+        return thriftifyKeySlices(rows, column_parent, predicate);
+    }
+
+    public List<KeyCount> scan_count(ColumnParent column_parent, RowPredicate row_predicate, SlicePredicate column_predicate, ConsistencyLevel consistency_level) throws InvalidRequestException, UnavailableException, TimedOutException, TException
+    {
+        List<KeySlice> rows = scan(column_parent, row_predicate, column_predicate, consistency_level);
+        List<KeyCount> rowCounts = new ArrayList<KeyCount>(rows.size());
+        for (KeySlice slice : rows)
+        {
+            rowCounts.add(new KeyCount(slice.key, slice.columns.size()));
+        }
+        return rowCounts;
     }
 
     public Set<String> describe_keyspaces() throws TException
@@ -845,20 +910,20 @@ public class CassandraServer implements Cassandra.Iface
                 throw new ConfigurationException("No reconciler specified for column family " + cf_def.name);
 
         }
-        
-        return new CFMetaData(
-                    cf_def.table,
-                    cf_def.name,
-                    cfType,
-                    clockType,
-                    DatabaseDescriptor.getComparator(cf_def.comparator_type),
-                    cf_def.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cf_def.subcomparator_type),
-                    reconciler,
-                    cf_def.comment,
-                    cf_def.row_cache_size,
-                    cf_def.preload_row_cache,
-                    cf_def.key_cache_size,
-                    cf_def.read_repair_chance);
+
+        return new CFMetaData(cf_def.table,
+                              cf_def.name,
+                              cfType,
+                              clockType,
+                              DatabaseDescriptor.getComparator(cf_def.comparator_type),
+                              cf_def.subcomparator_type.length() == 0 ? null : DatabaseDescriptor.getComparator(cf_def.subcomparator_type),
+                              reconciler,
+                              cf_def.comment,
+                              cf_def.row_cache_size,
+                              cf_def.preload_row_cache,
+                              cf_def.key_cache_size,
+                              cf_def.read_repair_chance,
+                              ColumnDefinition.fromColumnDef(cf_def.column_metadata));
     }
 
     public void truncate(String cfname) throws InvalidRequestException, UnavailableException, TException
@@ -886,7 +951,7 @@ public class CassandraServer implements Cassandra.Iface
         }
         
         // If switching, invalidate previous access level; force a new login.
-        if (keySpace.get() != null && !keySpace.get().equals(keyspace));
+        if (keySpace.get() != null && !keySpace.get().equals(keyspace))
             loginDone.set(AccessLevel.NONE);
         
         keySpace.set(keyspace); 

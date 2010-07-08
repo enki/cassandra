@@ -22,30 +22,20 @@ package org.apache.cassandra.hadoop;
  */
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.AllowAllAuthenticator;
 import org.apache.cassandra.auth.SimpleAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.AuthenticationException;
 import org.apache.cassandra.thrift.AuthenticationRequest;
 import org.apache.cassandra.thrift.AuthorizationException;
 import org.apache.cassandra.thrift.Cassandra;
-import org.apache.cassandra.thrift.ColumnParent;
-import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.thrift.InvalidRequestException;
-import org.apache.cassandra.thrift.KeyRange;
-import org.apache.cassandra.thrift.KeySlice;
-import org.apache.cassandra.thrift.SlicePredicate;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.OutputCommitter;
@@ -55,6 +45,8 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.transport.TSocket;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The <code>ColumnFamilyOutputFormat</code> acts as a Hadoop-specific
@@ -64,23 +56,18 @@ import org.apache.thrift.transport.TSocket;
  * 
  * <p>
  * As is the case with the {@link ColumnFamilyInputFormat}, you need to set the
- * CF and predicate (description of columns to extract from each row) in your
+ * Keyspace and ColumnFamily in your
  * Hadoop job Configuration. The {@link ConfigHelper} class, through its
- * {@link ConfigHelper#setColumnFamily} and
- * {@link ConfigHelper#setSlicePredicate} methods, is provided to make this
+ * {@link ConfigHelper#setOutputColumnFamily} method, is provided to make this
  * simple.
  * </p>
  * 
  * <p>
- * By default, it prevents overwriting existing rows in the column family, by
- * ensuring at initialization time that it contains no rows in the given slice
- * predicate. For the sake of performance, it employs a lazy write-back caching
+ * For the sake of performance, this class employs a lazy write-back caching
  * mechanism, where its record writer batches mutations created based on the
  * reduce's inputs (in a task-specific map). When the writer is closed, then it
  * makes the changes official by sending a batch mutate request to Cassandra.
  * </p>
- * 
- * @author Karthick Sankarachary
  */
 public class ColumnFamilyOutputFormat extends OutputFormat<byte[],List<IColumn>>
 {
@@ -91,49 +78,18 @@ public class ColumnFamilyOutputFormat extends OutputFormat<byte[],List<IColumn>>
     /**
      * Check for validity of the output-specification for the job.
      * 
-     * <p>
-     * This is to validate the output specification for the job when it is a job
-     * is submitted. By default, it will prevent writes to the given column
-     * family, if it already contains one or more rows in the given slice
-     * predicate. If you wish to relax that restriction, you may override this
-     * method is a sub-class of your choosing.
-     * </p>
-     * 
      * @param context
      *            information about the job
      * @throws IOException
      *             when output should not be attempted
      */
     @Override
-    public void checkOutputSpecs(JobContext context) throws IOException, InterruptedException
+    public void checkOutputSpecs(JobContext context)
     {
-        validateConfiguration(context.getConfiguration());
-        String keyspace = ConfigHelper.getKeyspace(context.getConfiguration());
-        String columnFamily = ConfigHelper.getColumnFamily(context.getConfiguration());
-        SlicePredicate slicePredicate = ConfigHelper.getSlicePredicate(context.getConfiguration());
-        assert slicePredicate != null;
-        if (slicePredicate.column_names == null && slicePredicate.slice_range == null)
-            slicePredicate = slicePredicate.setColumn_names(new ArrayList<byte[]>());
-
-        List<KeySlice> keySlices;
-        try
+        Configuration conf = context.getConfiguration();
+        if (ConfigHelper.getOutputKeyspace(conf) == null || ConfigHelper.getOutputColumnFamily(conf) == null)
         {
-            TSocket socket = new TSocket(DatabaseDescriptor.getListenAddress().getHostName(), DatabaseDescriptor.getRpcPort());
-            Cassandra.Client client = createAuthenticatedClient(socket, context);
-            ColumnParent parent = new ColumnParent().setColumn_family(columnFamily);
-            KeyRange range = new KeyRange().setStart_key("".getBytes()).setEnd_key("".getBytes());
-            keySlices = client.get_range_slices(parent, slicePredicate, range, ConsistencyLevel.ONE);
-        }
-        catch (Exception e)
-        {
-            throw new IOException(e);
-        }
-        if (keySlices.size() > 0)
-        {
-            throw new IOException("The column family " + columnFamily
-                                  + " in the keyspace " + keyspace + " already has "
-                                  + keySlices.size() + " keys in the slice predicate "
-                                  + slicePredicate);
+            throw new UnsupportedOperationException("you must set the keyspace and columnfamily with setColumnFamily()");
         }
     }
     
@@ -179,26 +135,6 @@ public class ColumnFamilyOutputFormat extends OutputFormat<byte[],List<IColumn>>
     {
         return new ColumnFamilyRecordWriter(context);
     }
-    
-    /**
-     * Ensure that this output format has been configured correctly, with a
-     * valid keyspace, column family and slice predicate.
-     * 
-     * @param conf
-     */
-    public void validateConfiguration(Configuration conf)
-    {
-        if (ConfigHelper.getKeyspace(conf) == null || ConfigHelper.getColumnFamily(conf) == null)
-        {
-            throw new UnsupportedOperationException("you must set the keyspace and columnfamily with setColumnFamily()");
-        }
-        if (ConfigHelper.getSlicePredicate(conf) == null)
-        {
-            System.out.println("Since no slice predicate was specified, all columns in "
-                               + ConfigHelper.getColumnFamily(conf)
-                               + " will be overwritten");
-        }
-    }
 
     /**
      * Return a client based on the given socket that points to the configured
@@ -218,10 +154,10 @@ public class ColumnFamilyOutputFormat extends OutputFormat<byte[],List<IColumn>>
         TBinaryProtocol binaryProtocol = new TBinaryProtocol(socket, false, false);
         Cassandra.Client client = new Cassandra.Client(binaryProtocol);
         socket.open();
-        client.set_keyspace(ConfigHelper.getKeyspace(context.getConfiguration()));
+        client.set_keyspace(ConfigHelper.getOutputKeyspace(context.getConfiguration()));
         Map<String, String> creds = new HashMap<String, String>();
-        creds.put(SimpleAuthenticator.USERNAME_KEY, ConfigHelper.getKeyspaceUserName(context.getConfiguration()));
-        creds.put(SimpleAuthenticator.PASSWORD_KEY, ConfigHelper.getKeyspacePassword(context.getConfiguration()));
+        creds.put(SimpleAuthenticator.USERNAME_KEY, ConfigHelper.getOutputKeyspaceUserName(context.getConfiguration()));
+        creds.put(SimpleAuthenticator.PASSWORD_KEY, ConfigHelper.getOutputKeyspacePassword(context.getConfiguration()));
         AuthenticationRequest authRequest = new AuthenticationRequest(creds);
         if (!(DatabaseDescriptor.getAuthenticator() instanceof AllowAllAuthenticator))
             client.login(authRequest);

@@ -18,43 +18,27 @@
 
 package org.apache.cassandra.db;
 
-import org.apache.cassandra.CleanupHelper;
-import org.apache.cassandra.Util;
-
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.db.clock.TimestampReconciler;
-import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.db.migration.AddColumnFamily;
-import org.apache.cassandra.db.migration.AddKeyspace;
-import org.apache.cassandra.db.migration.DropColumnFamily;
-import org.apache.cassandra.db.migration.DropKeyspace;
-import org.apache.cassandra.db.migration.Migration;
-import org.apache.cassandra.db.migration.RenameColumnFamily;
-import org.apache.cassandra.db.migration.RenameKeyspace;
-import org.apache.cassandra.locator.RackUnawareStrategy;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.utils.UUIDGen;
-
-import org.junit.Test;
-
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.SortedSet;
-import java.util.TreeSet;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ExecutionException;
+
+import org.junit.Test;
+
+import org.apache.cassandra.CleanupHelper;
+import org.apache.cassandra.Util;
+import org.apache.cassandra.config.*;
+import org.apache.cassandra.db.clock.TimestampReconciler;
+import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.migration.*;
+import org.apache.cassandra.locator.RackUnawareStrategy;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
 
 public class DefsTest extends CleanupHelper
 {   
@@ -78,7 +62,7 @@ public class DefsTest extends CleanupHelper
     @Test
     public void addNewCfToBogusTable() throws InterruptedException
     {
-        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "new cf", 0, false, 1.0, 0);
+        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "new cf", 0, false, 1.0, 0, Collections.<byte[], ColumnDefinition>emptyMap());
         try
         {
             new AddColumnFamily(newCf).apply();
@@ -92,7 +76,7 @@ public class DefsTest extends CleanupHelper
             throw new AssertionError("Unexpected exception.");
         }
     }
-    
+
     @Test
     public void testMigrations() throws IOException, ConfigurationException
     {
@@ -101,9 +85,9 @@ public class DefsTest extends CleanupHelper
         UUID ver0 = UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress());
         DefsTable.dumpToStorage(ver0);
         assert DatabaseDescriptor.getDefsVersion().equals(prior);
-        
+
         // add a cf.
-        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "Migration CF ", 0, false, 1.0, 0);
+        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "Migration CF ", 0, false, 1.0, 0, Collections.<byte[], ColumnDefinition>emptyMap());
         Migration m1 = new AddColumnFamily(newCf1);
         m1.apply();
         UUID ver1 = m1.getVersion();
@@ -162,7 +146,7 @@ public class DefsTest extends CleanupHelper
         final String cf = "BrandNewCf";
         KSMetaData original = DatabaseDescriptor.getTableDefinition(ks);
 
-        CFMetaData newCf = new CFMetaData(original.name, cf, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A New Column Family", 0, false, 1.0, 0);
+        CFMetaData newCf = new CFMetaData(original.name, cf, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A New Column Family", 0, false, 1.0, 0, Collections.<byte[], ColumnDefinition>emptyMap());
         assert !DatabaseDescriptor.getTableDefinition(ks).cfMetaData().containsKey(newCf.cfName);
         new AddColumnFamily(newCf).apply();
 
@@ -211,17 +195,18 @@ public class DefsTest extends CleanupHelper
         
         // any write should fail.
         rm = new RowMutation(ks.name, dk.key);
+        boolean success = true;
         try
         {
             rm.add(new QueryPath("Standard1", null, "col0".getBytes()), "value0".getBytes(), new TimestampClock(1L));
             rm.apply();
-            assert false : "This mutation should have failed since the CF no longer exists.";
         }
         catch (Throwable th)
         {
-            assert th instanceof IllegalArgumentException;
+            success = false;
         }
-        
+        assert !success : "This mutation should have failed since the CF no longer exists.";
+
         // verify that the files are gone.
         assert DefsTable.getFiles(cfm.tableName, cfm.cfName).size() == 0;
     }    
@@ -276,7 +261,7 @@ public class DefsTest extends CleanupHelper
     public void addNewKS() throws ConfigurationException, IOException, ExecutionException, InterruptedException
     {
         DecoratedKey dk = Util.dk("key0");
-        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new cf for a new ks", 0, false, 1.0, 0);
+        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new cf for a new ks", 0, false, 1.0, 0, Collections.<byte[], ColumnDefinition>emptyMap());
         KSMetaData newKs = new KSMetaData(newCf.tableName, RackUnawareStrategy.class, 5, newCf);
         
         new AddKeyspace(newKs).apply();
@@ -324,17 +309,18 @@ public class DefsTest extends CleanupHelper
         
         // write should fail.
         rm = new RowMutation(ks.name, dk.key);
+        boolean success = true;
         try
         {
             rm.add(new QueryPath("Standard1", null, "col0".getBytes()), "value0".getBytes(), new TimestampClock(1L));
             rm.apply();
-            throw new AssertionError("This mutation should have failed since the CF no longer exists.");
         }
         catch (Throwable th)
         {
-            assert th instanceof IllegalArgumentException;
+            success = false;
         }
-        
+        assert !success : "This mutation should have failed since the CF no longer exists.";
+
         // reads should fail too.
         try
         {
@@ -391,16 +377,17 @@ public class DefsTest extends CleanupHelper
         
         // write on old should fail.
         rm = new RowMutation(oldKs.name, "any key will do".getBytes());
+        boolean success = true;
         try
         {
             rm.add(new QueryPath(cfName, null, "col0".getBytes()), "value0".getBytes(), new TimestampClock(1L));
             rm.apply();
-            throw new AssertionError("This mutation should have failed since the CF/Table no longer exists.");
         }
         catch (Throwable th)
         {
-            assert th instanceof IllegalArgumentException;
+            success = false;
         }
+        assert !success : "This mutation should have failed since the CF/Table no longer exists.";
         
         // write on new should work.
         rm = new RowMutation(newKsName, dk.key);
@@ -432,7 +419,7 @@ public class DefsTest extends CleanupHelper
         new AddKeyspace(newKs).apply();
         assert DatabaseDescriptor.getTableDefinition("EmptyKeyspace") != null;
 
-        CFMetaData newCf = new CFMetaData("EmptyKeyspace", "AddedLater", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new CF to add to an empty KS", 0, false, 1.0, 0);
+        CFMetaData newCf = new CFMetaData("EmptyKeyspace", "AddedLater", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new CF to add to an empty KS", 0, false, 1.0, 0, Collections.<byte[], ColumnDefinition>emptyMap());
 
         //should not exist until apply
         assert !DatabaseDescriptor.getTableDefinition(newKs.name).cfMetaData().containsKey(newCf.cfName);

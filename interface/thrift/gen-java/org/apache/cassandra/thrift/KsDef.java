@@ -514,14 +514,14 @@ public class KsDef implements TBase<KsDef._Fields>, java.io.Serializable, Clonea
         case 5: // CF_DEFS
           if (field.type == TType.LIST) {
             {
-              TList _list25 = iprot.readListBegin();
-              this.cf_defs = new ArrayList<CfDef>(_list25.size);
-              for (int _i26 = 0; _i26 < _list25.size; ++_i26)
+              TList _list37 = iprot.readListBegin();
+              this.cf_defs = new ArrayList<CfDef>(_list37.size);
+              for (int _i38 = 0; _i38 < _list37.size; ++_i38)
               {
-                CfDef _elem27;
-                _elem27 = new CfDef();
-                _elem27.read(iprot);
-                this.cf_defs.add(_elem27);
+                CfDef _elem39;
+                _elem39 = new CfDef();
+                _elem39.read(iprot);
+                this.cf_defs.add(_elem39);
               }
               iprot.readListEnd();
             }
@@ -564,9 +564,9 @@ public class KsDef implements TBase<KsDef._Fields>, java.io.Serializable, Clonea
       oprot.writeFieldBegin(CF_DEFS_FIELD_DESC);
       {
         oprot.writeListBegin(new TList(TType.STRUCT, this.cf_defs.size()));
-        for (CfDef _iter28 : this.cf_defs)
+        for (CfDef _iter40 : this.cf_defs)
         {
-          _iter28.write(oprot);
+          _iter40.write(oprot);
         }
         oprot.writeListEnd();
       }
