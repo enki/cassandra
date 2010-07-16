@@ -18,22 +18,17 @@
 
 package org.apache.cassandra.utils;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CharsetDecoder;
 import java.security.MessageDigest;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -512,10 +507,44 @@ public class FBUtilities
         return scpurl.getFile();
     }
 
+    public static String getReleaseVersionString()
+    {
+        try
+        {
+            InputStream in = ClassLoader.getSystemClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
+            Properties props = new Properties();
+            props.load(in);
+            return props.getProperty("CassandraVersion");
+        }
+        catch (IOException ioe)
+        {
+            throw new IOError(ioe);
+        }
+    }
+
     public static long timestampMicros()
     {
         // we use microsecond resolution for compatibility with other client libraries, even though
         // we can't actually get microsecond precision.
         return System.currentTimeMillis() * 1000;
+    }
+
+    public static void waitOnFutures(Collection<Future<?>> futures)
+    {
+        for (Future f : futures)
+        {
+            try
+            {
+                f.get();
+            }
+            catch (ExecutionException ee)
+            {
+                throw new RuntimeException(ee);
+            }
+            catch (InterruptedException ie)
+            {
+                throw new AssertionError(ie);
+            }
+        }
     }
 }

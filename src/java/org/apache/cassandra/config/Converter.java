@@ -41,7 +41,7 @@ public class Converter {
             int size = tablesxml.getLength();
             for ( int i = 0; i < size; ++i )
             {
-                String value = null;
+                String value;
                 Keyspace ks = new Keyspace();
                 Node table = tablesxml.item(i);
                 /* parsing out the table ksName */
@@ -158,18 +158,6 @@ public class Converter {
                 conf.concurrent_writes = Integer.parseInt(rawWriters);
             }
             
-            String rawFlushData = xmlUtils.getNodeValue("/Storage/FlushDataBufferSizeInMB");
-            if (rawFlushData != null)
-            {
-                conf.flush_data_buffer_size_in_mb = Double.parseDouble(rawFlushData);
-            }
-            
-            String rawFlushIndex = xmlUtils.getNodeValue("/Storage/FlushIndexBufferSizeInMB");
-            if (rawFlushIndex != null)
-            {
-                conf.flush_index_buffer_size_in_mb = Double.parseDouble(rawFlushIndex);
-            }
-
             String rawSlicedBuffer = xmlUtils.getNodeValue("/Storage/SlicedBufferSizeInKB");
             if (rawSlicedBuffer != null)
             {
@@ -197,9 +185,10 @@ public class Converter {
                 conf.rpc_port = Integer.parseInt(port);
             
             String framedRaw = xmlUtils.getNodeValue("/Storage/ThriftFramedTransport");
-            if (framedRaw != null)
+            if (framedRaw != null && Boolean.valueOf(framedRaw))
             {
-                conf.thrift_framed_transport = Boolean.valueOf(framedRaw);
+                conf.thrift_framed_transport_size_in_mb = 15;
+                System.out.println("TFramedTransport will have a maximum frame size of 15MB");
             }
             
             conf.endpoint_snitch = xmlUtils.getNodeValue("/Storage/EndpointSnitch");
@@ -287,7 +276,7 @@ public class Converter {
     {
         try
         {
-            String configname = null;
+            String configname;
             ClassLoader loader = Converter.class.getClassLoader();
             URL scpurl = loader.getResource(PREVIOUS_CONF_FILE);
             if (scpurl == null)

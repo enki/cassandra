@@ -36,9 +36,6 @@ public class Config {
     
     public Integer memtable_flush_writers = null; // will get set to the length of data dirs in DatabaseDescriptor
     
-    public Double flush_data_buffer_size_in_mb = new Double(32);
-    public Double flush_index_buffer_size_in_mb = new Double(8);
-    
     public Integer sliced_buffer_size_in_kb = 64;
     
     public Integer storage_port = 7000;
@@ -46,7 +43,9 @@ public class Config {
     
     public String rpc_address;
     public Integer rpc_port = 9160;
-    public Boolean thrift_framed_transport = false;
+
+    public Integer thrift_max_message_length_in_mb = 16;
+    public Integer thrift_framed_transport_size_in_mb = 15;
     public Boolean snapshot_before_compaction = false;
     
     public Integer binary_memtable_throughput_in_mb = 256;
@@ -71,7 +70,12 @@ public class Config {
     public Integer commitlog_sync_period_in_ms;
     
     public String endpoint_snitch;
+    public Boolean dynamic_snitch = false;
     
+    public String request_scheduler;
+    public RequestSchedulerId request_scheduler_id;
+    public RequestSchedulerOptions request_scheduler_options;
+
     public List<Keyspace> keyspaces;
     
     public static enum CommitLogSync {
@@ -86,4 +90,8 @@ public class Config {
         standard,
     }
     
+    public static enum RequestSchedulerId
+    {
+        keyspace
+    }
 }

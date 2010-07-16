@@ -23,12 +23,24 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import org.apache.commons.lang.NotImplementedException;
+
 /**
  * A simple endpoint snitch implementation does not sort addresses by
  * proximity.
  */
 public class SimpleSnitch extends AbstractEndpointSnitch
 {
+    public String getRack(InetAddress endpoint)
+    {
+        throw new NotImplementedException();
+    }
+
+    public String getDatacenter(InetAddress endpoint)
+    {
+        throw new NotImplementedException();
+    }
+    
     public List<InetAddress> getSortedListByProximity(final InetAddress address, Collection<InetAddress> addresses)
     {
         return new ArrayList<InetAddress>(addresses);

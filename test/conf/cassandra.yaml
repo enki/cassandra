@@ -1,6 +1,9 @@
+#
+# Warning!
+# Consider the effects on 'o.a.c.i.s.LegacySSTableTest' before changing schemas in this file.
+#
 cluster_name: Test Cluster
-flush_data_buffer_size_in_mb: 1
-flush_index_buffer_size_in_mb: 8
+in_memory_compaction_limit_in_mb: 1
 commitlog_sync: batch
 commitlog_sync_batch_window_in_ms: 1.0
 partitioner: org.apache.cassandra.dht.CollatingOrderPreservingPartitioner
@@ -19,6 +22,8 @@ memtable_operations_in_millions: 0.00002
 seeds:
     - 127.0.0.2
 endpoint_snitch: org.apache.cassandra.locator.SimpleSnitch
+request_scheduler: org.apache.cassandra.scheduler.RoundRobinScheduler
+request_scheduler_id: keyspace
 keyspaces:
     - name: Keyspace1
       replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy

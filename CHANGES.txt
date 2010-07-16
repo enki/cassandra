@@ -37,6 +37,12 @@ dev
  * remove gossip message size limit (CASSANDRA-1138)
  * add joining/leaving status to nodetool ring (CASSANDRA-1115)
  * allow multiple repair sessions per node (CASSANDRA-1190)
+ * add dynamic endpoint snitch (CASSANDRA-981)
+ * optimize away MessagingService for local range queries (CASSANDRA-1261)
+ * pre-emptively drop requests that cannot be processed within RPCTimeout
+   (CASSANDRA-685)
+ * make framed transport the default so malformed requests can't OOM the 
+   server (CASSANDRA-475)
 
 
 0.6.4
@@ -44,6 +50,9 @@ dev
    (CASSANDRA-1229)
  * better performance for and stricter checking of UTF8 column names
    (CASSANDRA-1232)
+ * extend option to lower compaction priority to hinted handoff
+   as well (CASSANDRA-1260)
+ * log thread pool stats when GC is excessive (CASSANDRA-1275)
 
 
 0.6.3
