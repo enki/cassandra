@@ -41,7 +41,7 @@ JVM_OPTS=" \
         -ea \
         \
         -Xms256M \
-        -Xmx1G \
+        -Xmx512M \
         -Xss128k \
         \
         -XX:+UseParNewGC \
