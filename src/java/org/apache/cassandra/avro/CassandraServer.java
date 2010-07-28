@@ -37,6 +37,7 @@ import org.apache.avro.generic.GenericArray;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.ipc.AvroRemoteException;
 import org.apache.avro.util.Utf8;
+import org.apache.cassandra.thrift.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -162,6 +163,10 @@ public class CassandraServer implements Cassandra {
         catch (org.apache.cassandra.thrift.UnavailableException e)
         {
             throw new UnavailableException();
+        }
+        catch (org.apache.cassandra.thrift.InvalidRequestException e)
+        {
+            throw new InvalidRequestException();
         }
         finally
         {
@@ -637,6 +642,9 @@ public class CassandraServer implements Cassandra {
 
                 }
 
+                if (cfDef.id != null)
+                    logger.warn("Ignoring 'id' field specified for new column family (%s, %s)", cfDef.keyspace, cfDef.name);
+
                 CFMetaData cfmeta = new CFMetaData(cfDef.keyspace.toString(),
                                                    cfDef.name.toString(),
                                                    ColumnFamilyType.create(cfType),
@@ -649,6 +657,7 @@ public class CassandraServer implements Cassandra {
                                                    cfDef.preload_row_cache == null ? CFMetaData.DEFAULT_PRELOAD_ROW_CACHE : cfDef.preload_row_cache,
                                                    cfDef.key_cache_size == null ? CFMetaData.DEFAULT_KEY_CACHE_SIZE : cfDef.key_cache_size,
                                                    cfDef.read_repair_chance == null ? CFMetaData.DEFAULT_READ_REPAIR_CHANCE : cfDef.read_repair_chance,
+                                                   cfDef.gc_grace_seconds == null ? CFMetaData.DEFAULT_GC_GRACE_SECONDS : cfDef.gc_grace_seconds,
                                                    Collections.<byte[], ColumnDefinition>emptyMap());
                 cfDefs.add(cfmeta);
             }

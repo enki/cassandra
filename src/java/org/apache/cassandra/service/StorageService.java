@@ -29,6 +29,12 @@ import java.util.concurrent.*;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.RawColumnDefinition;
+import org.apache.cassandra.config.RawColumnFamily;
+import org.apache.cassandra.config.RawKeyspace;
+import org.apache.cassandra.utils.SkipNullRepresenter;
 import org.apache.commons.lang.StringUtils;
 
 import org.slf4j.Logger;
@@ -67,6 +73,10 @@ import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
 import org.apache.log4j.Level;
+import org.yaml.snakeyaml.Dumper;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.nodes.Tag;
 
 /*
  * This abstraction contains the token/identifier of this node
@@ -245,7 +255,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance.registerVerbHandlers(Verb.SCHEMA_CHECK, new SchemaCheckVerbHandler());
 
         replicationStrategies = new HashMap<String, AbstractReplicationStrategy>();
-        for (String table : DatabaseDescriptor.getNonSystemTables())
+        for (String table : DatabaseDescriptor.getTables())
             initReplicationStrategy(table);
 
         // spin up the streaming serivice so it is available for jmx tools.
@@ -944,7 +954,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             deliverHints(endpoint);
     }
 
-    public void onDead(InetAddress endpoint, EndpointState state) {}
+    public void onDead(InetAddress endpoint, EndpointState state) 
+    {
+        MessagingService.instance.convict(endpoint);
+    }
 
     /** raw load value */
     public double getLoad()
@@ -1650,8 +1663,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // blow up if there is a schema saved.
         if (DatabaseDescriptor.getDefsVersion().timestamp() > 0 || Migration.getLastMigrationId() != null)
             throw new ConfigurationException("Cannot load from XML on top of pre-existing schemas.");
+        
+        Migration migration = null;
         for (KSMetaData table : DatabaseDescriptor.readTablesFromYaml())
-            new AddKeyspace(table).apply();
+        {
+            migration = new AddKeyspace(table); 
+            migration.apply();
+        }
         
         assert DatabaseDescriptor.getDefsVersion().timestamp() > 0;
         DefsTable.dumpToStorage(DatabaseDescriptor.getDefsVersion());
@@ -1672,8 +1690,78 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
         }
         
+        // we don't want to announce after every Migration.apply(). keep track of the last one and then announce the
+        // current version.
+        if (migration != null)
+            migration.announce();
+        
     }
 
+    public String exportSchema() throws IOException
+    {
+        List<RawKeyspace> keyspaces = new ArrayList<RawKeyspace>();
+        for (String ksname : DatabaseDescriptor.getNonSystemTables())
+        {
+            KSMetaData ksm = DatabaseDescriptor.getTableDefinition(ksname);
+            RawKeyspace rks = new RawKeyspace();
+            rks.name = ksm.name;
+            rks.replica_placement_strategy = ksm.strategyClass.getName();
+            rks.replication_factor = ksm.replicationFactor;
+            rks.column_families = new RawColumnFamily[ksm.cfMetaData().size()];
+            int i = 0;
+            for (CFMetaData cfm : ksm.cfMetaData().values())
+            {
+                RawColumnFamily rcf = new RawColumnFamily();
+                rcf.name = cfm.cfName;
+                rcf.compare_with = cfm.comparator.getClass().getName();
+                rcf.compare_subcolumns_with = cfm.subcolumnComparator == null ? null : cfm.subcolumnComparator.getClass().getName();
+                rcf.clock_type = cfm.clockType;
+                rcf.column_type = cfm.cfType;
+                rcf.comment = cfm.comment;
+                rcf.keys_cached = cfm.keyCacheSize;
+                rcf.preload_row_cache = cfm.preloadRowCache;
+                rcf.read_repair_chance = cfm.readRepairChance;
+                rcf.reconciler = cfm.reconciler.getClass().getName();
+                rcf.rows_cached = cfm.rowCacheSize;
+                rcf.column_metadata = new RawColumnDefinition[cfm.column_metadata.size()];
+                int j = 0;
+                for (ColumnDefinition cd : cfm.column_metadata.values())
+                {
+                    RawColumnDefinition rcd = new RawColumnDefinition();
+                    rcd.index_name = cd.index_name;
+                    rcd.index_type = cd.index_type;
+                    rcd.name = new String(cd.name, "UTF8");
+                    rcd.validator_class = cd.validator.getClass().getName();
+                    rcf.column_metadata[j++] = rcd;
+                }
+                if (j == 0)
+                    rcf.column_metadata = null;
+                rks.column_families[i++] = rcf;
+            }
+            // whew.
+            keyspaces.add(rks);
+        }
+        
+        DumperOptions options = new DumperOptions();
+        /* Use a block YAML arrangement */
+        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
+        SkipNullRepresenter representer = new SkipNullRepresenter();
+        /* Use Tag.MAP to avoid the class name being included as global tag */
+        representer.addClassTag(RawColumnFamily.class, Tag.MAP);
+        representer.addClassTag(Keyspaces.class, Tag.MAP);
+        representer.addClassTag(ColumnDefinition.class, Tag.MAP);
+        Dumper dumper = new Dumper(representer, options);
+        Yaml yaml = new Yaml(dumper);
+        Keyspaces ks = new Keyspaces();
+        ks.keyspaces = keyspaces;
+        return yaml.dump(ks);
+    }
+    
+    public class Keyspaces
+    {
+        public List<RawKeyspace> keyspaces;
+    }
+    
     // Never ever do this at home. Used by tests.
     Map<String, AbstractReplicationStrategy> setReplicationStrategyUnsafe(Map<String, AbstractReplicationStrategy> replacement)
     {

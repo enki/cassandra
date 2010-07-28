@@ -49,7 +49,7 @@ import org.apache.thrift.protocol.*;
 public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable, Cloneable {
   private static final TStruct STRUCT_DESC = new TStruct("CfDef");
 
-  private static final TField TABLE_FIELD_DESC = new TField("table", TType.STRING, (short)1);
+  private static final TField KEYSPACE_FIELD_DESC = new TField("keyspace", TType.STRING, (short)1);
   private static final TField NAME_FIELD_DESC = new TField("name", TType.STRING, (short)2);
   private static final TField COLUMN_TYPE_FIELD_DESC = new TField("column_type", TType.STRING, (short)3);
   private static final TField CLOCK_TYPE_FIELD_DESC = new TField("clock_type", TType.STRING, (short)4);
@@ -62,8 +62,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   private static final TField KEY_CACHE_SIZE_FIELD_DESC = new TField("key_cache_size", TType.DOUBLE, (short)11);
   private static final TField READ_REPAIR_CHANCE_FIELD_DESC = new TField("read_repair_chance", TType.DOUBLE, (short)12);
   private static final TField COLUMN_METADATA_FIELD_DESC = new TField("column_metadata", TType.LIST, (short)13);
+  private static final TField GC_GRACE_SECONDS_FIELD_DESC = new TField("gc_grace_seconds", TType.I32, (short)14);
 
-  public String table;
+  public String keyspace;
   public String name;
   public String column_type;
   public String clock_type;
@@ -76,10 +77,11 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   public double key_cache_size;
   public double read_repair_chance;
   public List<ColumnDef> column_metadata;
+  public int gc_grace_seconds;
 
   /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
   public enum _Fields implements TFieldIdEnum {
-    TABLE((short)1, "table"),
+    KEYSPACE((short)1, "keyspace"),
     NAME((short)2, "name"),
     COLUMN_TYPE((short)3, "column_type"),
     CLOCK_TYPE((short)4, "clock_type"),
@@ -91,7 +93,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     PRELOAD_ROW_CACHE((short)10, "preload_row_cache"),
     KEY_CACHE_SIZE((short)11, "key_cache_size"),
     READ_REPAIR_CHANCE((short)12, "read_repair_chance"),
-    COLUMN_METADATA((short)13, "column_metadata");
+    COLUMN_METADATA((short)13, "column_metadata"),
+    GC_GRACE_SECONDS((short)14, "gc_grace_seconds");
 
     private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
 
@@ -106,8 +109,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
      */
     public static _Fields findByThriftId(int fieldId) {
       switch(fieldId) {
-        case 1: // TABLE
-          return TABLE;
+        case 1: // KEYSPACE
+          return KEYSPACE;
         case 2: // NAME
           return NAME;
         case 3: // COLUMN_TYPE
@@ -132,6 +135,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
           return READ_REPAIR_CHANCE;
         case 13: // COLUMN_METADATA
           return COLUMN_METADATA;
+        case 14: // GC_GRACE_SECONDS
+          return GC_GRACE_SECONDS;
         default:
           return null;
       }
@@ -176,12 +181,13 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   private static final int __PRELOAD_ROW_CACHE_ISSET_ID = 1;
   private static final int __KEY_CACHE_SIZE_ISSET_ID = 2;
   private static final int __READ_REPAIR_CHANCE_ISSET_ID = 3;
-  private BitSet __isset_bit_vector = new BitSet(4);
+  private static final int __GC_GRACE_SECONDS_ISSET_ID = 4;
+  private BitSet __isset_bit_vector = new BitSet(5);
 
   public static final Map<_Fields, FieldMetaData> metaDataMap;
   static {
     Map<_Fields, FieldMetaData> tmpMap = new EnumMap<_Fields, FieldMetaData>(_Fields.class);
-    tmpMap.put(_Fields.TABLE, new FieldMetaData("table", TFieldRequirementType.REQUIRED, 
+    tmpMap.put(_Fields.KEYSPACE, new FieldMetaData("keyspace", TFieldRequirementType.REQUIRED, 
         new FieldValueMetaData(TType.STRING)));
     tmpMap.put(_Fields.NAME, new FieldMetaData("name", TFieldRequirementType.REQUIRED, 
         new FieldValueMetaData(TType.STRING)));
@@ -208,6 +214,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     tmpMap.put(_Fields.COLUMN_METADATA, new FieldMetaData("column_metadata", TFieldRequirementType.OPTIONAL, 
         new ListMetaData(TType.LIST, 
             new StructMetaData(TType.STRUCT, ColumnDef.class))));
+    tmpMap.put(_Fields.GC_GRACE_SECONDS, new FieldMetaData("gc_grace_seconds", TFieldRequirementType.OPTIONAL, 
+        new FieldValueMetaData(TType.I32)));
     metaDataMap = Collections.unmodifiableMap(tmpMap);
     FieldMetaData.addStructMetaDataMap(CfDef.class, metaDataMap);
   }
@@ -236,11 +244,11 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   }
 
   public CfDef(
-    String table,
+    String keyspace,
     String name)
   {
     this();
-    this.table = table;
+    this.keyspace = keyspace;
     this.name = name;
   }
 
@@ -250,8 +258,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   public CfDef(CfDef other) {
     __isset_bit_vector.clear();
     __isset_bit_vector.or(other.__isset_bit_vector);
-    if (other.isSetTable()) {
-      this.table = other.table;
+    if (other.isSetKeyspace()) {
+      this.keyspace = other.keyspace;
     }
     if (other.isSetName()) {
       this.name = other.name;
@@ -285,6 +293,7 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       }
       this.column_metadata = __this__column_metadata;
     }
+    this.gc_grace_seconds = other.gc_grace_seconds;
   }
 
   public CfDef deepCopy() {
@@ -296,27 +305,27 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     return new CfDef(this);
   }
 
-  public String getTable() {
-    return this.table;
+  public String getKeyspace() {
+    return this.keyspace;
   }
 
-  public CfDef setTable(String table) {
-    this.table = table;
+  public CfDef setKeyspace(String keyspace) {
+    this.keyspace = keyspace;
     return this;
   }
 
-  public void unsetTable() {
-    this.table = null;
+  public void unsetKeyspace() {
+    this.keyspace = null;
   }
 
-  /** Returns true if field table is set (has been asigned a value) and false otherwise */
-  public boolean isSetTable() {
-    return this.table != null;
+  /** Returns true if field keyspace is set (has been asigned a value) and false otherwise */
+  public boolean isSetKeyspace() {
+    return this.keyspace != null;
   }
 
-  public void setTableIsSet(boolean value) {
+  public void setKeyspaceIsSet(boolean value) {
     if (!value) {
-      this.table = null;
+      this.keyspace = null;
     }
   }
 
@@ -619,13 +628,36 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     }
   }
 
+  public int getGc_grace_seconds() {
+    return this.gc_grace_seconds;
+  }
+
+  public CfDef setGc_grace_seconds(int gc_grace_seconds) {
+    this.gc_grace_seconds = gc_grace_seconds;
+    setGc_grace_secondsIsSet(true);
+    return this;
+  }
+
+  public void unsetGc_grace_seconds() {
+    __isset_bit_vector.clear(__GC_GRACE_SECONDS_ISSET_ID);
+  }
+
+  /** Returns true if field gc_grace_seconds is set (has been asigned a value) and false otherwise */
+  public boolean isSetGc_grace_seconds() {
+    return __isset_bit_vector.get(__GC_GRACE_SECONDS_ISSET_ID);
+  }
+
+  public void setGc_grace_secondsIsSet(boolean value) {
+    __isset_bit_vector.set(__GC_GRACE_SECONDS_ISSET_ID, value);
+  }
+
   public void setFieldValue(_Fields field, Object value) {
     switch (field) {
-    case TABLE:
+    case KEYSPACE:
       if (value == null) {
-        unsetTable();
+        unsetKeyspace();
       } else {
-        setTable((String)value);
+        setKeyspace((String)value);
       }
       break;
 
@@ -725,6 +757,14 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       }
       break;
 
+    case GC_GRACE_SECONDS:
+      if (value == null) {
+        unsetGc_grace_seconds();
+      } else {
+        setGc_grace_seconds((Integer)value);
+      }
+      break;
+
     }
   }
 
@@ -734,8 +774,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
 
   public Object getFieldValue(_Fields field) {
     switch (field) {
-    case TABLE:
-      return getTable();
+    case KEYSPACE:
+      return getKeyspace();
 
     case NAME:
       return getName();
@@ -773,6 +813,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     case COLUMN_METADATA:
       return getColumn_metadata();
 
+    case GC_GRACE_SECONDS:
+      return new Integer(getGc_grace_seconds());
+
     }
     throw new IllegalStateException();
   }
@@ -784,8 +827,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   /** Returns true if field corresponding to fieldID is set (has been asigned a value) and false otherwise */
   public boolean isSet(_Fields field) {
     switch (field) {
-    case TABLE:
-      return isSetTable();
+    case KEYSPACE:
+      return isSetKeyspace();
     case NAME:
       return isSetName();
     case COLUMN_TYPE:
@@ -810,6 +853,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       return isSetRead_repair_chance();
     case COLUMN_METADATA:
       return isSetColumn_metadata();
+    case GC_GRACE_SECONDS:
+      return isSetGc_grace_seconds();
     }
     throw new IllegalStateException();
   }
@@ -831,12 +876,12 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     if (that == null)
       return false;
 
-    boolean this_present_table = true && this.isSetTable();
-    boolean that_present_table = true && that.isSetTable();
-    if (this_present_table || that_present_table) {
-      if (!(this_present_table && that_present_table))
+    boolean this_present_keyspace = true && this.isSetKeyspace();
+    boolean that_present_keyspace = true && that.isSetKeyspace();
+    if (this_present_keyspace || that_present_keyspace) {
+      if (!(this_present_keyspace && that_present_keyspace))
         return false;
-      if (!this.table.equals(that.table))
+      if (!this.keyspace.equals(that.keyspace))
         return false;
     }
 
@@ -948,6 +993,15 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         return false;
     }
 
+    boolean this_present_gc_grace_seconds = true && this.isSetGc_grace_seconds();
+    boolean that_present_gc_grace_seconds = true && that.isSetGc_grace_seconds();
+    if (this_present_gc_grace_seconds || that_present_gc_grace_seconds) {
+      if (!(this_present_gc_grace_seconds && that_present_gc_grace_seconds))
+        return false;
+      if (this.gc_grace_seconds != that.gc_grace_seconds)
+        return false;
+    }
+
     return true;
   }
 
@@ -964,11 +1018,11 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     int lastComparison = 0;
     CfDef typedOther = (CfDef)other;
 
-    lastComparison = Boolean.valueOf(isSetTable()).compareTo(typedOther.isSetTable());
+    lastComparison = Boolean.valueOf(isSetKeyspace()).compareTo(typedOther.isSetKeyspace());
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetTable()) {      lastComparison = TBaseHelper.compareTo(this.table, typedOther.table);
+    if (isSetKeyspace()) {      lastComparison = TBaseHelper.compareTo(this.keyspace, typedOther.keyspace);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -1081,6 +1135,15 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         return lastComparison;
       }
     }
+    lastComparison = Boolean.valueOf(isSetGc_grace_seconds()).compareTo(typedOther.isSetGc_grace_seconds());
+    if (lastComparison != 0) {
+      return lastComparison;
+    }
+    if (isSetGc_grace_seconds()) {      lastComparison = TBaseHelper.compareTo(this.gc_grace_seconds, typedOther.gc_grace_seconds);
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+    }
     return 0;
   }
 
@@ -1094,9 +1157,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         break;
       }
       switch (field.id) {
-        case 1: // TABLE
+        case 1: // KEYSPACE
           if (field.type == TType.STRING) {
-            this.table = iprot.readString();
+            this.keyspace = iprot.readString();
           } else { 
             TProtocolUtil.skip(iprot, field.type);
           }
@@ -1185,17 +1248,25 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         case 13: // COLUMN_METADATA
           if (field.type == TType.LIST) {
             {
-              TList _list33 = iprot.readListBegin();
-              this.column_metadata = new ArrayList<ColumnDef>(_list33.size);
-              for (int _i34 = 0; _i34 < _list33.size; ++_i34)
+              TList _list29 = iprot.readListBegin();
+              this.column_metadata = new ArrayList<ColumnDef>(_list29.size);
+              for (int _i30 = 0; _i30 < _list29.size; ++_i30)
               {
-                ColumnDef _elem35;
-                _elem35 = new ColumnDef();
-                _elem35.read(iprot);
-                this.column_metadata.add(_elem35);
+                ColumnDef _elem31;
+                _elem31 = new ColumnDef();
+                _elem31.read(iprot);
+                this.column_metadata.add(_elem31);
               }
               iprot.readListEnd();
             }
+          } else { 
+            TProtocolUtil.skip(iprot, field.type);
+          }
+          break;
+        case 14: // GC_GRACE_SECONDS
+          if (field.type == TType.I32) {
+            this.gc_grace_seconds = iprot.readI32();
+            setGc_grace_secondsIsSet(true);
           } else { 
             TProtocolUtil.skip(iprot, field.type);
           }
@@ -1215,9 +1286,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     validate();
 
     oprot.writeStructBegin(STRUCT_DESC);
-    if (this.table != null) {
-      oprot.writeFieldBegin(TABLE_FIELD_DESC);
-      oprot.writeString(this.table);
+    if (this.keyspace != null) {
+      oprot.writeFieldBegin(KEYSPACE_FIELD_DESC);
+      oprot.writeString(this.keyspace);
       oprot.writeFieldEnd();
     }
     if (this.name != null) {
@@ -1292,14 +1363,19 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         oprot.writeFieldBegin(COLUMN_METADATA_FIELD_DESC);
         {
           oprot.writeListBegin(new TList(TType.STRUCT, this.column_metadata.size()));
-          for (ColumnDef _iter36 : this.column_metadata)
+          for (ColumnDef _iter32 : this.column_metadata)
           {
-            _iter36.write(oprot);
+            _iter32.write(oprot);
           }
           oprot.writeListEnd();
         }
         oprot.writeFieldEnd();
       }
+    }
+    if (isSetGc_grace_seconds()) {
+      oprot.writeFieldBegin(GC_GRACE_SECONDS_FIELD_DESC);
+      oprot.writeI32(this.gc_grace_seconds);
+      oprot.writeFieldEnd();
     }
     oprot.writeFieldStop();
     oprot.writeStructEnd();
@@ -1310,11 +1386,11 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     StringBuilder sb = new StringBuilder("CfDef(");
     boolean first = true;
 
-    sb.append("table:");
-    if (this.table == null) {
+    sb.append("keyspace:");
+    if (this.keyspace == null) {
       sb.append("null");
     } else {
-      sb.append(this.table);
+      sb.append(this.keyspace);
     }
     first = false;
     if (!first) sb.append(", ");
@@ -1419,14 +1495,20 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       }
       first = false;
     }
+    if (isSetGc_grace_seconds()) {
+      if (!first) sb.append(", ");
+      sb.append("gc_grace_seconds:");
+      sb.append(this.gc_grace_seconds);
+      first = false;
+    }
     sb.append(")");
     return sb.toString();
   }
 
   public void validate() throws TException {
     // check for required fields
-    if (table == null) {
-      throw new TProtocolException("Required field 'table' was not present! Struct: " + toString());
+    if (keyspace == null) {
+      throw new TProtocolException("Required field 'keyspace' was not present! Struct: " + toString());
     }
     if (name == null) {
       throw new TProtocolException("Required field 'name' was not present! Struct: " + toString());

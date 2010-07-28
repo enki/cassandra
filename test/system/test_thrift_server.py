@@ -970,6 +970,29 @@ class TestMutations(ThriftTester):
         assert result[1].columns[0].column.name == 'col1'
         
     
+    def test_wrapped_range_slices(self):
+        _set_keyspace('Keyspace1')
+
+        def copp_token(key):
+            # I cheated and generated this from Java
+            return {'a': '00530000000100000001', 
+                    'b': '00540000000100000001', 
+                    'c': '00550000000100000001',
+                    'd': '00560000000100000001', 
+                    'e': '00580000000100000001'}[key]
+
+        for key in ['a', 'b', 'c', 'd', 'e']:
+            for cname in ['col1', 'col2', 'col3', 'col4', 'col5']:
+                client.insert(key, ColumnParent('Standard1'), Column(cname, 'v-' + cname, Clock(0)), ConsistencyLevel.ONE)
+        cp = ColumnParent('Standard1')
+
+        result = client.get_range_slices(cp, SlicePredicate(column_names=['col1', 'col3']), KeyRange(start_token=copp_token('e'), end_token=copp_token('e')), ConsistencyLevel.ONE)
+        assert [row.key for row in result] == ['a', 'b', 'c', 'd', 'e',], [row.key for row in result]
+
+        result = client.get_range_slices(cp, SlicePredicate(column_names=['col1', 'col3']), KeyRange(start_token=copp_token('c'), end_token=copp_token('c')), ConsistencyLevel.ONE)
+        assert [row.key for row in result] == ['d', 'e', 'a', 'b', 'c',], [row.key for row in result]
+        
+
     def test_get_slice_by_names(self):
         _set_keyspace('Keyspace1')
         _insert_range()
@@ -1210,19 +1233,31 @@ class TestMutations(ThriftTester):
         _set_keyspace('Keyspace1')
         client.insert('key1', ColumnParent('Indexed1'), Column('birthdate', _i64(1), Clock(0)), ConsistencyLevel.ONE)
         client.insert('key2', ColumnParent('Indexed1'), Column('birthdate', _i64(2), Clock(0)), ConsistencyLevel.ONE)
+        client.insert('key2', ColumnParent('Indexed1'), Column('b', _i64(2), Clock(0)), ConsistencyLevel.ONE)
+        client.insert('key3', ColumnParent('Indexed1'), Column('birthdate', _i64(3), Clock(0)), ConsistencyLevel.ONE)
         client.insert('key3', ColumnParent('Indexed1'), Column('b', _i64(3), Clock(0)), ConsistencyLevel.ONE)
 
+        # simple query on one index expression
         cp = ColumnParent('Indexed1')
-        expr = IndexExpression('birthdate', IndexOperator.EQ, _i64(1))
-        rp = RowPredicate(index_clause=IndexClause([expr]))
         sp = SlicePredicate(slice_range=SliceRange('', ''))
-        result = client.scan(cp, rp, sp, ConsistencyLevel.ONE)
+        clause = IndexClause([IndexExpression('birthdate', IndexOperator.EQ, _i64(1))])
+        result = client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE)
         assert len(result) == 1, result
         assert result[0].key == 'key1'
         assert len(result[0].columns) == 1, result[0].columns
 
-        expr.column_name = 'b'
-        _expect_exception(lambda: client.scan(cp, rp, sp, ConsistencyLevel.ONE), InvalidRequestException)
+        # solo unindexed expression is invalid
+        clause = IndexClause([IndexExpression('b', IndexOperator.EQ, _i64(1))])
+        _expect_exception(lambda: client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE), InvalidRequestException)
+
+        # but unindexed expression added to indexed one is ok
+        clause = IndexClause([IndexExpression('b', IndexOperator.EQ, _i64(3)),
+                              IndexExpression('birthdate', IndexOperator.EQ, _i64(3))])
+        result = client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE)
+        assert len(result) == 1, result
+        assert result[0].key == 'key3'
+        assert len(result[0].columns) == 2, result[0].columns
+        
         
 
 class TestTruncate(ThriftTester):

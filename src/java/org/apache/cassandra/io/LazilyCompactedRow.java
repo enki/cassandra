@@ -117,7 +117,7 @@ public class LazilyCompactedRow extends AbstractCompactedRow implements IIterabl
 
     public boolean isEmpty()
     {
-        boolean cfIrrelevant = ColumnFamilyStore.removeDeleted(emptyColumnFamily, gcBefore) == null;
+        boolean cfIrrelevant = ColumnFamilyStore.removeDeletedCF(emptyColumnFamily, gcBefore) == null;
         return cfIrrelevant && columnCount == 0;
     }
 
@@ -149,6 +149,11 @@ public class LazilyCompactedRow extends AbstractCompactedRow implements IIterabl
         };
         iter = new LazyColumnIterator(new CollatingIterator(nameComparator, rows));
         return Iterators.filter(iter, Predicates.notNull());
+    }
+
+    public int columnCount()
+    {
+        return columnCount;
     }
 
     private class LazyColumnIterator extends ReducingIterator<IColumn, IColumn>

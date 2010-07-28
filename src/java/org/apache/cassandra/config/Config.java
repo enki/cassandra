@@ -2,7 +2,8 @@ package org.apache.cassandra.config;
 import java.util.List;
 
 
-public class Config {
+public class Config
+{
     public String cluster_name = "Test Cluster";
     public String authenticator;
     
@@ -20,9 +21,6 @@ public class Config {
     
     /* Job Jar Location */
     public String job_jar_file_location;
-    
-    /* time to wait before garbage collecting tombstones (deletion markers) */
-    public Integer gc_grace_seconds = 10 * 24 * 3600; // 10 days
     
     /* initial token in the ring */
     public String initial_token;
@@ -76,7 +74,7 @@ public class Config {
     public RequestSchedulerId request_scheduler_id;
     public RequestSchedulerOptions request_scheduler_options;
 
-    public List<Keyspace> keyspaces;
+    public List<RawKeyspace> keyspaces;
     
     public static enum CommitLogSync {
         periodic,

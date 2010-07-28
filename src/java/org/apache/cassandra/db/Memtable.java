@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Condition;
 
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
@@ -37,8 +37,6 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
-import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.WrappedRunnable;
 
 public class Memtable implements Comparable<Memtable>, IFlushable
@@ -158,7 +156,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
         return ssTable;
     }
 
-    public void flushAndSignal(final Condition condition, ExecutorService sorter, final ExecutorService writer)
+    public void flushAndSignal(final CountDownLatch latch, ExecutorService sorter, final ExecutorService writer)
     {
         cfs.getMemtablesPendingFlush().add(this); // it's ok for the MT to briefly be both active and pendingFlush
         writer.submit(new WrappedRunnable()
@@ -167,7 +165,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
             {
                 cfs.addSSTable(writeSortedContents());
                 cfs.getMemtablesPendingFlush().remove(Memtable.this);
-                condition.signalAll();
+                latch.countDown();
             }
         });
     }
@@ -204,7 +202,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
     {
         assert cf != null;
         final boolean isSuper = cf.isSuper();
-        final Collection<IColumn> filteredColumns = filter.reversed ? filter.applyPredicate(cf.getReverseSortedColumns()) : filter.applyPredicate(cf.getSortedColumns());
+        final Collection<IColumn> filteredColumns = filter.reversed ? cf.getReverseSortedColumns() : cf.getSortedColumns();
 
         // ok to not have subcolumnComparator since we won't be adding columns to this object
         IColumn startColumn = isSuper ? new SuperColumn(filter.start, null, cf.getClockType(), cf.getReconciler()) :  new Column(filter.start);
@@ -238,9 +236,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
             public IColumn next()
             {
-                // clone supercolumns so caller can freely removeDeleted or otherwise mutate it
-                // TODO can't the callers that wish to mutate it clone it themselves?
-                return isSuper ? ((SuperColumn) filteredIter.next()).cloneMe() : filteredIter.next();
+                return filteredIter.next();
             }
         };
     }

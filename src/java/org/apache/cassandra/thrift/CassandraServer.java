@@ -675,6 +675,11 @@ public class CassandraServer implements Cassandra.Iface
         return ranges;
     }
 
+    public String describe_partitioner() throws TException
+    {
+        return StorageService.getPartitioner().getClass().getName();
+    }
+
     public List<String> describe_splits(String keyspace, String cfName, String start_token, String end_token, int keys_per_split) throws TException
     {
         Token.TokenFactory tf = StorageService.getPartitioner().getTokenFactory();
@@ -963,7 +968,7 @@ public class CassandraServer implements Cassandra.Iface
 
         }
 
-        return new CFMetaData(cf_def.table,
+        return new CFMetaData(cf_def.keyspace,
                               cf_def.name,
                               cfType,
                               clockType,
@@ -975,6 +980,7 @@ public class CassandraServer implements Cassandra.Iface
                               cf_def.preload_row_cache,
                               cf_def.key_cache_size,
                               cf_def.read_repair_chance,
+                              cf_def.isSetGc_grace_seconds() ? cf_def.gc_grace_seconds : CFMetaData.DEFAULT_GC_GRACE_SECONDS,
                               ColumnDefinition.fromColumnDef(cf_def.column_metadata));
     }
 

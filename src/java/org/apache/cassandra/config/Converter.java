@@ -12,6 +12,7 @@ import javax.xml.transform.TransformerException;
 import javax.xml.xpath.XPathExpressionException;
 
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.SkipNullRepresenter;
 import org.apache.cassandra.utils.XMLUtils;
 import org.apache.cassandra.db.ColumnFamilyType;
 import org.w3c.dom.NodeList;
@@ -25,24 +26,34 @@ import org.yaml.snakeyaml.nodes.NodeTuple;
 import org.yaml.snakeyaml.nodes.Tag;
 import org.yaml.snakeyaml.representer.Representer;
 
-public class Converter {
+/**
+ * @deprecated Yaml configuration for Keyspaces and ColumnFamilies is deprecated in 0.7
+ */
+public class Converter
+{
 
     private static Config conf = new Config();
     private final static String PREVIOUS_CONF_FILE = "cassandra.xml";
     
-    private static List<Keyspace> readTablesFromXml(XMLUtils xmlUtils) throws ConfigurationException
+    private static List<RawKeyspace> readTablesFromXml(XMLUtils xmlUtils) throws ConfigurationException
     {
 
-        List<Keyspace> keyspaces = new ArrayList<Keyspace>();
+        List<RawKeyspace> keyspaces = new ArrayList<RawKeyspace>();
         /* Read the table related stuff from config */
         try
         {
             NodeList tablesxml = xmlUtils.getRequestedNodeList("/Storage/Keyspaces/Keyspace");
+
+            String gcGrace = xmlUtils.getNodeValue("/Storage/GCGraceSeconds");
+            int gc_grace_seconds = 864000;
+            if ( gcGrace != null )
+                gc_grace_seconds = Integer.parseInt(gcGrace);
+
             int size = tablesxml.getLength();
             for ( int i = 0; i < size; ++i )
             {
                 String value;
-                Keyspace ks = new Keyspace();
+                RawKeyspace ks = new RawKeyspace();
                 Node table = tablesxml.item(i);
                 /* parsing out the table ksName */
                 ks.name = XMLUtils.getAttributeValue(table, "Name");
@@ -61,11 +72,11 @@ public class Converter {
                 NodeList columnFamilies = xmlUtils.getRequestedNodeList(xqlTable + "ColumnFamily");
 
                 int size2 = columnFamilies.getLength();
-                ks.column_families = new ColumnFamily[size2];
+                ks.column_families = new RawColumnFamily[size2];
                 for ( int j = 0; j < size2; ++j )
                 {
                     Node columnFamily = columnFamilies.item(j);
-                    ks.column_families[j] = new ColumnFamily();
+                    ks.column_families[j] = new RawColumnFamily();
                     ks.column_families[j].name = XMLUtils.getAttributeValue(columnFamily, "Name");
                     String xqlCF = xqlTable + "ColumnFamily[@Name='" + ks.column_families[j].name + "']/";
                     ks.column_families[j].column_type = ColumnFamilyType.create(XMLUtils.getAttributeValue(columnFamily, "ColumnType"));
@@ -88,7 +99,9 @@ public class Converter {
                     {
                         ks.column_families[j].read_repair_chance = FBUtilities.parseDoubleOrPercent(value);
                     }
-                    
+
+                    ks.column_families[j].gc_grace_seconds = gc_grace_seconds;
+
                     ks.column_families[j].comment = xmlUtils.getNodeValue(xqlCF + "Comment");
                 }
                 keyspaces.add(ks);
@@ -135,11 +148,7 @@ public class Converter {
             conf.job_tracker_host = xmlUtils.getNodeValue("/Storage/JobTrackerHost");
             
             conf.job_jar_file_location = xmlUtils.getNodeValue("/Storage/JobJarFileLocation");
-            
-            String gcGrace = xmlUtils.getNodeValue("/Storage/GCGraceSeconds");
-            if ( gcGrace != null )
-                conf.gc_grace_seconds = Integer.parseInt(gcGrace);
-            
+
             conf.initial_token = xmlUtils.getNodeValue("/Storage/InitialToken");
             
             String rpcTimeout = xmlUtils.getNodeValue("/Storage/RpcTimeoutInMillis");
@@ -259,7 +268,7 @@ public class Converter {
         SkipNullRepresenter representer = new SkipNullRepresenter();
         /* Use Tag.MAP to avoid the class name being included as global tag */
         representer.addClassTag(Config.class, Tag.MAP);
-        representer.addClassTag(ColumnFamily.class, Tag.MAP);
+        representer.addClassTag(RawColumnFamily.class, Tag.MAP);
         Dumper dumper = new Dumper(representer, options);
         Yaml yaml = new Yaml(dumper);
         String output = yaml.dump(conf);
@@ -285,7 +294,7 @@ public class Converter {
             if (scpurl != null)
                 configname = scpurl.getFile();
             else 
-                throw new ConfigurationException("Error finding previuos configuration file.");
+                throw new ConfigurationException("Error finding previous configuration file.");
             
             System.out.println("Found previous configuration: " + configname);
             
@@ -311,18 +320,4 @@ public class Converter {
         }
 
     }
-    
-    /* used to prevent null values from being included in generated YAML */
-    private static class SkipNullRepresenter extends Representer {
-        protected NodeTuple representJavaBeanProperty(Object javaBean, Property property,
-                Object propertyValue, Tag customTag) {
-            if (propertyValue == null) {
-                return null;
-            } else {
-                return super.representJavaBeanProperty(javaBean, property, propertyValue, customTag);
-            }
-        }
-
-    }
-
 }

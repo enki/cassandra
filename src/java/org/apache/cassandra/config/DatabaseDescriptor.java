@@ -47,6 +47,7 @@ import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
+import org.apache.cassandra.locator.LocalStrategy;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.scheduler.IRequestScheduler;
 import org.apache.cassandra.scheduler.NoScheduler;
@@ -62,8 +63,6 @@ public class DatabaseDescriptor
 {
     private static Logger logger = LoggerFactory.getLogger(DatabaseDescriptor.class);
 
-    public static final String random = "RANDOM";
-    public static final String ophf = "OPHF";
     private static IEndpointSnitch snitch;
     private static InetAddress listenAddress; // leave null so we can fall through to getLocalHost
     private static InetAddress rpcAddress;
@@ -114,19 +113,18 @@ public class DatabaseDescriptor
     {
         try
         {
-            
             configFileName = getStorageConfigPath();
-            
+
             if (logger.isDebugEnabled())
                 logger.info("Loading settings from " + configFileName);
             
             InputStream input = new FileInputStream(new File(configFileName));
             org.yaml.snakeyaml.constructor.Constructor constructor = new org.yaml.snakeyaml.constructor.Constructor(Config.class);
             TypeDescription desc = new TypeDescription(Config.class);
-            desc.putListPropertyType("keyspaces", Keyspace.class);
-            TypeDescription ksDesc = new TypeDescription(Keyspace.class);
-            ksDesc.putListPropertyType("column_families", ColumnFamily.class);
-            TypeDescription cfDesc = new TypeDescription(ColumnFamily.class);
+            desc.putListPropertyType("keyspaces", RawKeyspace.class);
+            TypeDescription ksDesc = new TypeDescription(RawKeyspace.class);
+            ksDesc.putListPropertyType("column_families", RawColumnFamily.class);
+            TypeDescription cfDesc = new TypeDescription(RawColumnFamily.class);
             cfDesc.putListPropertyType("column_metadata", RawColumnDefinition.class);
             constructor.addTypeDescription(desc);
             constructor.addTypeDescription(ksDesc);
@@ -206,10 +204,9 @@ public class DatabaseDescriptor
             }
             try
             {
-                Class cls = Class.forName(conf.partitioner);
-                partitioner = (IPartitioner) cls.getConstructor().newInstance();
+                partitioner = FBUtilities.newPartitioner(conf.partitioner);
             }
-            catch (ClassNotFoundException e)
+            catch (Exception e)
             {
                 throw new ConfigurationException("Invalid partitioner class " + conf.partitioner);
             }
@@ -346,15 +343,17 @@ public class DatabaseDescriptor
                 CommitLog.setSegmentSize(conf.commitlog_rotation_threshold_in_mb * 1024 * 1024);
 
             // Hardcoded system tables
-            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE, null, -1, new CFMetaData[]{CFMetaData.StatusCf,
+            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE, LocalStrategy.class, 1, new CFMetaData[]{CFMetaData.StatusCf,
                                                                                                   CFMetaData.HintsCf,
                                                                                                   CFMetaData.MigrationsCf,
-                                                                                                  CFMetaData.SchemaCf
+                                                                                                  CFMetaData.SchemaCf,
+                                                                                                  CFMetaData.StatisticsCf
             });
             CFMetaData.map(CFMetaData.StatusCf);
             CFMetaData.map(CFMetaData.HintsCf);
             CFMetaData.map(CFMetaData.MigrationsCf);
             CFMetaData.map(CFMetaData.SchemaCf);
+            CFMetaData.map(CFMetaData.StatisticsCf);
             tables.put(Table.SYSTEM_TABLE, systemMeta);
             
             /* Load the seeds for node contact points */
@@ -512,7 +511,7 @@ public class DatabaseDescriptor
         
         
         /* Read the table related stuff from config */
-        for (Keyspace keyspace : conf.keyspaces)
+        for (RawKeyspace keyspace : conf.keyspaces)
         {
             /* parsing out the table name */
             if (keyspace.name == null)
@@ -549,7 +548,7 @@ public class DatabaseDescriptor
             int size2 = keyspace.column_families.length;
             CFMetaData[] cfDefs = new CFMetaData[size2];
             int j = 0;
-            for (ColumnFamily cf : keyspace.column_families)
+            for (RawColumnFamily cf : keyspace.column_families)
             {
                 if (cf.name == null)
                 {
@@ -614,7 +613,8 @@ public class DatabaseDescriptor
                                              cf.rows_cached,
                                              cf.preload_row_cache, 
                                              cf.keys_cached, 
-                                             cf.read_repair_chance, 
+                                             cf.read_repair_chance,
+                                             cf.gc_grace_seconds,
                                              metadata);
             }
             defs.add(new KSMetaData(keyspace.name, strategyClass, keyspace.replication_factor, cfDefs));
@@ -646,43 +646,12 @@ public class DatabaseDescriptor
 
     public static AbstractType getComparator(String compareWith) throws ConfigurationException
     {
-        logger.info(compareWith);
         Class<? extends AbstractType> typeClass;
         
         if (compareWith == null)
-        {
-            typeClass = BytesType.class;
-        }
-        else
-        {
-            String className = compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.marshal." + compareWith;
-            try
-            {
-                typeClass = (Class<? extends AbstractType>)Class.forName(className);
-            }
-            catch (ClassNotFoundException e)
-            {
-                throw new ConfigurationException("Unable to load class " + className);
-            }
-        }
+            compareWith = "BytesType";
 
-        try
-        {
-            Field field = typeClass.getDeclaredField("instance");
-            return (AbstractType) field.get(null);
-        }
-        catch (NoSuchFieldException e)
-        {
-            ConfigurationException ex = new ConfigurationException("Invalid comparator: must define a public static instance field.");
-            ex.initCause(e);
-            throw ex;
-        }
-        catch (IllegalAccessException e)
-        {
-            ConfigurationException ex = new ConfigurationException("Invalid comparator: must define a public static instance field.");
-            ex.initCause(e);
-            throw ex;
-        }
+        return FBUtilities.getComparator(compareWith);
     }
 
     public static AbstractReconciler getReconciler(String reconcileWith) throws ConfigurationException
@@ -714,19 +683,7 @@ public class DatabaseDescriptor
             ex.initCause(e);
             throw ex;
         }
-        catch (IllegalAccessException e)
-        {
-            ConfigurationException ex = new ConfigurationException(e.getMessage());
-            ex.initCause(e);
-            throw ex;
-        }
-        catch (InvocationTargetException e)
-        {
-            ConfigurationException ex = new ConfigurationException(e.getMessage());
-            ex.initCause(e);
-            throw ex;
-        }
-        catch (NoSuchMethodException e)
+        catch (Exception e)
         {
             ConfigurationException ex = new ConfigurationException(e.getMessage());
             ex.initCause(e);
@@ -758,11 +715,6 @@ public class DatabaseDescriptor
             System.err.println("Bad configuration; unable to start server");
             System.exit(1);
         }
-    }
-
-    public static int getGcGraceInSeconds()
-    {
-        return conf.gc_grace_seconds;
     }
 
     public static IPartitioner getPartitioner()

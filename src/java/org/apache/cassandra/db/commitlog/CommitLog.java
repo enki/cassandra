@@ -203,6 +203,11 @@ public class CommitLog
                 logger.info(headerPath + " incomplete, missing or corrupt.  Everything is ok, don't panic.  CommitLog will be replayed from the beginning");
                 logger.debug("exception was", ioe);
             }
+            if (replayPosition < 0)
+            {
+                logger.debug("skipping replay of fully-flushed {}", file);
+                continue;
+            }
             reader.seek(replayPosition);
 
             if (logger.isDebugEnabled())
@@ -290,7 +295,7 @@ public class CommitLog
                 }
             }
             reader.close();
-            logger.info("Finished reading " + file + " for recovery");
+            logger.info("Finished reading " + file);
         }
 
         // wait for all the writes to finish on the mutation stage

@@ -22,20 +22,26 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.collect.*;
+import org.apache.avro.Schema;
+import org.apache.avro.util.Utf8;
 import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.google.common.collect.BiMap;
-import com.google.common.collect.HashBiMap;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.io.SerDeUtils;
+import org.apache.cassandra.db.ColumnFamilyType;
+import org.apache.cassandra.db.ClockType;
 import org.apache.cassandra.db.clock.AbstractReconciler;
 import org.apache.cassandra.db.clock.TimestampReconciler;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.HintedHandOffManager;
+import org.apache.cassandra.db.SystemTable;
+import org.apache.cassandra.db.StatisticsTable;
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.TimeUUIDType;
+import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.migration.Migration;
-import org.apache.cassandra.locator.DatacenterShardStrategy;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
@@ -46,9 +52,8 @@ public final class CFMetaData
     public final static double DEFAULT_KEY_CACHE_SIZE = 200000;
     public final static double DEFAULT_ROW_CACHE_SIZE = 0.0;
     public final static boolean DEFAULT_PRELOAD_ROW_CACHE = false;
+    public final static int DEFAULT_GC_GRACE_SECONDS = 864000;
     private static final int MIN_CF_ID = 1000;
-
-    private static final Logger logger = LoggerFactory.getLogger(DatacenterShardStrategy.class);
 
     private static final AtomicInteger idGen = new AtomicInteger(MIN_CF_ID);
     
@@ -56,10 +61,11 @@ public final class CFMetaData
     
     private static final BiMap<Pair<String, String>, Integer> cfIdMap = HashBiMap.<Pair<String, String>, Integer>create();
     
-    public static final CFMetaData StatusCf = new CFMetaData(Table.SYSTEM_TABLE, SystemTable.STATUS_CF, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "persistent metadata for the local node", 0, false, 0.01, 0, Collections.<byte[],ColumnDefinition>emptyMap());
-    public static final CFMetaData HintsCf = new CFMetaData(Table.SYSTEM_TABLE, HintedHandOffManager.HINTS_CF, ColumnFamilyType.Super, ClockType.Timestamp, UTF8Type.instance, BytesType.instance, new TimestampReconciler(), "hinted handoff data", 0, false, 0.01, 1, Collections.<byte[], ColumnDefinition>emptyMap());
-    public static final CFMetaData MigrationsCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.MIGRATIONS_CF, ColumnFamilyType.Standard, ClockType.Timestamp, TimeUUIDType.instance, null, new TimestampReconciler(), "individual schema mutations", 0, false, 0.01, 2, Collections.<byte[], ColumnDefinition>emptyMap());
-    public static final CFMetaData SchemaCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.SCHEMA_CF, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "current state of the schema", 0, false, 0.01, 3, Collections. <byte[], ColumnDefinition>emptyMap());
+    public static final CFMetaData StatusCf = new CFMetaData(Table.SYSTEM_TABLE, SystemTable.STATUS_CF, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "persistent metadata for the local node", 0, false, 0.01, DEFAULT_GC_GRACE_SECONDS, 0, Collections.<byte[],ColumnDefinition>emptyMap());
+    public static final CFMetaData HintsCf = new CFMetaData(Table.SYSTEM_TABLE, HintedHandOffManager.HINTS_CF, ColumnFamilyType.Super, ClockType.Timestamp, BytesType.instance, BytesType.instance, new TimestampReconciler(), "hinted handoff data", 0, false, 0.01, DEFAULT_GC_GRACE_SECONDS, 1, Collections.<byte[], ColumnDefinition>emptyMap());
+    public static final CFMetaData MigrationsCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.MIGRATIONS_CF, ColumnFamilyType.Standard, ClockType.Timestamp, TimeUUIDType.instance, null, new TimestampReconciler(), "individual schema mutations", 0, false, 0.01, DEFAULT_GC_GRACE_SECONDS, 2, Collections.<byte[], ColumnDefinition>emptyMap());
+    public static final CFMetaData SchemaCf = new CFMetaData(Table.SYSTEM_TABLE, Migration.SCHEMA_CF, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "current state of the schema", 0, false, 0.01, DEFAULT_GC_GRACE_SECONDS, 3, Collections. <byte[], ColumnDefinition>emptyMap());
+    public static final CFMetaData StatisticsCf = new CFMetaData(Table.SYSTEM_TABLE, StatisticsTable.STATISTICS_CF, ColumnFamilyType.Super, ClockType.Timestamp, UTF8Type.instance, BytesType.instance, new TimestampReconciler(), "persistent CF statistics for the local node", 0, false, 0.01, DEFAULT_GC_GRACE_SECONDS, 4, Collections.<byte[], ColumnDefinition>emptyMap());
 
     /**
      * @return An immutable mapping of (ksname,cfname) to id.
@@ -113,8 +119,8 @@ public final class CFMetaData
     public final double readRepairChance; //chance 0 to 1, of doing a read repair; defaults 1.0 (always)
     public final Integer cfId;
     public boolean preloadRowCache;
+    public final int gcGraceSeconds; // default 864000 (ten days)
 
-    // BytesToken because byte[].hashCode|equals is inherited from Object.  gggrrr...
     public final Map<byte[], ColumnDefinition> column_metadata;
 
     private CFMetaData(String tableName,
@@ -129,6 +135,7 @@ public final class CFMetaData
                        boolean preloadRowCache,
                        double keyCacheSize,
                        double readRepairChance,
+                       int gcGraceSeconds,
                        Integer cfId,
                        Map<byte[], ColumnDefinition> column_metadata)
     {
@@ -142,11 +149,12 @@ public final class CFMetaData
         // cfType == Super, subcolumnComparator should default to BytesType if not set.
         this.subcolumnComparator = subcolumnComparator == null && cfType == ColumnFamilyType.Super ? BytesType.instance : subcolumnComparator;
         this.reconciler = reconciler;
-        this.comment = comment;
+        this.comment = comment == null ? "" : comment;
         this.rowCacheSize = rowCacheSize;
         this.preloadRowCache = preloadRowCache;
         this.keyCacheSize = keyCacheSize;
         this.readRepairChance = readRepairChance;
+        this.gcGraceSeconds = gcGraceSeconds;
         this.cfId = cfId;
         this.column_metadata = Collections.unmodifiableMap(column_metadata);
     }
@@ -164,22 +172,22 @@ public final class CFMetaData
         }
     }
 
-    public CFMetaData(String tableName, String cfName, ColumnFamilyType cfType, ClockType clockType, AbstractType comparator, AbstractType subcolumnComparator, AbstractReconciler reconciler, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance, Map<byte[], ColumnDefinition> column_metadata)
+    public CFMetaData(String tableName, String cfName, ColumnFamilyType cfType, ClockType clockType, AbstractType comparator, AbstractType subcolumnComparator, AbstractReconciler reconciler, String comment, double rowCacheSize, boolean preloadRowCache, double keyCacheSize, double readRepairChance, int gcGraceSeconds, Map<byte[], ColumnDefinition> column_metadata)
     {
-        this(tableName, cfName, cfType, clockType, comparator, subcolumnComparator, reconciler, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, nextId(), column_metadata);
+        this(tableName, cfName, cfType, clockType, comparator, subcolumnComparator, reconciler, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, gcGraceSeconds, nextId(), column_metadata);
     }
 
     /** clones an existing CFMetaData using the same id. */
     public static CFMetaData rename(CFMetaData cfm, String newName)
     {
-        CFMetaData newCfm = new CFMetaData(cfm.tableName, newName, cfm.cfType, cfm.clockType, cfm.comparator, cfm.subcolumnComparator, cfm.reconciler, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId, cfm.column_metadata);
+        CFMetaData newCfm = new CFMetaData(cfm.tableName, newName, cfm.cfType, cfm.clockType, cfm.comparator, cfm.subcolumnComparator, cfm.reconciler, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.gcGraceSeconds, cfm.cfId, cfm.column_metadata);
         return newCfm;
     }
     
     /** clones existing CFMetaData. keeps the id but changes the table name.*/
     public static CFMetaData renameTable(CFMetaData cfm, String tableName)
     {
-        return new CFMetaData(tableName, cfm.cfName, cfm.cfType, cfm.clockType, cfm.comparator, cfm.subcolumnComparator, cfm.reconciler, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.cfId, cfm.column_metadata);
+        return new CFMetaData(tableName, cfm.cfName, cfm.cfType, cfm.clockType, cfm.comparator, cfm.subcolumnComparator, cfm.reconciler, cfm.comment, cfm.rowCacheSize, cfm.preloadRowCache, cfm.keyCacheSize, cfm.readRepairChance, cfm.gcGraceSeconds, cfm.cfId, cfm.column_metadata);
     }
     
     /** used for evicting cf data out of static tracking collections. */
@@ -198,74 +206,54 @@ public final class CFMetaData
                + "Columns Sorted By: " + comparator + "\n";
     }
 
-    public static byte[] serialize(CFMetaData cfm) throws IOException
+    public org.apache.cassandra.avro.CfDef deflate()
     {
-        ByteArrayOutputStream bout = new ByteArrayOutputStream();
-        DataOutputStream dout = new DataOutputStream(bout);
-        dout.writeUTF(cfm.tableName);
-        dout.writeUTF(cfm.cfName);
-        dout.writeUTF(cfm.cfType.name());
-        dout.writeUTF(cfm.clockType.name());
-        dout.writeUTF(cfm.comparator.getClass().getName());
-        dout.writeBoolean(cfm.subcolumnComparator != null);
-        if (cfm.subcolumnComparator != null)
-            dout.writeUTF(cfm.subcolumnComparator.getClass().getName());
-        dout.writeUTF(cfm.reconciler.getClass().getName());
-        dout.writeBoolean(cfm.comment != null);
-        if (cfm.comment != null)
-            dout.writeUTF(cfm.comment);
-        dout.writeDouble(cfm.rowCacheSize);
-        dout.writeBoolean(cfm.preloadRowCache);
-        dout.writeDouble(cfm.keyCacheSize);
-        dout.writeDouble(cfm.readRepairChance);
-        dout.writeInt(cfm.cfId);
-        dout.writeInt(cfm.column_metadata.size());
-        for (ColumnDefinition cd : cfm.column_metadata.values())
-        {
-            byte[] cdBytes = ColumnDefinition.serialize(cd);
-            dout.writeInt(cdBytes.length);
-            dout.write(cdBytes);
-        }
-        dout.close();
-        return bout.toByteArray();
+        org.apache.cassandra.avro.CfDef cf = new org.apache.cassandra.avro.CfDef();
+        cf.id = cfId;
+        cf.keyspace = new Utf8(tableName);
+        cf.name = new Utf8(cfName);
+        cf.column_type = new Utf8(cfType.name());
+        cf.clock_type = new Utf8(clockType.name());
+        cf.comparator_type = new Utf8(comparator.getClass().getName());
+        if (subcolumnComparator != null)
+            cf.subcomparator_type = new Utf8(subcolumnComparator.getClass().getName());
+        cf.reconciler = new Utf8(reconciler.getClass().getName());
+        cf.comment = new Utf8(comment);
+        cf.row_cache_size = rowCacheSize;
+        cf.key_cache_size = keyCacheSize;
+        cf.preload_row_cache = preloadRowCache;
+        cf.read_repair_chance = readRepairChance;
+        cf.gc_grace_seconds = gcGraceSeconds;
+        cf.column_metadata = SerDeUtils.createArray(column_metadata.size(),
+                                                    org.apache.cassandra.avro.ColumnDef.SCHEMA$);
+        for (ColumnDefinition cd : column_metadata.values())
+            cf.column_metadata.add(cd.deflate());
+        return cf;
     }
 
-    public static CFMetaData deserialize(InputStream in) throws IOException, ConfigurationException
+    public static CFMetaData inflate(org.apache.cassandra.avro.CfDef cf) throws ConfigurationException
     {
-        DataInputStream din = new DataInputStream(in);
-        String tableName = din.readUTF();
-        String cfName = din.readUTF();
-        ColumnFamilyType cfType = ColumnFamilyType.create(din.readUTF());
-        ClockType clockType = ClockType.create(din.readUTF());
-        AbstractType comparator = DatabaseDescriptor.getComparator(din.readUTF());
+        AbstractType comparator = DatabaseDescriptor.getComparator(cf.comparator_type.toString());
         AbstractType subcolumnComparator = null;
-        subcolumnComparator = din.readBoolean() ? DatabaseDescriptor.getComparator(din.readUTF()) : null;
+        if (cf.subcomparator_type != null)
+            subcolumnComparator = DatabaseDescriptor.getComparator(cf.subcomparator_type.toString());
         AbstractReconciler reconciler = null;
         try
         {
-            reconciler = (AbstractReconciler)Class.forName(din.readUTF()).newInstance();
+            reconciler = (AbstractReconciler)Class.forName(cf.reconciler.toString()).newInstance();
         }
         catch (Exception ex)
         {
-            throw new IOException(ex);
+            throw new ConfigurationException("Could not create Reconciler of type " + cf.reconciler, ex);
         }
-        String comment = din.readBoolean() ? din.readUTF() : null;
-        double rowCacheSize = din.readDouble();
-        boolean preloadRowCache = din.readBoolean();
-        double keyCacheSize = din.readDouble();
-        double readRepairChance = din.readDouble();
-        int cfId = din.readInt();
-        int columnMetadataEntries = din.readInt();
         Map<byte[], ColumnDefinition> column_metadata = new TreeMap<byte[], ColumnDefinition>(FBUtilities.byteArrayComparator);
-        for (int i = 0; i < columnMetadataEntries; i++)
+        Iterator<org.apache.cassandra.avro.ColumnDef> cditer = cf.column_metadata.iterator();
+        while (cditer.hasNext())
         {
-            int cdSize = din.readInt();
-            byte[] cdBytes = new byte[cdSize];
-            din.readFully(cdBytes);
-            ColumnDefinition cd = ColumnDefinition.deserialize(cdBytes);
+            ColumnDefinition cd = ColumnDefinition.inflate(cditer.next());
             column_metadata.put(cd.name, cd);
         }
-        return new CFMetaData(tableName, cfName, cfType, clockType, comparator, subcolumnComparator, reconciler, comment, rowCacheSize, preloadRowCache, keyCacheSize, readRepairChance, cfId, column_metadata);
+        return new CFMetaData(cf.keyspace.toString(), cf.name.toString(), ColumnFamilyType.create(cf.column_type.toString()), ClockType.create(cf.clock_type.toString()), comparator, subcolumnComparator, reconciler, cf.comment.toString(), cf.row_cache_size, cf.preload_row_cache, cf.key_cache_size, cf.read_repair_chance, cf.gc_grace_seconds, cf.id, column_metadata);
     }
 
     public boolean equals(Object obj) 
@@ -292,6 +280,7 @@ public final class CFMetaData
             .append(rowCacheSize, rhs.rowCacheSize)
             .append(keyCacheSize, rhs.keyCacheSize)
             .append(readRepairChance, rhs.readRepairChance)
+            .append(gcGraceSeconds, rhs.gcGraceSeconds)
             .append(cfId.intValue(), rhs.cfId.intValue())
             .append(column_metadata, rhs.column_metadata)
             .isEquals();
@@ -311,6 +300,7 @@ public final class CFMetaData
             .append(rowCacheSize)
             .append(keyCacheSize)
             .append(readRepairChance)
+            .append(gcGraceSeconds)
             .append(cfId)
             .append(column_metadata)
             .toHashCode();

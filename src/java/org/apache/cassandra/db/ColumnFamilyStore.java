@@ -31,6 +31,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Iterators;
 import org.apache.commons.collections.IteratorUtils;
 import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
@@ -97,7 +98,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                                                TimeUnit.SECONDS,
                                                new LinkedBlockingQueue<Runnable>(DatabaseDescriptor.getFlushWriters()),
                                                new NamedThreadFactory("FLUSH-WRITER-POOL"));
-    private static ExecutorService commitLogUpdater_ = new JMXEnabledThreadPoolExecutor("MEMTABLE-POST-FLUSHER");
+    private static ExecutorService postFlushExecutor_ = new JMXEnabledThreadPoolExecutor("MEMTABLE-POST-FLUSHER");
     
     private static final FilenameFilter DB_NAME_FILTER = new FilenameFilter()
     {
@@ -109,7 +110,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     private Set<Memtable> memtablesPendingFlush = new ConcurrentSkipListSet<Memtable>();
 
-    private final String table_;
+    public final String table_;
     public final String columnFamily_;
     private final IPartitioner partitioner_;
 
@@ -132,10 +133,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private LatencyTracker readStats_ = new LatencyTracker();
     private LatencyTracker writeStats_ = new LatencyTracker();
 
-    private long minRowCompactedSize = 0L;
-    private long maxRowCompactedSize = 0L;
-    private long rowsCompactedTotalSize = 0L;
-    private long rowsCompactedCount = 0L;
     final CFMetaData metadata;
 
     ColumnFamilyStore(String table, String columnFamilyName, IPartitioner partitioner, int generation, CFMetaData metadata)
@@ -246,6 +243,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                                                           false,
                                                           0,
                                                           0,
+                                                          CFMetaData.DEFAULT_GC_GRACE_SECONDS,
                                                           Collections.<byte[], ColumnDefinition>emptyMap());
             ColumnFamilyStore indexedCfs = ColumnFamilyStore.createColumnFamilyStore(table, 
                                                                                      indexedCfName,
@@ -255,32 +253,50 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
     }
 
-    public void addToCompactedRowStats(long rowsize)
+    public long getMinRowSize()
     {
-        if (minRowCompactedSize < 1 || rowsize < minRowCompactedSize)
-            minRowCompactedSize = rowsize;
-        if (rowsize > maxRowCompactedSize)
-            maxRowCompactedSize = rowsize;
-        rowsCompactedCount++;
-        rowsCompactedTotalSize += rowsize;
+        long min = 0;
+        for (SSTableReader sstable : ssTables_)
+        {
+           if (min == 0 || sstable.getEstimatedRowSize().min() < min)
+               min = sstable.getEstimatedRowSize().min();
+        }
+        return min;
     }
 
-    public long getMinRowCompactedSize()
+    public long getMaxRowSize()
     {
-        return minRowCompactedSize;
+        long max = 0;
+        for (SSTableReader sstable : ssTables_)
+        {
+            if (sstable.getEstimatedRowSize().max() > max)
+                max = sstable.getEstimatedRowSize().max();
+        }
+        return max;
     }
 
-    public long getMaxRowCompactedSize()
+    public long getMeanRowSize()
     {
-        return maxRowCompactedSize;
+        long sum = 0;
+        long count = 0;
+        for (SSTableReader sstable : ssTables_)
+        {
+            sum += sstable.getEstimatedRowSize().median();
+            count++;
+        }
+        return count > 0 ? sum / count : 0;
     }
 
-    public long getMeanRowCompactedSize()
+    public int getMeanColumns()
     {
-        if (rowsCompactedCount > 0)
-            return rowsCompactedTotalSize / rowsCompactedCount;
-        else
-            return 0L;
+        long sum = 0;
+        int count = 0;
+        for (SSTableReader sstable : ssTables_)
+        {
+            sum += sstable.getEstimatedColumnCount().median();
+            count++;
+        }
+        return count > 0 ? (int) (sum / count) : 0;
     }
 
     public static ColumnFamilyStore createColumnFamilyStore(String table, String columnFamily)
@@ -394,22 +410,29 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         try
         {
             if (oldMemtable.isFrozen())
-            {
                 return null;
-            }
-            oldMemtable.freeze();
 
+            assert memtable_ == oldMemtable;
+            memtable_.freeze();
             final CommitLogSegment.CommitLogContext ctx = writeCommitLog ? CommitLog.instance().getContext() : null;
-            logger_.info(columnFamily_ + " has reached its threshold; switching in a fresh Memtable at " + ctx);
-            final Condition condition = submitFlush(oldMemtable);
-            memtable_ = new Memtable(this, partitioner_);
-            // a second executor that makes sure the onMemtableFlushes get called in the right order,
+            logger_.info("switching in a fresh Memtable for " + columnFamily_ + " at " + ctx);
+
+            // submit the memtable for any indexed sub-cfses, and our own
+            final CountDownLatch latch = new CountDownLatch(1 + indexedColumns_.size());
+            for (ColumnFamilyStore cfs : Iterables.concat(indexedColumns_.values(), Collections.singleton(this)))
+            {
+                submitFlush(cfs.memtable_, latch);
+                cfs.memtable_ = new Memtable(cfs, cfs.partitioner_);
+            }
+
+            // when all the memtables have been written, including for indexes, mark the flush in the commitlog header.
+            // a second executor makes sure the onMemtableFlushes get called in the right order,
             // while keeping the wait-for-flush (future.get) out of anything latency-sensitive.
-            return commitLogUpdater_.submit(new WrappedRunnable()
+            return postFlushExecutor_.submit(new WrappedRunnable()
             {
                 public void runMayThrow() throws InterruptedException, IOException
                 {
-                    condition.await();
+                    latch.await();
                     if (writeCommitLog)
                     {
                         // if we're not writing to the commit log, we are replaying the log, so marking
@@ -463,7 +486,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         if (binaryMemtable_.get().isClean())
             return;
 
-        submitFlush(binaryMemtable_.get());
+        submitFlush(binaryMemtable_.get(), new CountDownLatch(1));
     }
 
     /**
@@ -496,6 +519,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         writeStats_.addNano(System.nanoTime() - start);
     }
 
+    public static ColumnFamily removeDeletedCF(ColumnFamily cf, int gcBefore)
+    {
+        // in case of a timestamp tie, tombstones get priority over non-tombstones.
+        // (we want this to be deterministic to avoid confusion.)
+        if (cf.getColumnCount() == 0 && cf.getLocalDeletionTime() <= gcBefore)
+            return null;
+        return cf;
+    }
+
     /*
      This is complicated because we need to preserve deleted columns, supercolumns, and columnfamilies
      until they have been deleted for at least GC_GRACE_IN_SECONDS.  But, we do not need to preserve
@@ -509,26 +541,28 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             return null;
         }
 
+        removeDeletedColumnsOnly(cf, gcBefore);
+        return removeDeletedCF(cf, gcBefore);
+    }
+
+    private static void removeDeletedColumnsOnly(ColumnFamily cf, int gcBefore)
+    {
         if (cf.isSuper())
             removeDeletedSuper(cf, gcBefore);
         else
             removeDeletedStandard(cf, gcBefore);
-
-        // in case of a timestamp tie, tombstones get priority over non-tombstones.
-        // (we want this to be deterministic to avoid confusion.)
-        if (cf.getColumnCount() == 0 && cf.getLocalDeletionTime() <= gcBefore)
-        {
-            return null;
-        }
-        return cf;
     }
 
     private static void removeDeletedStandard(ColumnFamily cf, int gcBefore)
     {
-        for (byte[] cname : cf.getColumnNames())
+        for (Map.Entry<byte[], IColumn> entry : cf.getColumnsMap().entrySet())
         {
-            IColumn c = cf.getColumnsMap().get(cname);
-            // we split the test to avoid comparing if not necessary
+            byte[] cname = entry.getKey();
+            IColumn c = entry.getValue();
+            // remove columns if
+            // (a) the column itself is tombstoned or
+            // (b) the CF is tombstoned and the column is not newer than it
+            // (we split the test to avoid computing ClockRelationship if not necessary)
             if ((c.isMarkedForDelete() && c.getLocalDeletionTime() <= gcBefore))
             {
                 cf.remove(cname);
@@ -549,24 +583,27 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         // TODO assume deletion means "most are deleted?" and add to clone, instead of remove from original?
         // this could be improved by having compaction, or possibly even removeDeleted, r/m the tombstone
         // once gcBefore has passed, so if new stuff is added in it doesn't used the wrong algorithm forever
-        for (byte[] cname : cf.getColumnNames())
+        for (Map.Entry<byte[], IColumn> entry : cf.getColumnsMap().entrySet())
         {
-            IColumn c = cf.getColumnsMap().get(cname);
+            SuperColumn c = (SuperColumn) entry.getValue();
             List<IClock> clocks = Arrays.asList(cf.getMarkedForDeleteAt());
             IClock minClock = c.getMarkedForDeleteAt().getSuperset(clocks);
             for (IColumn subColumn : c.getSubColumns())
             {
-                // we split the test to avoid comparing if not necessary
+                // remove subcolumns if
+                // (a) the subcolumn itself is tombstoned or
+                // (b) the supercolumn is tombstoned and the subcolumn is not newer than it
+                // (we split the test to avoid computing ClockRelationship if not necessary)
                 if (subColumn.isMarkedForDelete() && subColumn.getLocalDeletionTime() <= gcBefore)
                 {
-                    ((SuperColumn)c).remove(subColumn.name());
+                    c.remove(subColumn.name());
                 }
                 else
                 {
                     ClockRelationship subRel = subColumn.clock().compare(minClock);
                     if ((ClockRelationship.LESS_THAN == subRel) || (ClockRelationship.EQUAL == subRel))
                     {
-                        ((SuperColumn)c).remove(subColumn.name());
+                        c.remove(subColumn.name());
                     }
                 }
             }
@@ -660,12 +697,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
      * flushing thread finishes sorting, which will almost always be longer than any of the flushSorter threads proper
      * (since, by definition, it started last).
      */
-    Condition submitFlush(IFlushable flushable)
+    void submitFlush(IFlushable flushable, CountDownLatch latch)
     {
         logger_.info("Enqueuing flush of {}", flushable);
-        final Condition condition = new SimpleCondition();
-        flushable.flushAndSignal(condition, flushSorter_, flushWriter_);
-        return condition;
+        flushable.flushAndSignal(latch, flushSorter_, flushWriter_);
     }
 
     public int getMemtableColumnsCount()
@@ -777,9 +812,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return getColumnFamily(QueryFilter.getSliceFilter(key, path, start, finish, null, reversed, limit));
     }
 
+    /**
+     * get a list of columns starting from a given column, in a specified order.
+     * only the latest version of a column is returned.
+     * @return null if there is no data and no tombstones; otherwise a ColumnFamily
+     */
     public ColumnFamily getColumnFamily(QueryFilter filter)
     {
-        return getColumnFamily(filter, CompactionManager.getDefaultGCBefore());
+        return getColumnFamily(filter, (int) (System.currentTimeMillis() / 1000) - metadata.gcGraceSeconds);
     }
 
     private ColumnFamily cacheRow(DecoratedKey key)
@@ -795,12 +835,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return cached;
     }
 
-    /**
-     * get a list of columns starting from a given column, in a specified order.
-     * only the latest version of a column is returned.
-     * @return null if there is no data and no tombstones; otherwise a ColumnFamily
-     */
-    public ColumnFamily getColumnFamily(QueryFilter filter, int gcBefore)
+    private ColumnFamily getColumnFamily(QueryFilter filter, int gcBefore)
     {
         assert columnFamily_.equals(filter.getColumnFamilyName());
 
@@ -808,26 +843,79 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         try
         {
             if (ssTables_.getRowCache().getCapacity() == 0)
-                return removeDeleted(getTopLevelColumns(filter, gcBefore), gcBefore);
+            {
+                ColumnFamily cf = getTopLevelColumns(filter, gcBefore);
+                // TODO this is necessary because when we collate supercolumns together, we don't check
+                // their subcolumns for relevance, so we need to do a second prune post facto here.
+                return cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
+            }
 
             ColumnFamily cached = cacheRow(filter.key);
             if (cached == null)
                 return null;
-            IColumnIterator ci = filter.getMemtableColumnIterator(cached, null, getComparator());
-            ColumnFamily returnCF = ci.getColumnFamily().cloneMeShallow();
-            filter.collectCollatedColumns(returnCF, ci, gcBefore);
-            // TODO this is necessary because when we collate supercolumns together, we don't check
-            // their subcolumns for relevance, so we need to do a second prune post facto here.
-            return removeDeleted(returnCF, gcBefore);
-        }
-        catch (IOException e)
-        {
-            throw new IOError(e);
+
+            return filterColumnFamily(cached, filter, gcBefore);
         }
         finally
         {
             readStats_.addNano(System.nanoTime() - start);
         }
+    }
+
+    /** filter a cached row, which will not be modified by the filter, but may be modified by throwing out
+     *  tombstones that are no longer relevant. */
+    ColumnFamily filterColumnFamily(ColumnFamily cached, QueryFilter filter, int gcBefore)
+    {
+        // special case slicing the entire row:
+        // we can skip the filter step entirely, and we can help out removeDeleted by re-caching the result
+        // if any tombstones have aged out since last time.  (This means that the row cache will treat gcBefore as
+        // max(gcBefore, all previous gcBefore), which is fine for correctness.)
+        //
+        // But, if the filter is asking for less columns than we have cached, we fall back to the slow path
+        // since we have to copy out a subset.
+        if (filter.filter instanceof SliceQueryFilter)
+        {
+            SliceQueryFilter sliceFilter = (SliceQueryFilter) filter.filter;
+            if (sliceFilter.start.length == 0 && sliceFilter.finish.length == 0)
+            {
+                if (cached.isSuper() && filter.path.superColumnName != null)
+                {
+                    // subcolumns from named supercolumn
+                    IColumn sc = cached.getColumn(filter.path.superColumnName);
+                    if (sc == null || sliceFilter.count >= sc.getSubColumns().size())
+                    {
+                        ColumnFamily cf = cached.cloneMeShallow();
+                        if (sc != null)
+                            cf.addColumn(sc);
+                        return removeDeleted(cf, gcBefore);
+                    }
+                }
+                else
+                {
+                    // top-level columns
+                    if (sliceFilter.count >= cached.getColumnCount())
+                    {
+                        removeDeletedColumnsOnly(cached, gcBefore);
+                        return removeDeletedCF(cached, gcBefore);
+                    }
+                }
+            }
+        }
+
+        IColumnIterator ci = filter.getMemtableColumnIterator(cached, null, getComparator());
+        ColumnFamily cf = null;
+        try
+        {
+            cf = ci.getColumnFamily().cloneMeShallow();
+        }
+        catch (IOException e)
+        {
+            throw new IOError(e);
+        }
+        filter.collectCollatedColumns(cf, ci, gcBefore);
+        // TODO this is necessary because when we collate supercolumns together, we don't check
+        // their subcolumns for relevance, so we need to do a second prune post facto here.
+        return cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
     }
 
     private ColumnFamily getTopLevelColumns(QueryFilter filter, int gcBefore)
@@ -872,7 +960,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             Comparator<IColumn> comparator = QueryFilter.getColumnComparator(getComparator());
             Iterator collated = IteratorUtils.collatedIterator(comparator, iterators);
             filter.collectCollatedColumns(returnCF, collated, gcBefore);
-            return returnCF; // caller is responsible for final removeDeleted
+            // Caller is responsible for final removeDeletedCF.  This is important for cacheRow to work correctly:
+            // we need to distinguish between "there is no data at all for this row" (BF will let us rebuild that efficiently)
+            // and "there used to be data, but it's gone now" (we should cache the empty CF so we don't need to rebuild that slower)
+            return returnCF;
         }
         catch (IOException e)
         {
@@ -898,20 +989,24 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     /**
       * Fetch a range of rows and columns from memtables/sstables.
       * 
-      * @param rows The resulting rows fetched during this operation 
-      * @param superColumn Super column to filter by
+      * @param superColumn optional SuperColumn to slice subcolumns of; null to slice top-level columns
       * @param range Either a Bounds, which includes start key, or a Range, which does not.
       * @param maxResults Maximum rows to return
       * @param columnFilter description of the columns we're interested in for each row
       * @return true if we found all keys we were looking for, otherwise false
      */
-    private boolean getRangeRows(List<Row> rows, byte[] superColumn, final AbstractBounds range, int maxResults, IFilter columnFilter)
+    public List<Row> getRangeSlice(byte[] superColumn, final AbstractBounds range, int maxResults, IFilter columnFilter)
     throws ExecutionException, InterruptedException
     {
+        assert range instanceof Bounds
+               || (!((Range)range).isWrapAround() || range.right.equals(StorageService.getPartitioner().getMinimumToken()))
+               : range;
+
+        List<Row> rows = new ArrayList<Row>();
         final DecoratedKey startWith = new DecoratedKey(range.left, (byte[])null);
         final DecoratedKey stopAt = new DecoratedKey(range.right, (byte[])null);
-        
-        final int gcBefore = CompactionManager.getDefaultGCBefore();
+
+        final int gcBefore = (int) (System.currentTimeMillis() / 1000) - metadata.gcGraceSeconds;
 
         final QueryPath queryPath =  new QueryPath(columnFamily_, superColumn, null);
 
@@ -923,7 +1018,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
         Iterables.addAll(sstables, ssTables_);
 
-        RowIterator iterator = RowIteratorFactory.getIterator(memtables, sstables, startWith, stopAt, filter, getComparator(), gcBefore);
+        RowIterator iterator = RowIteratorFactory.getIterator(memtables, sstables, startWith, stopAt, filter, getComparator(), this, gcBefore);
 
         try
         {
@@ -935,17 +1030,20 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 DecoratedKey key = current.key;
 
                 if (!stopAt.isEmpty() && stopAt.compareTo(key) < 0)
-                    return true;
+                    return rows;
 
                 // skip first one
                 if(range instanceof Bounds || !first || !key.equals(startWith))
+                {
                     rows.add(current);
+                    if (logger_.isDebugEnabled())
+                        logger_.debug("scanned " + key);
+                }
                 first = false;
 
                 if (rows.size() >= maxResults)
-                    return true;
+                    return rows;
             }
-            return false;
         }
         finally
         {
@@ -958,47 +1056,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 throw new IOError(e);
             }
         }
-    }
-
-    /**
-     *
-     * @param super_column
-     * @param range: either a Bounds, which includes start key, or a Range, which does not.
-     * @param keyMax maximum number of keys to process, regardless of startKey/finishKey
-     * @param columnFilter description of the columns we're interested in for each row
-     * @throws ExecutionException
-     * @throws InterruptedException
-     */
-    public List<Row> getRangeSlice(byte[] super_column, final AbstractBounds range, int keyMax, IFilter columnFilter)
-    throws ExecutionException, InterruptedException
-    {
-        List<Row> rows = new ArrayList<Row>();
-        boolean completed;
-        if ((range instanceof Bounds || !((Range)range).isWrapAround()))
-        {
-            completed = getRangeRows(rows, super_column, range, keyMax, columnFilter);
-        }
-        else
-        {
-            // wrapped range
-            Token min = partitioner_.getMinimumToken();
-            Range first = new Range(range.left, min);
-            completed = getRangeRows(rows, super_column, first, keyMax, columnFilter);
-            if (!completed && min.compareTo(range.right) < 0)
-            {
-                Range second = new Range(min, range.right);
-                getRangeRows(rows, super_column, second, keyMax, columnFilter);
-            }
-        }
 
         return rows;
     }
 
     public List<Row> scan(IndexClause indexClause, IFilter dataFilter)
     {
-        // TODO: use statistics to pick clause w/ highest selectivity
-        // TODO even later: allow merge join instead of just one index + loop
-        IndexExpression first = indexClause.expressions.get(0);
+        // TODO: allow merge join instead of just one index + loop
+        IndexExpression first = highestSelectivityPredicate(indexClause);
         ColumnFamilyStore indexCFS = getIndexedColumnFamilyStore(first.column_name);
         assert indexCFS != null;
         DecoratedKey indexKey = indexCFS.partitioner_.decorateKey(first.value);
@@ -1019,12 +1084,46 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {
             DecoratedKey dk = partitioner_.decorateKey(dataKey);
             ColumnFamily data = getColumnFamily(new QueryFilter(dk, new QueryPath(columnFamily_), dataFilter));
-            rows.add(new Row(dk, data));
+            boolean accepted = true;
+            for (IndexExpression expression : indexClause.expressions)
+            {
+                // (we can skip "first" since we already know it's satisfied)
+                if (expression != first && !satisfies(data, expression))
+                {
+                    accepted = false;
+                    break;
+                }
+            }
+            if (accepted)
+                rows.add(new Row(dk, data));
         }
 
-        // TODO apply remaining expressions
-
         return rows;
+    }
+
+    private IndexExpression highestSelectivityPredicate(IndexClause clause)
+    {
+        IndexExpression best = null;
+        int bestMeanCount = Integer.MAX_VALUE;
+        for (IndexExpression expression : clause.expressions)
+        {
+            ColumnFamilyStore cfs = getIndexedColumnFamilyStore(expression.column_name);
+            if (cfs == null)
+                continue;
+            int columns = cfs.getMeanColumns();
+            if (columns < bestMeanCount)
+            {
+                best = expression;
+                bestMeanCount = columns;
+            }
+        }
+        return best;
+    }
+
+    private static boolean satisfies(ColumnFamily data, IndexExpression expression)
+    {
+        IColumn column = data.getColumn(expression.column_name);
+        return column != null && Arrays.equals(column.value(), expression.value);
     }
 
     public AbstractType getComparator()
@@ -1243,7 +1342,12 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
         };
 
-        return commitLogUpdater_.submit(runnable);
+        return postFlushExecutor_.submit(runnable);
+    }
+
+    public static Future<?> submitPostFlush(Runnable runnable)
+    {
+        return postFlushExecutor_.submit(runnable);
     }
 
     public long getBloomFilterFalsePositives()
