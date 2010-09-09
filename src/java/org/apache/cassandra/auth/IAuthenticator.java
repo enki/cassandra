@@ -20,16 +20,23 @@ package org.apache.cassandra.auth;
  * 
  */
 
+import java.util.Map;
 
 import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.thrift.AccessLevel;
 import org.apache.cassandra.thrift.AuthenticationException;
-import org.apache.cassandra.thrift.AuthenticationRequest;
-import org.apache.cassandra.thrift.AuthorizationException;
 
 public interface IAuthenticator
 {
-    public AccessLevel login(String keyspace, AuthenticationRequest auth_request) throws AuthenticationException, AuthorizationException;
+    /**
+     * @return The user that a connection is initialized with, or 'null' if a user must call login().
+     */
+    public AuthenticatedUser defaultUser();
+
+    /**
+     * @param credentials An implementation specific collection of identifying information.
+     * @return A successfully authenticated user: should throw AuthenticationException rather than ever returning null.
+     */
+    public AuthenticatedUser authenticate(Map<? extends CharSequence,? extends CharSequence> credentials) throws AuthenticationException;
 
     public void validateConfiguration() throws ConfigurationException;
 }

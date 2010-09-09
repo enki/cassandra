@@ -19,20 +19,19 @@
 package org.apache.cassandra.config;
 
 import java.io.*;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.net.InetAddress;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.util.*;
 
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.locator.DynamicEndpointSnitch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.auth.AllowAllAuthenticator;
-import org.apache.cassandra.auth.IAuthenticator;
+import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.Config.RequestSchedulerId;
 import org.apache.cassandra.db.ClockType;
 import org.apache.cassandra.db.ColumnFamilyType;
@@ -42,7 +41,6 @@ import org.apache.cassandra.db.clock.AbstractReconciler;
 import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.util.FileUtils;
@@ -77,16 +75,14 @@ public class DatabaseDescriptor
     /* Hashing strategy Random or OPHF */
     private static IPartitioner partitioner;
 
-    // the path qualified config file (cassandra.yaml) name
-    private static String configFileName;
-
     private static Config.DiskAccessMode indexAccessMode;
     
     private static Config conf;
 
     private static IAuthenticator authenticator = new AllowAllAuthenticator();
+    private static IAuthority authority = new AllowAllAuthority();
 
-    private final static String STORAGE_CONF_FILE = "cassandra.yaml";
+    private final static String DEFAULT_CONFIGURATION = "cassandra.yaml";
 
     private static IRequestScheduler requestScheduler;
     private static RequestSchedulerId requestSchedulerId;
@@ -96,29 +92,39 @@ public class DatabaseDescriptor
     private static UUID defsVersion = INITIAL_VERSION;
 
     /**
-     * Inspect the classpath to find STORAGE_CONF_FILE.
+     * Inspect the classpath to find storage configuration file
      */
-    static String getStorageConfigPath() throws ConfigurationException
+    static URL getStorageConfigURL() throws ConfigurationException
     {
-        ClassLoader loader = DatabaseDescriptor.class.getClassLoader();
-        URL scpurl = loader.getResource(STORAGE_CONF_FILE);
-        if (scpurl != null)
-            return scpurl.getFile();
-        throw new ConfigurationException("Cannot locate " + STORAGE_CONF_FILE + " on the classpath");
-    }
+        String configUrl = System.getProperty("cassandra.config");
+        if (configUrl == null)
+            configUrl = DEFAULT_CONFIGURATION;
 
-    private static int stageQueueSize_ = 4096;
+        URL url;
+        try
+        {
+            url = new URL(configUrl);
+        }
+        catch (MalformedURLException e)
+        {
+            ClassLoader loader = DatabaseDescriptor.class.getClassLoader();
+            url = loader.getResource(configUrl);
+            if (url == null)
+                throw new ConfigurationException("Cannot locate " + configUrl);
+        }
+
+        return url;
+    }
 
     static
     {
         try
         {
-            configFileName = getStorageConfigPath();
-
+            URL url = getStorageConfigURL();
             if (logger.isDebugEnabled())
-                logger.info("Loading settings from " + configFileName);
+                logger.info("Loading settings from " + url);
             
-            InputStream input = new FileInputStream(new File(configFileName));
+            InputStream input = url.openStream();
             org.yaml.snakeyaml.constructor.Constructor constructor = new org.yaml.snakeyaml.constructor.Constructor(Config.class);
             TypeDescription desc = new TypeDescription(Config.class);
             desc.putListPropertyType("keyspaces", RawKeyspace.class);
@@ -181,21 +187,13 @@ public class DatabaseDescriptor
                 logger.info("DiskAccessMode is" + conf.disk_access_mode + ", indexAccessMode is " + indexAccessMode );
             }
 
-            /* Authentication and authorization backend, implementing IAuthenticator */
+            /* Authentication and authorization backend, implementing IAuthenticator and IAuthority */
             if (conf.authenticator != null)
-            {
-                try
-                {
-                    Class cls = Class.forName(conf.authenticator);
-                    authenticator = (IAuthenticator) cls.getConstructor().newInstance();
-                }
-                catch (ClassNotFoundException e)
-                {
-                    throw new ConfigurationException("Invalid authenticator class " + conf.authenticator);
-                }
-            }
-
+                authenticator = FBUtilities.<IAuthenticator>construct(conf.authenticator, "authenticator");
+            if (conf.authority != null)
+                authority = FBUtilities.<IAuthority>construct(conf.authority, "authority");
             authenticator.validateConfiguration();
+            authority.validateConfiguration();
             
             /* Hashing strategy */
             if (conf.partitioner == null)
@@ -263,6 +261,12 @@ public class DatabaseDescriptor
             if (conf.thrift_framed_transport_size_in_mb > 0 && conf.thrift_max_message_length_in_mb < conf.thrift_framed_transport_size_in_mb)
             {
                 throw new ConfigurationException("thrift_max_message_length_in_mb must be greater than thrift_framed_transport_size_in_mb when using TFramedTransport");
+            }
+
+            /* compaction thread priority */
+            if (conf.compaction_thread_priority < Thread.MIN_PRIORITY || conf.compaction_thread_priority > Thread.NORM_PRIORITY)
+            {
+                throw new ConfigurationException("compaction_thread_priority must be between 1 and 5");
             }
             
             /* end point snitch */
@@ -343,17 +347,19 @@ public class DatabaseDescriptor
                 CommitLog.setSegmentSize(conf.commitlog_rotation_threshold_in_mb * 1024 * 1024);
 
             // Hardcoded system tables
-            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE, LocalStrategy.class, 1, new CFMetaData[]{CFMetaData.StatusCf,
-                                                                                                  CFMetaData.HintsCf,
-                                                                                                  CFMetaData.MigrationsCf,
-                                                                                                  CFMetaData.SchemaCf,
-                                                                                                  CFMetaData.StatisticsCf
+            KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE,
+                                                   LocalStrategy.class,
+                                                   null,
+                                                   1,
+                                                   new CFMetaData[]{CFMetaData.StatusCf,
+                                                                    CFMetaData.HintsCf,
+                                                                    CFMetaData.MigrationsCf,
+                                                                    CFMetaData.SchemaCf,
             });
             CFMetaData.map(CFMetaData.StatusCf);
             CFMetaData.map(CFMetaData.HintsCf);
             CFMetaData.map(CFMetaData.MigrationsCf);
             CFMetaData.map(CFMetaData.SchemaCf);
-            CFMetaData.map(CFMetaData.StatisticsCf);
             tables.put(Table.SYSTEM_TABLE, systemMeta);
             
             /* Load the seeds for node contact points */
@@ -386,43 +392,7 @@ public class DatabaseDescriptor
 
     private static IEndpointSnitch createEndpointSnitch(String endpointSnitchClassName) throws ConfigurationException
     {
-        IEndpointSnitch snitch;
-        Class cls;
-        try
-        {
-            cls = Class.forName(endpointSnitchClassName);
-        }
-        catch (ClassNotFoundException e)
-        {
-            throw new ConfigurationException("Unable to load endpointsnitch class " + endpointSnitchClassName);
-        }
-        Constructor ctor;
-        try
-        {
-            ctor = cls.getConstructor();
-        }
-        catch (NoSuchMethodException e)
-        {
-            throw new ConfigurationException("No default constructor found in " + endpointSnitchClassName);
-        }
-        try
-        {
-            snitch = (IEndpointSnitch)ctor.newInstance();
-        }
-        catch (InstantiationException e)
-        {
-            throw new ConfigurationException("endpointsnitch class " + endpointSnitchClassName + "is abstract");
-        }
-        catch (IllegalAccessException e)
-        {
-            throw new ConfigurationException("Access to " + endpointSnitchClassName + " constructor was rejected");
-        }
-        catch (InvocationTargetException e)
-        {
-            if (e.getCause() instanceof ConfigurationException)
-                throw (ConfigurationException)e.getCause();
-            throw new ConfigurationException("Error instantiating " + endpointSnitchClassName + " " + e.getMessage());
-        }
+        IEndpointSnitch snitch = FBUtilities.<IEndpointSnitch>construct(endpointSnitchClassName, "snitch");
         return conf.dynamic_snitch ? new DynamicEndpointSnitch(snitch) : snitch;
     }
     
@@ -471,8 +441,12 @@ public class DatabaseDescriptor
             Collection<KSMetaData> tableDefs = DefsTable.loadFromStorage(uuid);   
             for (KSMetaData def : tableDefs)
             {
+                if (!def.name.matches(Migration.NAME_VALIDATOR_REGEX))
+                    throw new RuntimeException("invalid keyspace name: " + def.name);
                 for (CFMetaData cfm : def.cfMetaData().values())
                 {
+                    if (!cfm.cfName.matches(Migration.NAME_VALIDATOR_REGEX))
+                        throw new RuntimeException("invalid column family name: " + cfm.cfName);
                     try
                     {
                         CFMetaData.map(cfm);
@@ -497,8 +471,8 @@ public class DatabaseDescriptor
             
             // since we loaded definitions from local storage, log a warning if definitions exist in yaml.
             if (conf.keyspaces != null && conf.keyspaces.size() > 0)
-                logger.warn("Schema definitions were defined both locally and in " + STORAGE_CONF_FILE +
-                    ". Definitions in " + STORAGE_CONF_FILE + " were ignored.");
+                logger.warn("Schema definitions were defined both locally and in " + DEFAULT_CONFIGURATION +
+                    ". Definitions in " + DEFAULT_CONFIGURATION + " were ignored.");
             
         }
         CFMetaData.fixMaxId();
@@ -529,15 +503,9 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("Missing replica_placement_strategy directive for " + keyspace.name);
             }
-            Class<? extends AbstractReplicationStrategy> strategyClass = null;
-            try
-            {
-                strategyClass = (Class<? extends AbstractReplicationStrategy>) Class.forName(keyspace.replica_placement_strategy);
-            }
-            catch (ClassNotFoundException e)
-            {
-                throw new ConfigurationException("Invalid replicaplacementstrategy class " + keyspace.replica_placement_strategy);
-            }
+            String strategyClassName = keyspace.replica_placement_strategy.replace("RackUnawareStrategy", "SimpleStrategy")
+                                                                          .replace("RackAwareStrategy", "OldNetworkTopologyStrategy");
+            Class<AbstractReplicationStrategy> strategyClass = FBUtilities.<AbstractReplicationStrategy>classForName(strategyClassName, "replication-strategy");
             
             /* Data replication factor */
             if (keyspace.replication_factor == null)
@@ -554,14 +522,16 @@ public class DatabaseDescriptor
                 {
                     throw new ConfigurationException("ColumnFamily name attribute is required");
                 }
-                if (cf.name.contains("-"))
+                if (!cf.name.matches(Migration.NAME_VALIDATOR_REGEX))
                 {
-                    throw new ConfigurationException("ColumnFamily names cannot contain hyphens");
+                    throw new ConfigurationException("ColumnFamily name contains invalid characters.");
                 }
                 
-                // Parse out the column comparator
+                // Parse out the column comparators and validators
                 AbstractType comparator = getComparator(cf.compare_with);
                 AbstractType subcolumnComparator = null;
+                AbstractType default_validator = getComparator(cf.default_validation_class);
+
                 ColumnFamilyType cfType = cf.column_type == null ? ColumnFamilyType.Standard : cf.column_type;
                 if (cfType == ColumnFamilyType.Super)
                 {
@@ -579,7 +549,7 @@ public class DatabaseDescriptor
                 if (reconciler == null)
                 {
                     if (cf.clock_type == ClockType.Timestamp)    
-                        reconciler = new TimestampReconciler(); // default
+                        reconciler = TimestampReconciler.instance; // default
                     else
                         throw new ConfigurationException("No reconciler specified for column family " + cf.name);
                 }
@@ -615,10 +585,14 @@ public class DatabaseDescriptor
                                              cf.keys_cached, 
                                              cf.read_repair_chance,
                                              cf.gc_grace_seconds,
+                                             default_validator,
                                              metadata);
             }
-            defs.add(new KSMetaData(keyspace.name, strategyClass, keyspace.replication_factor, cfDefs));
-            
+            defs.add(new KSMetaData(keyspace.name,
+                                    strategyClass,
+                                    keyspace.strategy_options,
+                                    keyspace.replication_factor,
+                                    cfDefs));
         }
 
         return defs;
@@ -627,6 +601,11 @@ public class DatabaseDescriptor
     public static IAuthenticator getAuthenticator()
     {
         return authenticator;
+    }
+
+    public static IAuthority getAuthority()
+    {
+        return authority;
     }
 
     public static boolean isThriftFramed()
@@ -646,8 +625,6 @@ public class DatabaseDescriptor
 
     public static AbstractType getComparator(String compareWith) throws ConfigurationException
     {
-        Class<? extends AbstractType> typeClass;
-        
         if (compareWith == null)
             compareWith = "BytesType";
 
@@ -656,38 +633,25 @@ public class DatabaseDescriptor
 
     public static AbstractReconciler getReconciler(String reconcileWith) throws ConfigurationException
     {
-        if (reconcileWith == null || "".equals(reconcileWith))
+        if (reconcileWith == null || reconcileWith.length() == 0)
         {
             return null;
         }
-        
-        Class<? extends AbstractReconciler> reconcilerClass;
-        {
-            String className = reconcileWith.contains(".") ? reconcileWith :  TimestampReconciler.class.getPackage().getName() + "." + reconcileWith;
-            try
-            {
-                reconcilerClass = (Class<? extends AbstractReconciler>)Class.forName(className);
-            }
-            catch (ClassNotFoundException e)
-            {
-                throw new ConfigurationException("Unable to load class " + className);
-            }
-        }
+
+        String className = reconcileWith.indexOf('.') >= 0 ? reconcileWith : TimestampReconciler.class.getPackage().getName() + '.' + reconcileWith;
+        Class<? extends AbstractReconciler> reconcilerClass = FBUtilities.<AbstractReconciler>classForName(className, "reconciler");
         try
         {
-            return reconcilerClass.getConstructor().newInstance();
+            Field field = reconcilerClass.getDeclaredField("instance");
+            return (AbstractReconciler) field.get(null);
         }
-        catch (InstantiationException e)
+        catch (NoSuchFieldException e)
         {
-            ConfigurationException ex = new ConfigurationException(e.getMessage());
-            ex.initCause(e);
-            throw ex;
+            throw new ConfigurationException("Invalid reconciler: must define a public static instance field.", e);
         }
-        catch (Exception e)
+        catch (IllegalAccessException e)
         {
-            ConfigurationException ex = new ConfigurationException(e.getMessage());
-            ex.initCause(e);
-            throw ex;
+            throw new ConfigurationException("Invalid reconciler: must define a public static instance field.", e);
         }
     }
 
@@ -749,6 +713,12 @@ public class DatabaseDescriptor
             throw new RuntimeException(table + " not found. Failure to call loadSchemas() perhaps?");
         return meta.strategyClass;
     }
+
+    public static KSMetaData getKSMetaData(String table)
+    {
+        assert table != null;
+        return tables.get(table);
+    }
     
     public static String getJobTrackerAddress()
     {
@@ -783,10 +753,6 @@ public class DatabaseDescriptor
     public static String getClusterName()
     {
         return conf.cluster_name;
-    }
-
-    public static String getConfigFileName() {
-        return configFileName;
     }
 
     public static String getJobJarLocation()
@@ -1002,11 +968,6 @@ public class DatabaseDescriptor
         return getCFMetaData(tableName, cfName).subcolumnComparator;
     }
 
-    public static int getStageQueueSize()
-    {
-        return stageQueueSize_;
-    }
-
     public static AbstractReconciler getReconciler(String tableName, String cfName)
     {
         assert tableName != null;
@@ -1111,6 +1072,11 @@ public class DatabaseDescriptor
         return conf.binary_memtable_throughput_in_mb;
     }
 
+    public static int getCompactionThreadPriority()
+    {
+        return conf.compaction_thread_priority;
+    }
+
     public static boolean isSnapshotBeforeCompaction()
     {
         return conf.snapshot_before_compaction;
@@ -1129,5 +1095,10 @@ public class DatabaseDescriptor
     public static AbstractType getValueValidator(String keyspace, String cf, byte[] column)
     {
         return getCFMetaData(keyspace, cf).getValueValidator(column);
+    }
+
+    public static CFMetaData getCFMetaData(Descriptor desc)
+    {
+        return getCFMetaData(desc.ksname, desc.cfname);
     }
 }

@@ -25,15 +25,15 @@ package org.apache.cassandra.service;
 
 
 import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.locator.AbstractRackAwareSnitch;
-import org.apache.cassandra.locator.DatacenterShardStrategy;
+import org.apache.cassandra.locator.AbstractNetworkTopologySnitch;
+import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.thrift.UnavailableException;
@@ -46,7 +46,7 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHandler
 {
-    private static final AbstractRackAwareSnitch snitch = (AbstractRackAwareSnitch) DatabaseDescriptor.getEndpointSnitch();
+    private static final IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
 
     private static final String localdc;
     static
@@ -54,23 +54,33 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
         localdc = snitch.getDatacenter(FBUtilities.getLocalAddress());
     }
 
-	private final DatacenterShardStrategy strategy;
+	private final NetworkTopologyStrategy strategy;
     private HashMap<String, AtomicInteger> responses = new HashMap<String, AtomicInteger>();
-    private final String table;
 
-    public DatacenterSyncWriteResponseHandler(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistencyLevel, String table)
+    protected DatacenterSyncWriteResponseHandler(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistencyLevel, String table)
     {
         // Response is been managed by the map so make it 1 for the superclass.
         super(writeEndpoints, hintedEndpoints, consistencyLevel);
         assert consistencyLevel == ConsistencyLevel.DCQUORUM;
 
-        this.table = table;
-        strategy = (DatacenterShardStrategy) StorageService.instance.getReplicationStrategy(table);
+        strategy = (NetworkTopologyStrategy) StorageService.instance.getReplicationStrategy(table);
 
-        for (String dc : strategy.getDatacenters(table))
+        for (String dc : strategy.getDatacenters())
         {
-            int rf = strategy.getReplicationFactor(dc, table);
+            int rf = strategy.getReplicationFactor(dc);
             responses.put(dc, new AtomicInteger((rf / 2) + 1));
+        }
+    }
+
+    public static IWriteResponseHandler create(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistencyLevel, String table)
+    {
+        if (consistencyLevel == ConsistencyLevel.ZERO)
+        {
+            return NoConsistencyWriteResponseHandler.instance;
+        }
+        else
+        {
+            return new DatacenterSyncWriteResponseHandler(writeEndpoints, hintedEndpoints, consistencyLevel, table);
         }
     }
 
@@ -88,14 +98,14 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
                 return;
         }
 
-        // all the quorum conditionas are met
+        // all the quorum conditions are met
         condition.signal();
     }
 
     public void assureSufficientLiveNodes() throws UnavailableException
     {   
 		Map<String, AtomicInteger> dcEndpoints = new HashMap<String, AtomicInteger>();
-        for (String dc: strategy.getDatacenters(table))
+        for (String dc: strategy.getDatacenters())
             dcEndpoints.put(dc, new AtomicInteger());
         for (InetAddress destination : hintedEndpoints.keySet())
         {
@@ -105,8 +115,8 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
             dcEndpoints.get(destinationDC).incrementAndGet();
         }
 
-        // Throw exception if any of the DC doesnt have livenodes to accept write.
-        for (String dc: strategy.getDatacenters(table)) 
+        // Throw exception if any of the DC doesn't have livenodes to accept write.
+        for (String dc: strategy.getDatacenters())
         {
         	if (dcEndpoints.get(dc).get() != responses.get(dc).get())
                 throw new UnavailableException();

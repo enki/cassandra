@@ -18,7 +18,9 @@
 
 package org.apache.cassandra.db;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.net.IVerbHandler;
@@ -52,9 +54,9 @@ public class DefinitionsUpdateResponseVerbHandler implements IVerbHandler
                 final UUID version = UUIDGen.makeType1UUID(col.name());
                 if (version.timestamp() > DatabaseDescriptor.getDefsVersion().timestamp())
                 {
-                    final Migration m = Migration.deserialize(new ByteArrayInputStream(col.value()));
+                    final Migration m = Migration.deserialize(col.value());
                     assert m.getVersion().equals(version);
-                    StageManager.getStage(StageManager.MIGRATION_STAGE).submit(new WrappedRunnable()
+                    StageManager.getStage(Stage.MIGRATION).submit(new WrappedRunnable()
                     {
                         @Override
                         protected void runMayThrow() throws Exception
@@ -67,8 +69,15 @@ public class DefinitionsUpdateResponseVerbHandler implements IVerbHandler
                             else
                             {
                                 logger.debug("Applying {} from {}", m.getClass().getSimpleName(), message.getFrom());
-                                m.apply();
-                                m.announce();
+                                try
+                                {
+                                    m.apply();
+                                }
+                                catch (ConfigurationException ex)
+                                {
+                                    // Trying to apply the same migration twice. This happens as a result of gossip.
+                                    logger.debug("Migration not applied " + ex.getMessage());
+                                }
                             }
                         }
                     });

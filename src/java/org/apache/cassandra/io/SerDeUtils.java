@@ -18,16 +18,17 @@
 
 package org.apache.cassandra.io;
 
-import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.util.Collections;
 
 import org.apache.avro.Schema;
 import org.apache.avro.io.BinaryDecoder;
 import org.apache.avro.io.BinaryEncoder;
 import org.apache.avro.io.Decoder;
 import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.ipc.ByteBufferInputStream;
 import org.apache.avro.generic.GenericArray;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.specific.SpecificDatumReader;
@@ -45,16 +46,27 @@ public final class SerDeUtils
     // unbuffered decoders
     private final static DecoderFactory DIRECT_DECODERS = new DecoderFactory().configureDirectDecoder(true);
 
+    public static byte[] copy(ByteBuffer buff)
+    {
+        byte[] bytes = new byte[buff.remaining()];
+        buff.get(bytes);
+        buff.rewind();
+        return bytes;
+    }
+
 	/**
      * Deserializes a single object based on the given Schema.
-     * @param schema writer's schema
+     * @param writer writer's schema
      * @param bytes Array to deserialize from
+     * @param ob An empty object to deserialize into (must not be null).
      * @throws IOException
      */
-    public static <T extends SpecificRecord> T deserialize(Schema schema, byte[] bytes) throws IOException
+    public static <T extends SpecificRecord> T deserialize(Schema writer, byte[] bytes, T ob) throws IOException
     {
         BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(bytes, null);
-        return new SpecificDatumReader<T>(schema).read(null, dec);
+        SpecificDatumReader<T> reader = new SpecificDatumReader<T>(writer);
+        reader.setExpected(ob.getSchema());
+        return reader.read(ob, dec);
     }
 
 	/**
@@ -73,14 +85,17 @@ public final class SerDeUtils
 
 	/**
      * Deserializes a single object as stored along with its Schema by serialize(T). NB: See warnings on serialize(T).
+     * @param ob An empty object to deserialize into (must not be null).
      * @param bytes Array to deserialize from
      * @throws IOException
      */
-    public static <T extends SpecificRecord> T deserializeWithSchema(byte[] bytes) throws IOException
+    public static <T extends SpecificRecord> T deserializeWithSchema(byte[] bytes, T ob) throws IOException
     {
         BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(bytes, null);
-        Schema schema = Schema.parse(dec.readString(new Utf8()).toString());
-        return new SpecificDatumReader<T>(schema).read(null, dec);
+        Schema writer = Schema.parse(dec.readString(new Utf8()).toString());
+        SpecificDatumReader<T> reader = new SpecificDatumReader<T>(writer);
+        reader.setExpected(ob.getSchema());
+        return new SpecificDatumReader<T>(writer).read(ob, dec);
     }
 
 	/**
@@ -97,6 +112,15 @@ public final class SerDeUtils
         writer.write(o, enc);
         enc.flush();
         return buff.asByteArray();
+    }
+
+    /**
+     * @return a DataInputStream wrapping the given buffer.
+     */
+    public static DataInputStream createDataInputStream(ByteBuffer buff)
+    {
+        ByteBufferInputStream bbis = new ByteBufferInputStream(Collections.singletonList(buff));
+        return new DataInputStream(bbis);
     }
 
     /**

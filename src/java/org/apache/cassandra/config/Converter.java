@@ -1,4 +1,25 @@
 package org.apache.cassandra.config;
+/*
+ * 
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ * 
+ */
+
 
 import java.io.BufferedWriter;
 import java.io.FileWriter;
@@ -11,6 +32,8 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.TransformerException;
 import javax.xml.xpath.XPathExpressionException;
 
+import org.apache.cassandra.auth.SimpleAuthenticator;
+import org.apache.cassandra.auth.SimpleAuthority;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SkipNullRepresenter;
 import org.apache.cassandra.utils.XMLUtils;
@@ -42,6 +65,7 @@ public class Converter
         /* Read the table related stuff from config */
         try
         {
+            String endPointSnitchClassName = null; // Used as a sentinel. EPS cannot be undefined in 0.6.
             NodeList tablesxml = xmlUtils.getRequestedNodeList("/Storage/Keyspaces/Keyspace");
 
             String gcGrace = xmlUtils.getNodeValue("/Storage/GCGraceSeconds");
@@ -58,7 +82,14 @@ public class Converter
                 /* parsing out the table ksName */
                 ks.name = XMLUtils.getAttributeValue(table, "Name");
 
-                
+                value = xmlUtils.getNodeValue("/Storage/Keyspaces/Keyspace[@Name='" + ks.name + "']/EndPointSnitch");
+                if (endPointSnitchClassName == null) {
+                    endPointSnitchClassName = value;
+                }
+                else if (!endPointSnitchClassName.equals(value)) {
+                    throw new ConfigurationException("ERROR : EndPointSnitch is global in 0.7 -- multiple choices present.");
+                }
+
                 ks.replica_placement_strategy = xmlUtils.getNodeValue("/Storage/Keyspaces/Keyspace[@Name='" + ks.name + "']/ReplicaPlacementStrategy");
                 /* Data replication factor */
                 value = xmlUtils.getNodeValue("/Storage/Keyspaces/Keyspace[@Name='" + ks.name + "']/ReplicationFactor");
@@ -106,6 +137,18 @@ public class Converter
                 }
                 keyspaces.add(ks);
             }
+            if (endPointSnitchClassName.equals("org.apache.cassandra.locator.EndPointSnitch")) {
+                endPointSnitchClassName = "org.apache.cassandra.locator.RackInferringSnitch";
+                System.out.println("WARN : org.apache.cassandra.locator.EndPointSnitch has been replaced by org.apache.cassandra.locator.RackInferringSnitch");
+            }
+            else if (endPointSnitchClassName.equals("org.apache.cassandra.locator.PropertyFileEndpointSnitch")) {
+                endPointSnitchClassName = "org.apache.cassandra.locator.PropertyFileSnitch";
+                System.out.println("WARN : org.apache.cassandra.locator.PropertyFileEndpointSnich has been replaced by org.apache.cassandra.locator.PropertyFileSnitch");
+            }
+            else {
+                System.out.println("INFO : EndPointSnitch is global in 0.7 and may need to be updated.");
+            }
+            conf.endpoint_snitch = endPointSnitchClassName;
             return keyspaces;
         }
         catch (XPathExpressionException e) 
@@ -141,6 +184,9 @@ public class Converter
             conf.disk_access_mode = Config.DiskAccessMode.valueOf(modeRaw);
             
             conf.authenticator = xmlUtils.getNodeValue("/Storage/Authenticator");
+            // handle the authc/authz split by configuring SimpleAuthority if SimpleAuthenticator is in use
+            if (conf.authenticator != null && conf.authenticator.equals(SimpleAuthenticator.class.getName()))
+                conf.authority = SimpleAuthority.class.getName();
             
             /* Hashing strategy */
             conf.partitioner = xmlUtils.getNodeValue("/Storage/Partitioner");
@@ -194,13 +240,16 @@ public class Converter
                 conf.rpc_port = Integer.parseInt(port);
             
             String framedRaw = xmlUtils.getNodeValue("/Storage/ThriftFramedTransport");
-            if (framedRaw != null && Boolean.valueOf(framedRaw))
+            if (framedRaw != null && !Boolean.valueOf(framedRaw))
+            {
+                conf.thrift_framed_transport_size_in_mb = 0;
+                System.out.println("WARN : Thrift uses framed Transport by default in 0.7! Setting TFramedTransportSize to 0MB (disabled).");
+            }
+            else
             {
                 conf.thrift_framed_transport_size_in_mb = 15;
                 System.out.println("TFramedTransport will have a maximum frame size of 15MB");
             }
-            
-            conf.endpoint_snitch = xmlUtils.getNodeValue("/Storage/EndpointSnitch");
             
             String sbc = xmlUtils.getNodeValue("/Storage/SnapshotBeforeCompaction");
             if (sbc != null)
@@ -243,8 +292,7 @@ public class Converter
             conf.seeds = xmlUtils.getNodeValues("/Storage/Seeds/Seed");
             
             conf.keyspaces = readTablesFromXml(xmlUtils);
-            
-        } 
+        }
         catch (ParserConfigurationException e) {
             System.out.println("Parser error during previous config load.");
             throw new ConfigurationException("Parser error during previous config load.");
@@ -285,26 +333,22 @@ public class Converter
     {
         try
         {
-            String configname;
+            String oldConfigName;
+
             ClassLoader loader = Converter.class.getClassLoader();
             URL scpurl = loader.getResource(PREVIOUS_CONF_FILE);
             if (scpurl == null)
                 scpurl = loader.getResource("storage-conf.xml");
             
             if (scpurl != null)
-                configname = scpurl.getFile();
+                oldConfigName = scpurl.getFile();
             else 
                 throw new ConfigurationException("Error finding previous configuration file.");
+            System.out.println("Found previous configuration: " + oldConfigName);
+            loadPreviousConfig(oldConfigName);
             
-            System.out.println("Found previous configuration: " + configname);
-            
-            loadPreviousConfig(configname);
-            
-            configname = configname.replace("cassandra.xml", "cassandra.yaml");
-            
-            System.out.println("Creating new configuration: " + configname);
-            
-            dumpConfig(configname);
+            System.out.println("Creating new configuration cassandra.yaml");
+            dumpConfig("cassandra.yaml");
         } 
         catch (IOException e)
         {

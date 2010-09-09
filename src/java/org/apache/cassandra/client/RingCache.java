@@ -19,8 +19,8 @@ package org.apache.cassandra.client;
 
 import java.util.*;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.TokenMetadata;
@@ -29,7 +29,6 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.Cassandra;
 import org.apache.cassandra.thrift.InvalidRequestException;
 import org.apache.cassandra.thrift.TokenRange;
@@ -37,10 +36,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
+import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 
-import com.google.common.collect.BiMap;
-import com.google.common.collect.HashBiMap;
+import com.google.common.collect.Multimap;
+import com.google.common.collect.HashMultimap;
 
 /**
  *  A class for caching the ring map at the client. For usage example, see
@@ -50,22 +50,21 @@ public class RingCache
 {
     final private static Logger logger_ = LoggerFactory.getLogger(RingCache.class);
 
-    private Set<String> seeds_ = new HashSet<String>();
-    final private int port_= DatabaseDescriptor.getRpcPort();
-    final private static IPartitioner partitioner_ = DatabaseDescriptor.getPartitioner();
+    private final Set<String> seeds_ = new HashSet<String>();
+    private final int port_;
+    private final IPartitioner partitioner_;
     private final String keyspace;
-    private TokenMetadata tokenMetadata;
 
-    public RingCache(String keyspace) throws IOException
+    private Set<Range> rangeSet;
+    private Multimap<Range, InetAddress> rangeMap;
+
+    public RingCache(String keyspace, IPartitioner partitioner, String addresses, int port) throws IOException
     {
-        for (InetAddress seed : DatabaseDescriptor.getSeeds())
-        {
-            seeds_.add(seed.getHostAddress());
-        }
-        
+        for (String seed : addresses.split(","))
+            seeds_.add(seed);
+        this.port_ = port;
         this.keyspace = keyspace;
-        
-        DatabaseDescriptor.loadSchemas();
+        this.partitioner_ = partitioner;
         refreshEndpointMap();
     }
 
@@ -76,21 +75,22 @@ public class RingCache
             try
             {
                 TSocket socket = new TSocket(seed, port_);
-                TBinaryProtocol binaryProtocol = new TBinaryProtocol(socket, false, false);
+                TBinaryProtocol binaryProtocol = new TBinaryProtocol(new TFramedTransport(socket));
                 Cassandra.Client client = new Cassandra.Client(binaryProtocol);
                 socket.open();
 
                 List<TokenRange> ring = client.describe_ring(keyspace);
-                BiMap<Token, InetAddress> tokenEndpointMap = HashBiMap.create();
+                rangeMap = HashMultimap.create();
                 
                 for (TokenRange range : ring)
                 {
-                    Token<?> token = StorageService.getPartitioner().getTokenFactory().fromString(range.start_token);
+                    Token<?> left = partitioner_.getTokenFactory().fromString(range.start_token);
+                    Token<?> right = partitioner_.getTokenFactory().fromString(range.end_token);
                     String host = range.endpoints.get(0);
                     
                     try
                     {
-                        tokenEndpointMap.put(token, InetAddress.getByName(host));
+                        rangeMap.put(new Range(left, right, partitioner_), InetAddress.getByName(host));
                     }
                     catch (UnknownHostException e)
                     {
@@ -98,7 +98,7 @@ public class RingCache
                     }
                 }
 
-                tokenMetadata = new TokenMetadata(tokenEndpointMap);
+                rangeSet = new HashSet(rangeMap.keySet());
 
                 break;
             }
@@ -114,11 +114,17 @@ public class RingCache
         }
     }
 
-    public List<InetAddress> getEndpoint(byte[] key)
+    public Collection<InetAddress> getEndpoint(byte[] key)
     {
-        if (tokenMetadata == null)
+        if (rangeSet == null)
             throw new RuntimeException("Must refresh endpoints before looking up a key.");
-        AbstractReplicationStrategy strat = StorageService.getReplicationStrategy(tokenMetadata, keyspace);
-        return strat.getNaturalEndpoints(partitioner_.getToken(key), keyspace);
+
+        // TODO: naive linear search of the token map
+        Token<?> t = partitioner_.getToken(key);
+        for (Range range : rangeSet)
+            if (range.contains(t))
+                return rangeMap.get(range);
+
+        throw new RuntimeException("Invalid token information returned by describe_ring: " + rangeMap);
     }
 }

@@ -29,16 +29,14 @@ import org.apache.commons.collections.comparators.ReverseComparator;
 import org.apache.commons.collections.iterators.ReverseListIterator;
 import org.apache.commons.collections.IteratorUtils;
 
-import com.google.common.collect.Collections2;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.columniterator.IColumnIterator;
+import org.apache.cassandra.db.columniterator.SSTableSliceIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.IClock.ClockRelationship;
 import org.apache.cassandra.db.marshal.AbstractType;
-
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
-import com.google.common.collect.Iterators;
 
 public class SliceQueryFilter implements IFilter
 {
@@ -67,9 +65,9 @@ public class SliceQueryFilter implements IFilter
         return new SSTableSliceIterator(sstable, key, start, finish, reversed);
     }
     
-    public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, long dataStart)
+    public IColumnIterator getSSTableColumnIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key)
     {
-        return new SSTableSliceIterator(sstable, file, key, start, finish, reversed);
+        return new SSTableSliceIterator(metadata, file, key, start, finish, reversed);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)

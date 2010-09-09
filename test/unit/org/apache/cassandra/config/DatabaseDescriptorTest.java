@@ -23,29 +23,32 @@ import static org.junit.Assert.assertNotNull;
 import org.apache.avro.specific.SpecificRecord;
 
 import org.apache.cassandra.CleanupHelper;
+import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.migration.AddKeyspace;
-import org.apache.cassandra.locator.RackUnawareStrategy;
+import org.apache.cassandra.locator.SimpleStrategy;
 import org.apache.cassandra.io.SerDeUtils;
-import org.apache.cassandra.io.util.OutputBuffer;
+
 import org.junit.Test;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.UUID;
 
 public class DatabaseDescriptorTest
 {
-    protected <D extends SpecificRecord> D serDe(D record) throws IOException
+    protected <D extends SpecificRecord> D serDe(D record, D newInstance) throws IOException
     {
-        D actual = SerDeUtils.<D>deserialize(record.getSchema(), SerDeUtils.serialize(record));
+        D actual = SerDeUtils.deserialize(record.getSchema(),
+                                              SerDeUtils.serialize(record),
+                                              newInstance);
         assert actual.equals(record) : actual + " != " + record;
         return actual;
     }
-
+    
     @Test
-    public void testShouldHaveConfigFileNameAvailable()
+    public void testGetReconciler() throws ConfigurationException
     {
-        assertNotNull(DatabaseDescriptor.getConfigFileName(), "DatabaseDescriptor should always be able to return the file name of the config file");
+        assert DatabaseDescriptor.getReconciler("TimestampReconciler") == TimestampReconciler.instance;
+        assert DatabaseDescriptor.getReconciler(TimestampReconciler.class.getName()) == TimestampReconciler.instance;
     }
 
     @Test
@@ -56,7 +59,7 @@ public class DatabaseDescriptorTest
         {
             for (CFMetaData cfm : DatabaseDescriptor.getTableMetaData(table).values())
             {
-                CFMetaData cfmDupe = CFMetaData.inflate(serDe(cfm.deflate()));
+                CFMetaData cfmDupe = CFMetaData.inflate(serDe(cfm.deflate(), new org.apache.cassandra.config.avro.CfDef()));
                 assert cfmDupe != null;
                 assert cfmDupe.equals(cfm);
             }
@@ -68,7 +71,7 @@ public class DatabaseDescriptorTest
     {
         for (KSMetaData ksm : DatabaseDescriptor.tables.values())
         {
-            KSMetaData ksmDupe = KSMetaData.inflate(serDe(ksm.deflate()));
+            KSMetaData ksmDupe = KSMetaData.inflate(serDe(ksm.deflate(), new org.apache.cassandra.config.avro.KsDef()));
             assert ksmDupe != null;
             assert ksmDupe.equals(ksm);
         }
@@ -83,9 +86,9 @@ public class DatabaseDescriptorTest
         assert DatabaseDescriptor.getNonSystemTables().size() == 0;
         
         // add a few.
-        AddKeyspace ks0 = new AddKeyspace(new KSMetaData("ks0", RackUnawareStrategy.class, 3));
+        AddKeyspace ks0 = new AddKeyspace(new KSMetaData("ks0", SimpleStrategy.class, null, 3));
         ks0.apply();
-        AddKeyspace ks1 = new AddKeyspace(new KSMetaData("ks1", RackUnawareStrategy.class, 3));
+        AddKeyspace ks1 = new AddKeyspace(new KSMetaData("ks1", SimpleStrategy.class, null, 3));
         ks1.apply();
         
         assert DatabaseDescriptor.getTableDefinition("ks0") != null;

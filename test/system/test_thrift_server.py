@@ -278,6 +278,22 @@ class TestMutations(ThriftTester):
         slice = [result.column.name for result in _big_slice('key1', ColumnParent('StandardLong1'))]
         assert slice == L, slice
         
+    def test_integer_order(self):
+        _set_keyspace('Keyspace1')
+        def long_xrange(start, stop, step):
+            i = start
+            while i >= stop:
+                yield i
+                i -= step
+        L = []
+        for i in long_xrange(104294967296, 0, 429496729):
+            name = _i64(i)
+            client.insert('key1', ColumnParent('StandardInteger1'), Column(name, 'v', Clock(0)), ConsistencyLevel.ONE)
+            L.append(name)
+        slice = [result.column.name for result in _big_slice('key1', ColumnParent('StandardInteger1'))]
+        L.sort()
+        assert slice == L, slice
+
     def test_time_uuid(self):
         import uuid
         L = []
@@ -338,6 +354,23 @@ class TestMutations(ThriftTester):
                      for result in client.get_slice('key1', column_parent, sp, ConsistencyLevel.ONE)]
             assert slice == [Column(_i64(i), 'value2', Clock(10 * i + 2))], (slice, i)
         
+    def test_integer_remove(self):
+        column_parent = ColumnParent('StandardInteger1')
+        sp = SlicePredicate(slice_range=SliceRange('', '', False, 1))
+        _set_keyspace('Keyspace1')
+        for i in xrange(10):
+            parent = ColumnParent('StandardInteger1')
+
+            client.insert('key1', parent, Column(_i64(i), 'value1', Clock(10 * i)), ConsistencyLevel.ONE)
+            client.remove('key1', ColumnPath('StandardInteger1'), Clock(10 * i + 1), ConsistencyLevel.ONE)
+            slice = client.get_slice('key1', column_parent, sp, ConsistencyLevel.ONE)
+            assert slice == [], slice
+            # resurrect
+            client.insert('key1', parent, Column(_i64(i), 'value2', Clock(10 * i + 2)), ConsistencyLevel.ONE)
+            slice = [result.column
+                     for result in client.get_slice('key1', column_parent, sp, ConsistencyLevel.ONE)]
+            assert slice == [Column(_i64(i), 'value2', Clock(10 * i + 2))], (slice, i)
+
     def test_batch_insert(self):
         _set_keyspace('Keyspace1')
         _insert_batch(False)
@@ -1042,7 +1075,7 @@ class TestMutations(ThriftTester):
         # Count columns in all 10 keys
         keys = ['key'+str(i) for i in range(1, num_keys+1)]
         p = SlicePredicate(slice_range=SliceRange('', '', False, 1000))
-        counts = client.multiget_count('Keyspace1', keys, ColumnParent('Standard1'), p, ConsistencyLevel.ONE)
+        counts = client.multiget_count(keys, ColumnParent('Standard1'), p, ConsistencyLevel.ONE)
 
         # Check the returned counts
         for i in range(1, num_keys+1):
@@ -1073,12 +1106,16 @@ class TestMutations(ThriftTester):
             assert len(slice) == n, "expected %s results; found %s" % (n, slice)
 
     def test_describe_keyspace(self):
-        """ Test keyspace description """
         kspaces = client.describe_keyspaces()
-        assert len(kspaces) == 5, kspaces # ['system', 'Keyspace2', 'Keyspace3', 'Keyspace1', 'Keyspace4']
-        ks1 = client.describe_keyspace("Keyspace1")
-        assert set(ks1.keys()) == set(['Super1', 'Standard1', 'Standard2', 'StandardLong1', 'StandardLong2', 'Super3', 'Super2', 'Super4', 'Indexed1'])
+        assert len(kspaces) == 3, kspaces # ['Keyspace2', 'Keyspace1', 'system']
+
         sysks = client.describe_keyspace("system")
+        assert sysks == kspaces[2]
+
+        ks1 = client.describe_keyspace("Keyspace1")
+        assert ks1.replication_factor == 1
+        cf0 = ks1.cf_defs[0]
+        assert cf0.comparator_type == "org.apache.cassandra.db.marshal.BytesType"
 
     def test_describe(self):
         server_version = client.describe_version()
@@ -1087,22 +1124,62 @@ class TestMutations(ThriftTester):
 
     def test_describe_ring(self):
         assert list(client.describe_ring('Keyspace1'))[0].endpoints == ['127.0.0.1']
+        
+    def test_invalid_ks_names(self):
+        def invalid_keyspace():
+            client.system_add_keyspace(KsDef('in-valid', 'org.apache.cassandra.locator.SimpleStrategy', {}, 1, []))
+        _expect_exception(invalid_keyspace, InvalidRequestException)
+        
+        def invalid_rename():
+            client.system_rename_keyspace('Keyspace1', 'in-valid')
+        _expect_exception(invalid_rename, InvalidRequestException)
+        
+    def test_invalid_cf_names(self):
+        def invalid_cf():
+            _set_keyspace('Keyspace1')
+            newcf = CfDef('Keyspace1', 'in-valid')
+            client.system_add_column_family(newcf)
+        _expect_exception(invalid_cf, InvalidRequestException)
+        
+        def invalid_cf_inside_new_ks():
+            cf = CfDef('ValidKsName_invalid_cf', 'in-valid')
+            _set_keyspace('system')
+            client.system_add_keyspace(KsDef('ValidKsName_invalid_cf', 'org.apache.cassandra.locator.SimpleStrategy', {}, 1, [cf]))
+        _expect_exception(invalid_cf_inside_new_ks, InvalidRequestException)
+        
+        def invalid_rename():
+            _set_keyspace('Keyspace1')
+            client.system_rename_column_family('Standard1', 'in-validcf')
+        _expect_exception(invalid_rename, InvalidRequestException)
     
     def test_system_keyspace_operations(self):
         """ Test keyspace (add, drop, rename) operations """
         # create
-        keyspace = KsDef('CreateKeyspace', 'org.apache.cassandra.locator.RackUnawareStrategy', 1,
+        keyspace = KsDef('CreateKeyspace', 'org.apache.cassandra.locator.SimpleStrategy', {}, 1,
                          [CfDef('CreateKeyspace', 'CreateKsCf')])
         client.system_add_keyspace(keyspace)
         newks = client.describe_keyspace('CreateKeyspace')
-        assert 'CreateKsCf' in newks
+        assert 'CreateKsCf' in [x.name for x in newks.cf_defs]
         
         _set_keyspace('CreateKeyspace')
+        
+        # modify invlid
+        modified_keyspace = KsDef('CreateKeyspace', 'org.apache.cassandra.locator.OldNetworkTopologyStrategy', {}, 2, [])
+        def fail_too_high_rf():
+            client.system_update_keyspace(modified_keyspace)
+        _expect_exception(fail_too_high_rf, InvalidRequestException)
+        
+        # modify valid
+        modified_keyspace.replication_factor = 1
+        client.system_update_keyspace(modified_keyspace)
+        modks = client.describe_keyspace('CreateKeyspace')
+        assert modks.replication_factor == modified_keyspace.replication_factor
+        assert modks.strategy_class == modified_keyspace.strategy_class
         
         # rename
         client.system_rename_keyspace('CreateKeyspace', 'RenameKeyspace')
         renameks = client.describe_keyspace('RenameKeyspace')
-        assert 'CreateKsCf' in renameks
+        assert 'CreateKsCf' in [x.name for x in renameks.cf_defs]
         def get_first_ks():
             client.describe_keyspace('CreateKeyspace')
         _expect_exception(get_first_ks, NotFoundException)
@@ -1112,15 +1189,29 @@ class TestMutations(ThriftTester):
         def get_second_ks():
             client.describe_keyspace('RenameKeyspace')
         _expect_exception(get_second_ks, NotFoundException)
+        
+    def test_create_then_drop_ks(self):
+        keyspace = KsDef('AddThenDrop', 
+                strategy_class='org.apache.cassandra.locator.SimpleStrategy',
+                replication_factor=1,
+                cf_defs=[])
+        def test_existence():
+            client.describe_keyspace(keyspace.name)
+        _expect_exception(test_existence, NotFoundException)
+        client.set_keyspace('system')
+        client.system_add_keyspace(keyspace)
+        test_existence()
+        client.system_drop_keyspace(keyspace.name)
 
     def test_column_validators(self):
+        # columndef validation for regular CF
         ks = 'Keyspace1'
         _set_keyspace(ks)
         cd = ColumnDef('col', 'LongType', None, None)
         cf = CfDef('Keyspace1', 'ValidatorColumnFamily', column_metadata=[cd])
         client.system_add_column_family(cf)
-        dks = client.describe_keyspace(ks)
-        assert 'ValidatorColumnFamily' in dks
+        ks_def = client.describe_keyspace(ks)
+        assert 'ValidatorColumnFamily' in [x.name for x in ks_def.cf_defs]
 
         cp = ColumnParent('ValidatorColumnFamily')
         col0 = Column('col', _i64(42), Clock(0))
@@ -1129,6 +1220,38 @@ class TestMutations(ThriftTester):
         e = _expect_exception(lambda: client.insert('key1', cp, col1, ConsistencyLevel.ONE), InvalidRequestException)
         assert e.why.find("failed validation") >= 0
 
+        # columndef validation for super CF
+        scf = CfDef('Keyspace1', 'ValidatorSuperColumnFamily', column_type='Super', column_metadata=[cd])
+        client.system_add_column_family(scf)
+        ks_def = client.describe_keyspace(ks)
+        assert 'ValidatorSuperColumnFamily' in [x.name for x in ks_def.cf_defs]
+
+        scp = ColumnParent('ValidatorSuperColumnFamily','sc1')
+        client.insert('key0', scp, col0, ConsistencyLevel.ONE)
+        e = _expect_exception(lambda: client.insert('key1', scp, col1, ConsistencyLevel.ONE), InvalidRequestException)
+        assert e.why.find("failed validation") >= 0
+
+        # columndef and cfdef default validation
+        cf = CfDef('Keyspace1', 'DefaultValidatorColumnFamily', column_metadata=[cd], default_validation_class='UTF8Type')
+        client.system_add_column_family(cf)
+        ks_def = client.describe_keyspace(ks)
+        assert 'DefaultValidatorColumnFamily' in [x.name for x in ks_def.cf_defs]
+
+        dcp = ColumnParent('DefaultValidatorColumnFamily')
+        # inserting a longtype into column 'col' is valid at the columndef level
+        client.insert('key0', dcp, col0, ConsistencyLevel.ONE)
+        # inserting a UTF8type into column 'col' fails at the columndef level
+        e = _expect_exception(lambda: client.insert('key1', dcp, col1, ConsistencyLevel.ONE), InvalidRequestException)
+        assert e.why.find("failed validation") >= 0
+        
+        # insert a longtype into column 'fcol' should fail at the cfdef level
+        col2 = Column('fcol', _i64(4224), Clock(0))
+        e = _expect_exception(lambda: client.insert('key1', dcp, col2, ConsistencyLevel.ONE), InvalidRequestException)
+        assert e.why.find("failed validation") >= 0
+        # insert a UTF8type into column 'fcol' is valid at the cfdef level
+        col3 = Column('fcol', "Stringin' it up in the Stringtel Stringifornia", Clock(0))
+        client.insert('key0', dcp, col3, ConsistencyLevel.ONE)
+
     def test_system_column_family_operations(self):
         _set_keyspace('Keyspace1')
         # create
@@ -1136,20 +1259,41 @@ class TestMutations(ThriftTester):
         newcf = CfDef('Keyspace1', 'NewColumnFamily', column_metadata=[cd])
         client.system_add_column_family(newcf)
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'NewColumnFamily' in ks1
+        assert 'NewColumnFamily' in [x.name for x in ks1.cf_defs]
+        cfid = [x.id for x in ks1.cf_defs if x.name=='NewColumnFamily'][0]
+        assert cfid > 1000
+        
+        # modify invalid
+        modified_cf = CfDef('Keyspace1', 'NewColumnFamily', column_metadata=[cd])
+        modified_cf.id = cfid
+        def fail_invalid_field():
+            modified_cf.comparator_type = 'LongType'
+            client.system_update_column_family(modified_cf)
+        _expect_exception(fail_invalid_field, InvalidRequestException)
+        
+        # modify valid
+        modified_cf.comparator_type = 'BytesType' # revert back to old value.
+        modified_cf.row_cache_size = 25
+        modified_cf.gc_grace_seconds = 1
+        client.system_update_column_family(modified_cf)
+        ks1 = client.describe_keyspace('Keyspace1')
+        server_cf = [x for x in ks1.cf_defs if x.name=='NewColumnFamily'][0]
+        assert server_cf
+        assert server_cf.row_cache_size == 25
+        assert server_cf.gc_grace_seconds == 1
         
         # rename
         client.system_rename_column_family('NewColumnFamily', 'RenameColumnFamily')
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'RenameColumnFamily' in ks1
-        assert 'NewColumnFamily' not in ks1
+        assert 'RenameColumnFamily' in [x.name for x in ks1.cf_defs]
+        assert 'NewColumnFamily' not in [x.name for x in ks1.cf_defs]
         
         # drop
         client.system_drop_column_family('RenameColumnFamily')
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'RenameColumnFamily' not in ks1
-        assert 'NewColumnFamily' not in ks1
-        assert 'Standard1' in ks1
+        assert 'RenameColumnFamily' not in [x.name for x in ks1.cf_defs]
+        assert 'NewColumnFamily' not in [x.name for x in ks1.cf_defs]
+        assert 'Standard1' in [x.name for x in ks1.cf_defs]
 
     def test_system_super_column_family_operations(self):
         _set_keyspace('Keyspace1')
@@ -1159,20 +1303,20 @@ class TestMutations(ThriftTester):
         newcf = CfDef('Keyspace1', 'NewSuperColumnFamily', 'Super', column_metadata=[cd])
         client.system_add_column_family(newcf)
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'NewSuperColumnFamily' in ks1
+        assert 'NewSuperColumnFamily' in [x.name for x in ks1.cf_defs]
         
         # rename
         client.system_rename_column_family('NewSuperColumnFamily', 'RenameSuperColumnFamily')
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'RenameSuperColumnFamily' in ks1
-        assert 'NewSuperColumnFamily' not in ks1
+        assert 'RenameSuperColumnFamily' in [x.name for x in ks1.cf_defs]
+        assert 'NewSuperColumnFamily' not in [x.name for x in ks1.cf_defs]
         
         # drop
         client.system_drop_column_family('RenameSuperColumnFamily')
         ks1 = client.describe_keyspace('Keyspace1')
-        assert 'RenameSuperColumnFamily' not in ks1
-        assert 'NewSuperColumnFamily' not in ks1
-        assert 'Standard1' in ks1
+        assert 'RenameSuperColumnFamily' not in [x.name for x in ks1.cf_defs]
+        assert 'NewSuperColumnFamily' not in [x.name for x in ks1.cf_defs]
+        assert 'Standard1' in [x.name for x in ks1.cf_defs]
 
     def test_insert_ttl(self):
         """ Test simple insertion of a column with ttl """
@@ -1240,20 +1384,21 @@ class TestMutations(ThriftTester):
         # simple query on one index expression
         cp = ColumnParent('Indexed1')
         sp = SlicePredicate(slice_range=SliceRange('', ''))
-        clause = IndexClause([IndexExpression('birthdate', IndexOperator.EQ, _i64(1))])
-        result = client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE)
+        clause = IndexClause([IndexExpression('birthdate', IndexOperator.EQ, _i64(1))], '')
+        result = client.get_indexed_slices(cp, clause, sp, ConsistencyLevel.ONE)
         assert len(result) == 1, result
         assert result[0].key == 'key1'
         assert len(result[0].columns) == 1, result[0].columns
 
         # solo unindexed expression is invalid
-        clause = IndexClause([IndexExpression('b', IndexOperator.EQ, _i64(1))])
-        _expect_exception(lambda: client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE), InvalidRequestException)
+        clause = IndexClause([IndexExpression('b', IndexOperator.EQ, _i64(1))], '')
+        _expect_exception(lambda: client.get_indexed_slices(cp, clause, sp, ConsistencyLevel.ONE), InvalidRequestException)
 
         # but unindexed expression added to indexed one is ok
         clause = IndexClause([IndexExpression('b', IndexOperator.EQ, _i64(3)),
-                              IndexExpression('birthdate', IndexOperator.EQ, _i64(3))])
-        result = client.scan(cp, RowPredicate(index_clause=clause), sp, ConsistencyLevel.ONE)
+                              IndexExpression('birthdate', IndexOperator.EQ, _i64(3))],
+                             '')
+        result = client.get_indexed_slices(cp, clause, sp, ConsistencyLevel.ONE)
         assert len(result) == 1, result
         assert result[0].key == 'key3'
         assert len(result[0].columns) == 2, result[0].columns

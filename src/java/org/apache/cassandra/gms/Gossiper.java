@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.net.InetAddress;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.net.Message;
@@ -46,7 +47,7 @@ import org.slf4j.LoggerFactory;
  * of the three above mentioned messages updates the Failure Detector with the liveness information.
  */
 
-public class Gossiper implements IFailureDetectionEventListener, IEndpointStateChangePublisher
+public class Gossiper implements IFailureDetectionEventListener
 {
     private class GossipTimerTask extends TimerTask
     {
@@ -151,12 +152,19 @@ public class Gossiper implements IFailureDetectionEventListener, IEndpointStateC
         FailureDetector.instance.registerFailureDetectionEventListener(this);
     }
 
-    /** Register with the Gossiper for EndpointState notifications */
+    /**
+     * Register for interesting state changes.
+     * @param subscriber module which implements the IEndpointStateChangeSubscriber
+     */
     public void register(IEndpointStateChangeSubscriber subscriber)
     {
         subscribers_.add(subscriber);
     }
 
+    /**
+     * Unregister interest for state changes.
+     * @param subcriber module which implements the IEndpointStateChangeSubscriber
+     */
     public void unregister(IEndpointStateChangeSubscriber subscriber)
     {
         subscribers_.remove(subscriber);
@@ -224,6 +232,10 @@ public class Gossiper implements IFailureDetectionEventListener, IEndpointStateC
      */
     public void removeEndpoint(InetAddress endpoint)
     {
+        // do subscribers first so anything in the subscriber that depends on gossiper state won't get confused
+        for (IEndpointStateChangeSubscriber subscriber : subscribers_)
+            subscriber.onRemove(endpoint);
+
         liveEndpoints_.remove(endpoint);
         unreachableEndpoints_.remove(endpoint);
         endpointStateMap_.remove(endpoint);
@@ -289,7 +301,7 @@ public class Gossiper implements IFailureDetectionEventListener, IEndpointStateC
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream( bos );
         GossipDigestSynMessage.serializer().serialize(gDigestMessage, dos);
-        return new Message(localEndpoint_, StageManager.GOSSIP_STAGE, StorageService.Verb.GOSSIP_DIGEST_SYN, bos.toByteArray());
+        return new Message(localEndpoint_, StorageService.Verb.GOSSIP_DIGEST_SYN, bos.toByteArray());
     }
 
     Message makeGossipDigestAckMessage(GossipDigestAckMessage gDigestAckMessage) throws IOException
@@ -299,7 +311,7 @@ public class Gossiper implements IFailureDetectionEventListener, IEndpointStateC
         GossipDigestAckMessage.serializer().serialize(gDigestAckMessage, dos);
         if (logger_.isTraceEnabled())
             logger_.trace("@@@@ Size of GossipDigestAckMessage is " + bos.toByteArray().length);
-        return new Message(localEndpoint_, StageManager.GOSSIP_STAGE, StorageService.Verb.GOSSIP_DIGEST_ACK, bos.toByteArray());
+        return new Message(localEndpoint_, StorageService.Verb.GOSSIP_DIGEST_ACK, bos.toByteArray());
     }
 
     Message makeGossipDigestAck2Message(GossipDigestAck2Message gDigestAck2Message) throws IOException
@@ -307,7 +319,7 @@ public class Gossiper implements IFailureDetectionEventListener, IEndpointStateC
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(bos);
         GossipDigestAck2Message.serializer().serialize(gDigestAck2Message, dos);
-        return new Message(localEndpoint_, StageManager.GOSSIP_STAGE, StorageService.Verb.GOSSIP_DIGEST_ACK2, bos.toByteArray());
+        return new Message(localEndpoint_, StorageService.Verb.GOSSIP_DIGEST_ACK2, bos.toByteArray());
     }
 
     /**

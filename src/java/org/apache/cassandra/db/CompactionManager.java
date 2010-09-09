@@ -76,50 +76,6 @@ public class CompactionManager implements CompactionManagerMBean
 
     private CompactionExecutor executor = new CompactionExecutor();
     private Map<ColumnFamilyStore, Integer> estimatedCompactions = new NonBlockingHashMap<ColumnFamilyStore, Integer>();
-
-    /** cleans up data files for CFs that have been dropped. */
-    public Future submitGraveyardCleanup()
-    {
-        Callable c =  new Callable()
-        {
-            public Object call() throws Exception
-            {
-                logger.debug("Cleaning up abandoned column families...");
-                ColumnFamily dropped = SystemTable.getDroppedCFs();
-                Collection<IColumn> successes = new ArrayList<IColumn>();
-                for (IColumn col : dropped.getSortedColumns())
-                {
-                    if (!col.isMarkedForDelete())
-                    {
-                        final String[] parts = new String(col.name()).split("-");
-                        // table-cfname-cfid
-                        for (String dataDir : DatabaseDescriptor.getAllDataFileLocationsForTable(parts[0]))
-                        {
-                            File dir = new File(dataDir);
-                            if (dir.exists())
-                            {
-                                File[] dbFiles = dir.listFiles(new FileFilter()
-                                {
-                                    public boolean accept(File pathname)
-                                    {
-                                        return pathname.getName().startsWith(parts[1] + "-") && pathname.exists();
-                                    }
-                                });
-                                for (File f : dbFiles)
-                                {
-                                    FileUtils.deleteWithConfirm(f);
-                                }
-                            }
-                        }
-                        successes.add(col);
-                    }
-                }
-                SystemTable.deleteDroppedCfMarkers(successes);
-                return null;
-            }
-        };
-        return executor.submit(c);
-    }
     
     /**
      * Call this whenever a compaction might be needed on the given columnfamily.
@@ -137,7 +93,7 @@ public class CompactionManager implements CompactionManagerMBean
                     logger.debug("Compaction is currently disabled.");
                     return 0;
                 }
-                logger.debug("Checking to see if compaction of " + cfs.columnFamily_ + " would be useful");
+                logger.debug("Checking to see if compaction of " + cfs.columnFamily + " would be useful");
                 Set<List<SSTableReader>> buckets = getBuckets(convertSSTablesToPairs(cfs.getSSTables()), 50L * 1024L * 1024L);
                 updateEstimateFor(cfs, buckets);
                 
@@ -291,7 +247,7 @@ public class CompactionManager implements CompactionManagerMBean
         // it is not empty, it may compact down to nothing if all rows are deleted.
         Table table = cfs.getTable();
         if (DatabaseDescriptor.isSnapshotBeforeCompaction())
-            table.snapshot("compact-" + cfs.columnFamily_);
+            table.snapshot("compact-" + cfs.columnFamily);
         logger.info("Compacting [" + StringUtils.join(sstables, ",") + "]");
         String compactionFileLocation = table.getDataFileLocation(cfs.getExpectedCompactedFileSize(sstables));
         // If the compaction file path is null that means we have no space left for this compaction.
@@ -340,7 +296,7 @@ public class CompactionManager implements CompactionManagerMBean
             }
 
             String newFilename = new File(cfs.getTempSSTablePath(compactionFileLocation)).getAbsolutePath();
-            writer = new SSTableWriter(newFilename, expectedBloomFilterSize, StorageService.getPartitioner());
+            writer = new SSTableWriter(newFilename, expectedBloomFilterSize, cfs.metadata, cfs.partitioner);
             while (nni.hasNext())
             {
                 AbstractCompactedRow row = nni.next();
@@ -430,7 +386,7 @@ public class CompactionManager implements CompactionManagerMBean
                 {
                     FileUtils.createDirectory(compactionFileLocation);
                     String newFilename = new File(cfs.getTempSSTablePath(compactionFileLocation)).getAbsolutePath();
-                    writer = new SSTableWriter(newFilename, expectedBloomFilterSize, StorageService.getPartitioner());
+                    writer = new SSTableWriter(newFilename, expectedBloomFilterSize, cfs.metadata, cfs.partitioner);
                 }
                 writer.append(row);
                 totalkeysWritten++;
@@ -616,7 +572,7 @@ public class CompactionManager implements CompactionManagerMBean
             {
                 public void run ()
                 {
-                    logger.debug("Estimating compactions for " + cfs.columnFamily_);
+                    logger.debug("Estimating compactions for " + cfs.columnFamily);
                     final Set<List<SSTableReader>> buckets = getBuckets(convertSSTablesToPairs(cfs.getSSTables()), 50L * 1024L * 1024L);
                     updateEstimateFor(cfs, buckets);
                 }
@@ -639,9 +595,7 @@ public class CompactionManager implements CompactionManagerMBean
 
         public CompactionExecutor()
         {
-            super("CompactionExecutor", System.getProperty("cassandra.compaction.priority") == null
-                                        ? Thread.NORM_PRIORITY
-                                        : Integer.parseInt(System.getProperty("cassandra.compaction.priority")));
+            super("CompactionExecutor", DatabaseDescriptor.getCompactionThreadPriority());
         }
 
         @Override

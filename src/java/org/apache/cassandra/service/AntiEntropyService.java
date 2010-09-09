@@ -29,6 +29,7 @@ import com.google.common.base.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.CompactionManager;
@@ -40,6 +41,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.AbstractCompactedRow;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.streaming.StreamContext;
 import org.apache.cassandra.streaming.StreamIn;
 import org.apache.cassandra.streaming.StreamOut;
 import org.apache.cassandra.net.CompactEndpointSerializationHelper;
@@ -59,7 +61,7 @@ import org.apache.cassandra.utils.*;
  * Once the trees rendezvous, a Differencer is executed and the service can trigger repairs
  * for disagreeing ranges.
  *
- * Tree comparison and repair triggering occur in the single threaded AE_SERVICE_STAGE.
+ * Tree comparison and repair triggering occur in the single threaded Stage.AE_SERVICE.
  *
  * The steps taken to enact a repair are as follows:
  * 1. A major compaction is triggered via nodeprobe:
@@ -78,7 +80,7 @@ import org.apache.cassandra.utils.*;
  *   * If the tree is remote, it is immediately compared to a local tree if one is cached. Otherwise,
  *     the remote tree is stored until a local tree can be generated.
  *   * A Differencer object is enqueued for each comparison.
- * 4. Differencers are executed in AE_SERVICE_STAGE, to compare the two trees, and perform repair via the
+ * 4. Differencers are executed in Stage.AE_SERVICE, to compare the two trees, and perform repair via the
  *    streaming api.
  */
 public class AntiEntropyService
@@ -95,7 +97,7 @@ public class AntiEntropyService
      * Map of outstanding sessions to requests. Once both trees reach the rendezvous, the local node
      * will queue a Differencer to compare them.
      *
-     * This map is only accessed from AE_SERVICE_STAGE, so it is not synchronized.
+     * This map is only accessed from Stage.AE_SERVICE, so it is not synchronized.
      */
     private final ExpiringMap<String, Map<TreeRequest, TreePair>> requests;
 
@@ -137,7 +139,7 @@ public class AntiEntropyService
 
     /**
      * Returns the map of waiting rendezvous endpoints to trees for the given session.
-     * Should only be called within AE_SERVICE_STAGE.
+     * Should only be called within Stage.AE_SERVICE.
      */
     private Map<TreeRequest, TreePair> rendezvousPairs(String sessionid)
     {
@@ -168,7 +170,7 @@ public class AntiEntropyService
     }
 
     /**
-     * Register a tree for the given request to be compared to the appropriate trees in AE_SERVICE_STAGE when they become available.
+     * Register a tree for the given request to be compared to the appropriate trees in Stage.AE_SERVICE when they become available.
      */
     private void rendezvous(TreeRequest request, MerkleTree tree)
     {
@@ -218,7 +220,7 @@ public class AntiEntropyService
         for (Differencer differencer : differencers)
         {
             logger.info("Queueing comparison " + differencer);
-            StageManager.getStage(StageManager.AE_SERVICE_STAGE).execute(differencer);
+            StageManager.getStage(Stage.AE_SERVICE).execute(differencer);
         }
     }
 
@@ -399,7 +401,7 @@ public class AntiEntropyService
         }
 
         /**
-         * Registers the newly created tree for rendezvous in AE_SERVICE_STAGE.
+         * Registers the newly created tree for rendezvous in Stage.AE_SERVICE.
          */
         public void complete()
         {
@@ -417,12 +419,12 @@ public class AntiEntropyService
                 for (MerkleTree.RowHash minrow : minrows)
                     range.addHash(minrow);
 
-            StageManager.getStage(StageManager.AE_SERVICE_STAGE).submit(this);
+            StageManager.getStage(Stage.AE_SERVICE).submit(this);
             logger.debug("Validated " + validated + " rows into AEService tree for " + request);
         }
         
         /**
-         * Called after the validation lifecycle to respond with the now valid tree. Runs in AE_SERVICE_STAGE.
+         * Called after the validation lifecycle to respond with the now valid tree. Runs in Stage.AE_SERVICE.
          *
          * @return A meaningless object.
          */
@@ -532,12 +534,13 @@ public class AntiEntropyService
                 final List<Range> ranges = new ArrayList<Range>(differences);
                 final Collection<SSTableReader> sstables = cfstore.getSSTables();
                 // send ranges to the remote node
-                Future f = StageManager.getStage(StageManager.STREAM_STAGE).submit(new WrappedRunnable() 
+                Future f = StageManager.getStage(Stage.STREAM).submit(new WrappedRunnable()
                 {
                     protected void runMayThrow() throws Exception
                     {
-                        StreamOut.transferSSTables(request.endpoint, request.cf.left, sstables, ranges);
-                        StreamOutManager.remove(request.endpoint);
+                        StreamContext context = new StreamContext(request.endpoint);
+                        StreamOut.transferSSTables(context, request.cf.left, sstables, ranges);
+                        StreamOutManager.remove(context);
                     }
                 });
                 // request ranges from the remote node
@@ -575,10 +578,7 @@ public class AntiEntropyService
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(bos);
                 SERIALIZER.serialize(request, dos);
-                return new Message(FBUtilities.getLocalAddress(),
-                                   StageManager.AE_SERVICE_STAGE,
-                                   StorageService.Verb.TREE_REQUEST,
-                                   bos.toByteArray());
+                return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.TREE_REQUEST, bos.toByteArray());
             }
             catch(IOException e)
             {
@@ -641,7 +641,7 @@ public class AntiEntropyService
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(bos);
                 SERIALIZER.serialize(validator, dos);
-                return new Message(local, StageManager.AE_SERVICE_STAGE, StorageService.Verb.TREE_RESPONSE, bos.toByteArray());
+                return new Message(local, StorageService.Verb.TREE_RESPONSE, bos.toByteArray());
             }
             catch(IOException e)
             {

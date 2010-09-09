@@ -18,13 +18,15 @@
 
 package org.apache.cassandra.db;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 
+import org.apache.cassandra.io.SerDeUtils;
+import org.apache.cassandra.locator.OldNetworkTopologyStrategy;
+import org.apache.cassandra.thrift.CfDef;
+import org.apache.cassandra.thrift.ColumnDef;
 import org.junit.Test;
 
 import org.apache.cassandra.CleanupHelper;
@@ -36,12 +38,33 @@ import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.migration.*;
-import org.apache.cassandra.locator.RackUnawareStrategy;
+import org.apache.cassandra.locator.SimpleStrategy;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 
 public class DefsTest extends CleanupHelper
 {   
+    @Test
+    public void ensureStaticCFMIdsAreLessThan1000()
+    {
+        assert CFMetaData.StatusCf.cfId == 0;    
+        assert CFMetaData.HintsCf.cfId == 1;    
+        assert CFMetaData.MigrationsCf.cfId == 2;    
+        assert CFMetaData.SchemaCf.cfId == 3;    
+    }
+    
+    @Test
+    public void testInvalidNames() throws IOException
+    {
+        String[] valid = {"1", "a", "_1", "b_", "__", "1_a"};
+        for (String s : valid)
+            assert Migration.isLegalName(s);
+        
+        String[] invalid = {"b@t", "dash-y", "", " ", "dot.s", ".hidden"};
+        for (String s : invalid)
+            assert !Migration.isLegalName(s);
+    }
+    
     @Test
     public void saveAndRestore() throws IOException
     {
@@ -62,11 +85,11 @@ public class DefsTest extends CleanupHelper
     @Test
     public void addNewCfToBogusTable() throws InterruptedException
     {
-        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "new cf", 0, false, 1.0, 0, 864000, Collections.<byte[], ColumnDefinition>emptyMap());
+        CFMetaData newCf = new CFMetaData("MadeUpKeyspace", "NewCF", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "new cf", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
         try
         {
             new AddColumnFamily(newCf).apply();
-            throw new AssertionError("You should't be able to do anything to a keyspace that doesn't exist.");
+            throw new AssertionError("You shouldn't be able to do anything to a keyspace that doesn't exist.");
         }
         catch (ConfigurationException expected)
         {
@@ -87,7 +110,7 @@ public class DefsTest extends CleanupHelper
         assert DatabaseDescriptor.getDefsVersion().equals(prior);
 
         // add a cf.
-        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "Migration CF ", 0, false, 1.0, 0, 864000, Collections.<byte[], ColumnDefinition>emptyMap());
+        CFMetaData newCf1 = new CFMetaData("Keyspace1", "MigrationCf_1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "Migration CF ", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
         Migration m1 = new AddColumnFamily(newCf1);
         m1.apply();
         UUID ver1 = m1.getVersion();
@@ -115,7 +138,7 @@ public class DefsTest extends CleanupHelper
         for (IColumn col : serializedMigrations)
         {
             UUID version = UUIDGen.makeType1UUID(col.name());
-            reconstituded[i] = Migration.deserialize(new ByteArrayInputStream(col.value()));
+            reconstituded[i] = Migration.deserialize(col.value());
             assert version.equals(reconstituded[i].getVersion());
             i++;
         }
@@ -125,18 +148,9 @@ public class DefsTest extends CleanupHelper
         assert m3.getClass().equals(reconstituded[2].getClass());
         
         // verify that the row mutations are the same. rather than exposing the private fields, serialize and verify.
-        assert Arrays.equals(getBytes(m1), getBytes(reconstituded[0]));
-        assert Arrays.equals(getBytes(m2), getBytes(reconstituded[1]));
-        assert Arrays.equals(getBytes(m3), getBytes(reconstituded[2]));
-    }
-    
-    private static byte[] getBytes(Migration m) throws IOException
-    {
-        ByteArrayOutputStream bout = new ByteArrayOutputStream();
-        DataOutputStream dout = new DataOutputStream(bout);
-        m.getSerializer().serialize(m, dout);
-        dout.close();
-        return bout.toByteArray();
+        assert Arrays.equals(m1.serialize(), reconstituded[0].serialize());
+        assert Arrays.equals(m2.serialize(), reconstituded[1].serialize());
+        assert Arrays.equals(m3.serialize(), reconstituded[2].serialize());
     }
 
     @Test
@@ -146,7 +160,7 @@ public class DefsTest extends CleanupHelper
         final String cf = "BrandNewCf";
         KSMetaData original = DatabaseDescriptor.getTableDefinition(ks);
 
-        CFMetaData newCf = new CFMetaData(original.name, cf, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A New Column Family", 0, false, 1.0, 0, 864000, Collections.<byte[], ColumnDefinition>emptyMap());
+        CFMetaData newCf = new CFMetaData(original.name, cf, ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A New Column Family", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
         assert !DatabaseDescriptor.getTableDefinition(ks).cfMetaData().containsKey(newCf.cfName);
         new AddColumnFamily(newCf).apply();
 
@@ -208,8 +222,12 @@ public class DefsTest extends CleanupHelper
         assert !success : "This mutation should have failed since the CF no longer exists.";
 
         // verify that the files are gone.
-        assert DefsTable.getFiles(cfm.tableName, cfm.cfName).size() == 0;
-    }    
+        for (File file : DefsTable.getFiles(cfm.tableName, cfm.cfName))
+        {
+            if (file.getPath().endsWith("Data.db") && !new File(file.getPath().replace("Data.db", "Compacted")).exists())
+                throw new AssertionError("undeleted file " + file);
+        }
+    }
     
     @Test
     public void renameCf() throws ConfigurationException, IOException, ExecutionException, InterruptedException
@@ -243,7 +261,7 @@ public class DefsTest extends CleanupHelper
         // do some reads.
         store = Table.open(oldCfm.tableName).getColumnFamilyStore(cfName);
         assert store != null;
-        ColumnFamily cfam = store.getColumnFamily(QueryFilter.getSliceFilter(dk, new QueryPath(cfName), "".getBytes(), "".getBytes(), null, false, 1000));
+        ColumnFamily cfam = store.getColumnFamily(QueryFilter.getSliceFilter(dk, new QueryPath(cfName), "".getBytes(), "".getBytes(), false, 1000));
         assert cfam.getSortedColumns().size() == 100; // should be good enough?
         
         // do some writes
@@ -261,8 +279,8 @@ public class DefsTest extends CleanupHelper
     public void addNewKS() throws ConfigurationException, IOException, ExecutionException, InterruptedException
     {
         DecoratedKey dk = Util.dk("key0");
-        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new cf for a new ks", 0, false, 1.0, 0, 864000, Collections.<byte[], ColumnDefinition>emptyMap());
-        KSMetaData newKs = new KSMetaData(newCf.tableName, RackUnawareStrategy.class, 5, newCf);
+        CFMetaData newCf = new CFMetaData("NewKeyspace1", "AddedStandard1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A new cf for a new ks", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
+        KSMetaData newKs = new KSMetaData(newCf.tableName, SimpleStrategy.class, null, 5, newCf);
         
         new AddKeyspace(newKs).apply();
         
@@ -363,7 +381,6 @@ public class DefsTest extends CleanupHelper
         assert newKs.cfMetaData().containsKey(cfName);
         assert newKs.cfMetaData().get(cfName).tableName.equals(newKsName);
         assert DefsTable.getFiles(newKs.name, cfName).size() > 0;
-        assert DefsTable.getFiles(oldKs.name, cfName).size() == 0;
         
         // read on old should fail.
         try
@@ -414,12 +431,12 @@ public class DefsTest extends CleanupHelper
     {
         assert DatabaseDescriptor.getTableDefinition("EmptyKeyspace") == null;
         
-        KSMetaData newKs = new KSMetaData("EmptyKeyspace", RackUnawareStrategy.class, 5, new CFMetaData[]{});
+        KSMetaData newKs = new KSMetaData("EmptyKeyspace", SimpleStrategy.class, null, 5);
 
         new AddKeyspace(newKs).apply();
         assert DatabaseDescriptor.getTableDefinition("EmptyKeyspace") != null;
 
-        CFMetaData newCf = new CFMetaData("EmptyKeyspace", "AddedLater", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, new TimestampReconciler(), "A new CF to add to an empty KS", 0, false, 1.0, 0, 864000, Collections.<byte[], ColumnDefinition>emptyMap());
+        CFMetaData newCf = new CFMetaData("EmptyKeyspace", "AddedLater", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A new CF to add to an empty KS", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
 
         //should not exist until apply
         assert !DatabaseDescriptor.getTableDefinition(newKs.name).cfMetaData().containsKey(newCf.cfName);
@@ -443,5 +460,190 @@ public class DefsTest extends CleanupHelper
         assert cfam.getColumn("col0".getBytes()) != null;
         IColumn col = cfam.getColumn("col0".getBytes());
         assert Arrays.equals("value0".getBytes(), col.value());
+    }
+    
+    @Test
+    public void testUpdateKeyspace() throws ConfigurationException, IOException, ExecutionException, InterruptedException
+    {
+        // create a keyspace to serve as existing.
+        CFMetaData cf = new CFMetaData("UpdatedKeyspace", "AddedStandard1", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A new cf for a new ks", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
+        KSMetaData oldKs = new KSMetaData(cf.tableName, SimpleStrategy.class, null, 5, cf);
+        
+        new AddKeyspace(oldKs).apply();
+        
+        assert DatabaseDescriptor.getTableDefinition(cf.tableName) != null;
+        assert DatabaseDescriptor.getTableDefinition(cf.tableName) == oldKs;
+        
+        // anything with cf defs should fail.
+        CFMetaData cf2 = new CFMetaData(cf.tableName, "AddedStandard2", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A new cf for a new ks", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
+        KSMetaData newBadKs = new KSMetaData(cf.tableName, SimpleStrategy.class, null, 4, cf2);
+        try
+        {
+            new UpdateKeyspace(newBadKs).apply();
+            throw new AssertionError("Should not have been able to update a KS with a KS that described column families.");
+        }
+        catch (ConfigurationException ex)
+        {
+            // expected.
+        }
+        
+        // names should match.
+        KSMetaData newBadKs2 = new KSMetaData(cf.tableName + "trash", SimpleStrategy.class, null, 4);
+        try
+        {
+            new UpdateKeyspace(newBadKs2).apply();
+            throw new AssertionError("Should not have been able to update a KS with an invalid KS name.");
+        }
+        catch (ConfigurationException ex)
+        {
+            // expected.
+        }
+        
+        KSMetaData newKs = new KSMetaData(cf.tableName, OldNetworkTopologyStrategy.class, null, 1);
+        new UpdateKeyspace(newKs).apply();
+        
+        KSMetaData newFetchedKs = DatabaseDescriptor.getKSMetaData(newKs.name);
+        assert newFetchedKs.replicationFactor == newKs.replicationFactor;
+        assert newFetchedKs.replicationFactor != oldKs.replicationFactor;
+        assert newFetchedKs.strategyClass.equals(newKs.strategyClass);
+        assert !newFetchedKs.strategyClass.equals(oldKs.strategyClass);
+    }
+    
+    @Test
+    public void testUpdateColumnFamilyNoIndexes() throws ConfigurationException, IOException, ExecutionException, InterruptedException
+    {
+        // create a keyspace with a cf to update.
+        CFMetaData cf = new CFMetaData("UpdatedCfKs", "Standard1added", ColumnFamilyType.Standard, ClockType.Timestamp, UTF8Type.instance, null, TimestampReconciler.instance, "A new cf that will be updated", 0, false, 1.0, 0, 864000, BytesType.instance, Collections.<byte[], ColumnDefinition>emptyMap());
+        KSMetaData ksm = new KSMetaData(cf.tableName, SimpleStrategy.class, null, 1, cf);
+        new AddKeyspace(ksm).apply();
+        
+        assert DatabaseDescriptor.getTableDefinition(cf.tableName) != null;
+        assert DatabaseDescriptor.getTableDefinition(cf.tableName) == ksm;
+        
+        // updating certain fields should fail.
+        CfDef cf_def = new CfDef();
+        cf_def.setId(cf.cfId);
+        cf_def.setKeyspace(cf.tableName);
+        cf_def.setName(cf.cfName);
+        cf_def.setColumn_type(cf.cfType.name());
+        cf_def.setClock_type(cf.clockType.name());
+        cf_def.setComment(cf.comment);
+        cf_def.setComparator_type(cf.comparator.getClass().getName());
+        cf_def.setSubcomparator_type(null);
+        cf_def.setGc_grace_seconds(cf.gcGraceSeconds);
+        cf_def.setKey_cache_size(cf.keyCacheSize);
+        cf_def.setPreload_row_cache(cf.preloadRowCache);
+        cf_def.setRead_repair_chance(cf.readRepairChance);
+        cf_def.setRow_cache_size(43.3);
+        cf_def.setColumn_metadata(new ArrayList<ColumnDef>());
+        cf_def.setReconciler("org.apache.cassandra.db.clock.TimestampReconciiler");
+        cf_def.setDefault_validation_class("BytesType");
+        
+        // test valid operations.
+        cf_def.setComment("Modified comment");
+        CFMetaData updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setRow_cache_size(2d);
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setKey_cache_size(3d);
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setRead_repair_chance(0.23);
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setGc_grace_seconds(12);
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setPreload_row_cache(!cf_def.preload_row_cache);
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        cf_def.setDefault_validation_class("UTF8Type");
+        updateCfm = cf.apply(cf_def);
+        new UpdateColumnFamily(cf, updateCfm).apply();
+        cf = updateCfm;
+        
+        // can't test changing the reconciler because there is only one impl.
+        
+        // check the cumulative affect.
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).comment.equals(cf_def.comment);
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).rowCacheSize == cf_def.row_cache_size;
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).keyCacheSize == cf_def.key_cache_size;
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).readRepairChance == cf_def.read_repair_chance;
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).gcGraceSeconds == cf_def.gc_grace_seconds;
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).preloadRowCache == cf_def.preload_row_cache;
+        assert DatabaseDescriptor.getCFMetaData(cf.tableName, cf.cfName).defaultValidator == UTF8Type.instance;
+        
+        // make sure some invalid operations fail.
+        int oldId = cf_def.id;
+        try
+        {
+            cf_def.setId(cf_def.getId() + 1);
+            updateCfm = cf.apply(cf_def);
+            throw new AssertionError("Should have blown up when you used a different id.");
+        }
+        catch (ConfigurationException expected) 
+        {
+            cf_def.setId(oldId);    
+        }
+        
+        String oldStr = cf_def.getName();
+        try
+        {
+            cf_def.setName(cf_def.getName() + "_renamed");
+            updateCfm = cf.apply(cf_def);
+            throw new AssertionError("Should have blown up when you used a different name.");
+        }
+        catch (ConfigurationException expected)
+        {
+            cf_def.setName(oldStr);
+        }
+        
+        oldStr = cf_def.getKeyspace();
+        try
+        {
+            cf_def.setKeyspace(oldStr + "_renamed");
+            updateCfm = cf.apply(cf_def);
+            throw new AssertionError("Should have blown up when you used a different keyspace.");
+        }
+        catch (ConfigurationException expected)
+        {
+            cf_def.setKeyspace(oldStr);
+        }
+        
+        try
+        {
+            cf_def.setColumn_type(ColumnFamilyType.Super.name());
+            updateCfm = cf.apply(cf_def);
+            throw new AssertionError("Should have blwon up when you used a different cf type.");
+        }
+        catch (ConfigurationException expected)
+        {
+            cf_def.setColumn_type(ColumnFamilyType.Standard.name());
+        }
+        
+        oldStr = cf_def.getComparator_type();
+        try 
+        {
+            cf_def.setComparator_type(BytesType.class.getSimpleName());
+            updateCfm = cf.apply(cf_def);
+            throw new AssertionError("Should have blown up when you used a different comparator.");
+        }
+        catch (ConfigurationException expected)
+        {
+            cf_def.setComparator_type(UTF8Type.class.getSimpleName());
+        }
     }
 }

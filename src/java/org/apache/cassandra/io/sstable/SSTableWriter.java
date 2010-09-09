@@ -20,15 +20,16 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
 
+import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.StatisticsTable;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.AbstractCompactedRow;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
@@ -36,7 +37,7 @@ import org.apache.cassandra.io.util.SegmentedFile;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.BloomFilter;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.EstimatedHistogram;
 
 public class SSTableWriter extends SSTable
 {
@@ -47,12 +48,23 @@ public class SSTableWriter extends SSTable
     private final BufferedRandomAccessFile dataFile;
     private DecoratedKey lastWrittenKey;
 
-    public SSTableWriter(String filename, long keyCount, IPartitioner partitioner) throws IOException
+    public SSTableWriter(String filename, long keyCount) throws IOException
     {
-        super(filename, partitioner);
+        this(filename, keyCount, DatabaseDescriptor.getCFMetaData(Descriptor.fromFilename(filename)), StorageService.getPartitioner());
+    }
+
+    public SSTableWriter(String filename, long keyCount, CFMetaData metadata, IPartitioner partitioner) throws IOException
+    {
+        super(Descriptor.fromFilename(filename), metadata, partitioner);
         iwriter = new IndexWriter(desc, partitioner, keyCount);
-        dbuilder = SegmentedFile.getBuilder();
+        dbuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
         dataFile = new BufferedRandomAccessFile(getFilename(), "rw", DatabaseDescriptor.getInMemoryCompactionLimit());
+
+        // the set of required components
+        components.add(Component.DATA);
+        components.add(Component.FILTER);
+        components.add(Component.PRIMARY_INDEX);
+        components.add(Component.STATS);
     }
 
     private long beforeAppend(DecoratedKey decoratedKey) throws IOException
@@ -134,33 +146,36 @@ public class SSTableWriter extends SSTable
         // main data
         dataFile.close(); // calls force
 
-        // remove the 'tmp' marker from all components
-        final Descriptor newdesc = rename(desc);
+        // write sstable statistics
+        writeStatistics(desc);
 
-        Runnable runnable = new WrappedRunnable()
-        {
-            protected void runMayThrow() throws IOException
-            {
-                StatisticsTable.persistSSTableStatistics(newdesc, estimatedRowSize, estimatedColumnCount);
-            }
-        };
-        ColumnFamilyStore.submitPostFlush(runnable);
+        // remove the 'tmp' marker from all components
+        final Descriptor newdesc = rename(desc, components);
+
 
         // finalize in-memory state for the reader
         SegmentedFile ifile = iwriter.builder.complete(newdesc.filenameFor(SSTable.COMPONENT_INDEX));
         SegmentedFile dfile = dbuilder.complete(newdesc.filenameFor(SSTable.COMPONENT_DATA));
-        SSTableReader sstable = SSTableReader.internalOpen(newdesc, partitioner, ifile, dfile, iwriter.summary, iwriter.bf, maxDataAge, estimatedRowSize, estimatedColumnCount);
+        SSTableReader sstable = SSTableReader.internalOpen(newdesc, components, metadata, partitioner, ifile, dfile, iwriter.summary, iwriter.bf, maxDataAge, estimatedRowSize, estimatedColumnCount);
         iwriter = null;
         dbuilder = null;
         return sstable;
     }
 
-    static Descriptor rename(Descriptor tmpdesc)
+    private void writeStatistics(Descriptor desc) throws IOException
+    {
+        DataOutputStream dos = new DataOutputStream(new FileOutputStream(desc.filenameFor(SSTable.COMPONENT_STATS)));
+        EstimatedHistogram.serializer.serialize(estimatedRowSize, dos);
+        EstimatedHistogram.serializer.serialize(estimatedColumnCount, dos);
+        dos.close();
+    }
+
+    static Descriptor rename(Descriptor tmpdesc, Set<Component> components)
     {
         Descriptor newdesc = tmpdesc.asTemporary(false);
         try
         {
-            for (String component : components)
+            for (Component component : components)
                 FBUtilities.renameWithConfirm(tmpdesc.filenameFor(component), newdesc.filenameFor(component));
         }
         catch (IOException e)
@@ -202,12 +217,15 @@ public class SSTableWriter extends SSTable
      */
     private static void maybeRecover(Descriptor desc) throws IOException
     {
+        logger.debug("In maybeRecover with Descriptor {}", desc);
         File ifile = new File(desc.filenameFor(SSTable.COMPONENT_INDEX));
         File ffile = new File(desc.filenameFor(SSTable.COMPONENT_FILTER));
         if (ifile.exists() && ffile.exists())
             // nothing to do
             return;
 
+        ColumnFamilyStore cfs = Table.open(desc.ksname).getColumnFamilyStore(desc.cfname);
+        Set<byte[]> indexedColumns = cfs.getIndexedColumns();
         // remove existing files
         ifile.delete();
         ffile.delete();
@@ -217,8 +235,8 @@ public class SSTableWriter extends SSTable
         IndexWriter iwriter;
         long estimatedRows;
         try
-        {
-            estimatedRows = estimateRows(desc, dfile);
+        {            
+            estimatedRows = estimateRows(desc, dfile);            
             iwriter = new IndexWriter(desc, StorageService.getPartitioner(), estimatedRows);
         }
         catch(IOException e)
@@ -237,10 +255,53 @@ public class SSTableWriter extends SSTable
             {
                 key = SSTableReader.decodeKey(StorageService.getPartitioner(), desc, FBUtilities.readShortByteArray(dfile));
                 long dataSize = SSTableReader.readRowSize(dfile, desc);
+                if (!indexedColumns.isEmpty())
+                {
+                    // skip bloom filter and column index
+                    dfile.readFully(new byte[dfile.readInt()]);
+                    dfile.readFully(new byte[dfile.readInt()]);
+
+                    // index the column data
+                    ColumnFamily cf = ColumnFamily.create(desc.ksname, desc.cfname);
+                    ColumnFamily.serializer().deserializeFromSSTableNoColumns(cf, dfile);
+                    int columns = dfile.readInt();
+                    for (int i = 0; i < columns; i++)
+                    {
+                        IColumn iColumn = cf.getColumnSerializer().deserialize(dfile);
+                        if (indexedColumns.contains(iColumn.name()))
+                        {
+                            DecoratedKey valueKey = cfs.getIndexKeyFor(iColumn.name(), iColumn.value());
+                            ColumnFamily indexedCf = cfs.newIndexedColumnFamily(iColumn.name());
+                            indexedCf.addColumn(new Column(key.key, ArrayUtils.EMPTY_BYTE_ARRAY, iColumn.clock()));
+                            logger.debug("adding indexed column row mutation for key {}", valueKey);
+                            Table.open(desc.ksname).applyIndexedCF(cfs.getIndexedColumnFamilyStore(iColumn.name()),
+                                                                   key,
+                                                                   valueKey,
+                                                                   indexedCf);
+                        }
+                    }
+                }
+
                 iwriter.afterAppend(key, dataPosition);
                 dataPosition = dfile.getFilePointer() + dataSize;
                 dfile.seek(dataPosition);
                 rows++;
+            }
+
+            for (byte[] column : cfs.getIndexedColumns())
+            {
+                try
+                {
+                    cfs.getIndexedColumnFamilyStore(column).forceBlockingFlush();
+                }
+                catch (ExecutionException e)
+                {
+                    throw new RuntimeException(e);
+                }
+                catch (InterruptedException e)
+                {
+                    throw new AssertionError(e);
+                }
             }
         }
         finally
@@ -271,8 +332,10 @@ public class SSTableWriter extends SSTable
             throw new RuntimeException(String.format("Cannot recover SSTable with version %s (current version %s).",
                                                      desc.version, Descriptor.CURRENT_VERSION));
 
+        // FIXME: once maybeRecover is recovering BMIs, it should return the recovered
+        // components
         maybeRecover(desc);
-        return SSTableReader.open(rename(desc));
+        return SSTableReader.open(rename(desc, SSTable.componentsFor(desc)));
     }
 
     /**
@@ -292,7 +355,7 @@ public class SSTableWriter extends SSTable
             this.desc = desc;
             this.partitioner = part;
             indexFile = new BufferedRandomAccessFile(desc.filenameFor(SSTable.COMPONENT_INDEX), "rw", 8 * 1024 * 1024);
-            builder = SegmentedFile.getBuilder();
+            builder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
             summary = new IndexSummary();
             bf = BloomFilter.getFilter(keyCount, 15);
         }

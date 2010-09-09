@@ -24,6 +24,7 @@ package org.apache.cassandra.avro;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Set;
 
 import org.apache.avro.util.Utf8;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -31,9 +32,14 @@ import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.IClock;
 import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.ColumnFamilyType;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.TimestampClock;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.RandomPartitioner;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.apache.cassandra.avro.ErrorFactory.newInvalidRequestException;
@@ -297,4 +303,55 @@ public class AvroValidation
         else
             validateColumns(keyspace, cp, predicate.column_names);
     }
+
+    public static void validateKeyRange(KeyRange range)
+    throws InvalidRequestException
+    {
+        if ((range.start_key == null) != (range.end_key == null))
+        {
+            throw newInvalidRequestException("start key and end key must either both be non-null, or both be null");
+        }
+        if ((range.start_token == null) != (range.end_token == null))
+        {
+            throw newInvalidRequestException("start token and end token must either both be non-null, or both be null");
+        }
+        if ((range.start_key == null) == (range.start_token == null))
+        {
+            throw newInvalidRequestException("exactly one of {start key, end key} or {start token, end token} must be specified");
+        }
+
+        if (range.start_key != null)
+        {
+            IPartitioner p = StorageService.getPartitioner();
+            Token startToken = p.getToken(range.start_key.array());
+            Token endToken = p.getToken(range.end_key.array());
+            if (startToken.compareTo(endToken) > 0 && !endToken.equals(p.getMinimumToken()))
+            {
+                if (p instanceof RandomPartitioner)
+                    throw newInvalidRequestException("start key's md5 sorts after end key's md5.  this is not allowed; you probably should not specify end key at all, under RandomPartitioner");
+                else
+                    throw newInvalidRequestException("start key must sort before (or equal to) finish key in your partitioner!");
+            }
+        }
+
+        if (range.count <= 0)
+        {
+            throw newInvalidRequestException("maxRows must be positive");
+        }
+    }
+
+    static void validateIndexClauses(String keyspace, String columnFamily, IndexClause index_clause)
+    throws InvalidRequestException
+    {
+        if (index_clause.expressions.isEmpty())
+            throw newInvalidRequestException("index clause list may not be empty");
+        Set<byte[]> indexedColumns = Table.open(keyspace).getColumnFamilyStore(columnFamily).getIndexedColumns();
+        for (IndexExpression expression : index_clause.expressions)
+        {
+            if (expression.op.equals(IndexOperator.EQ) && indexedColumns.contains(expression.column_name.array()))
+                return;
+        }
+        throw newInvalidRequestException("No indexed columns present in index clause with operator EQ");
+    }
+
 }

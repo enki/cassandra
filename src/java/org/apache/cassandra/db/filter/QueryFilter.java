@@ -23,6 +23,8 @@ package org.apache.cassandra.db.filter;
 
 import java.util.*;
 
+import org.apache.cassandra.db.columniterator.IColumnIterator;
+import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.thrift.SlicePredicate;
@@ -75,14 +77,15 @@ public class QueryFilter
         return superFilter.getSSTableColumnIterator(sstable, key);
     }
 
-    public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, long dataStart)
+    public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key)
     {
         if (path.superColumnName == null)
-            return filter.getSSTableColumnIterator(sstable, file, key, dataStart);
-        return superFilter.getSSTableColumnIterator(sstable, file, key, dataStart);
+            return filter.getSSTableColumnIterator(sstable.metadata, file, key);
+        return superFilter.getSSTableColumnIterator(sstable.metadata, file, key);
     }
 
-    public static Comparator<IColumn> getColumnComparator(final AbstractType comparator)
+    // here so it can be used by SQF and NQF.  non-package callers should call IFilter.getColumnComparator
+    static Comparator<IColumn> getColumnComparator(final Comparator<byte[]> comparator)
     {
         return new Comparator<IColumn>()
         {
@@ -150,16 +153,14 @@ public class QueryFilter
     }
 
     /**
-     * @return a QueryFilter object to satisfy the given slice criteria:
-     * @param key the row to slice
+     * @return a QueryFilter object to satisfy the given slice criteria:  @param key the row to slice
      * @param path path to the level to slice at (CF or SuperColumn)
      * @param start column to start slice at, inclusive; empty for "the first column"
      * @param finish column to stop slice at, inclusive; empty for "the last column"
-     * @param bitmasks we should probably remove this
      * @param reversed true to start with the largest column (as determined by configured sort order) instead of smallest
      * @param limit maximum number of non-deleted columns to return
      */
-    public static QueryFilter getSliceFilter(DecoratedKey key, QueryPath path, byte[] start, byte[] finish, List<byte[]> bitmasks, boolean reversed, int limit)
+    public static QueryFilter getSliceFilter(DecoratedKey key, QueryPath path, byte[] start, byte[] finish, boolean reversed, int limit)
     {
         return new QueryFilter(key, path, new SliceQueryFilter(start, finish, reversed, limit));
     }

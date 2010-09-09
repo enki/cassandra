@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.service;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -77,6 +78,8 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     }
 
     public void onDead(InetAddress endpoint, EndpointState state) { }
+
+    public void onRemove(InetAddress endpoint) { }
     
     /** will either push or pull an updating depending on who is behind. */
     public static void rectify(UUID theirVersion, InetAddress endpoint)
@@ -111,14 +114,14 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
      * This method silently eats IOExceptions thrown by Migration.apply() as a result of applying a migration out of
      * order.
      */
-    public static void applyMigrations(UUID from, UUID to) throws IOException
+    public static void applyMigrations(final UUID from, final UUID to) throws IOException
     {
         List<Future> updates = new ArrayList<Future>();
         Collection<IColumn> migrations = Migration.getLocalMigrations(from, to);
         for (IColumn col : migrations)
         {
-            final Migration migration = Migration.deserialize(new ByteArrayInputStream(col.value()));
-            Future update = StageManager.getStage(StageManager.MIGRATION_STAGE).submit(new Runnable() 
+            final Migration migration = Migration.deserialize(col.value());
+            Future update = StageManager.getStage(Stage.MIGRATION).submit(new Runnable()
             {
                 public void run()
                 {
@@ -129,6 +132,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
                     catch (ConfigurationException ex)
                     {
                         // this happens if we try to apply something that's already been applied. ignore and proceed.
+                        logger.debug("Migration not applied " + ex.getMessage());
                     }
                     catch (IOException ex)
                     {
@@ -176,7 +180,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     private static Message makeVersionMessage(UUID version)
     {
         byte[] body = version.toString().getBytes();
-        return new Message(FBUtilities.getLocalAddress(), StageManager.READ_STAGE, StorageService.Verb.DEFINITIONS_ANNOUNCE, body);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_ANNOUNCE, body);
     }
     
     // other half of transformation is in DefinitionsUpdateResponseVerbHandler.
@@ -195,7 +199,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         }
         dout.close();
         byte[] body = bout.toByteArray();
-        return new Message(FBUtilities.getLocalAddress(), StageManager.MUTATION_STAGE, StorageService.Verb.DEFINITIONS_UPDATE_RESPONSE, body);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_UPDATE_RESPONSE, body);
     }
     
     // other half of this transformation is in MigrationManager.

@@ -19,7 +19,6 @@
 package org.apache.cassandra.db;
 
 import org.apache.avro.Schema;
-import org.apache.avro.io.BinaryDecoder;
 
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -41,11 +40,7 @@ import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
 import static com.google.common.base.Charsets.UTF_8;
 
@@ -75,7 +70,7 @@ public class DefsTable
         rm.add(new QueryPath(Migration.SCHEMA_CF,
                              null,
                              DEFINITION_SCHEMA_COLUMN_NAME),
-                             org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
+                             org.apache.cassandra.config.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
                              now);
         rm.apply();
 
@@ -103,34 +98,27 @@ public class DefsTable
 
         // deserialize keyspaces using schema
         Collection<KSMetaData> keyspaces = new ArrayList<KSMetaData>();
-        try
+        for (IColumn column : cf.getSortedColumns())
         {
-            for (IColumn column : cf.getSortedColumns())
-            {
-                if (Arrays.equals(column.name(), DEFINITION_SCHEMA_COLUMN_NAME))
-                    continue;
-                org.apache.cassandra.avro.KsDef ks = SerDeUtils.<org.apache.cassandra.avro.KsDef>deserialize(schema, column.value());
-                keyspaces.add(KSMetaData.inflate(ks));
-            }
-        }
-        catch (ConfigurationException e)
-        {
-            throw new IOException(e);
+            if (Arrays.equals(column.name(), DEFINITION_SCHEMA_COLUMN_NAME))
+                continue;
+            org.apache.cassandra.config.avro.KsDef ks = SerDeUtils.deserialize(schema, column.value(), new org.apache.cassandra.config.avro.KsDef());
+            keyspaces.add(KSMetaData.inflate(ks));
         }
         return keyspaces;
     }
     
     /** gets all the files that belong to a given column family. */
-    public static Collection<File> getFiles(String table, final String cf)
+    public static Set<File> getFiles(String table, final String cf)
     {
-        List<File> found = new ArrayList<File>();
+        Set<File> found = new HashSet<File>();
         for (String path : DatabaseDescriptor.getAllDataFileLocationsForTable(table))
         {
             File[] dbFiles = new File(path).listFiles(new FileFilter()
             {
                 public boolean accept(File pathname)
                 {
-                    return pathname.getName().startsWith(cf + "-") && pathname.getName().endsWith(".db") && pathname.exists();        
+                    return pathname.getName().startsWith(cf + "-") && pathname.getName().endsWith(".db") && pathname.exists();
                 }
             });
             found.addAll(Arrays.asList(dbFiles));

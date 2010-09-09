@@ -40,7 +40,7 @@ import org.apache.cassandra.cache.JMXInstrumentedCacheMBean;
 import org.apache.cassandra.concurrent.IExecutorMBean;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.CompactionManager;
-import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 
 import org.apache.commons.cli.*;
 
@@ -91,15 +91,10 @@ public class NodeCmd {
      */
     public void printRing(PrintStream outs)
     {
-        Map<Range, List<String>> rangeMap = probe.getRangeToEndpointMap(null);
-        Map<Range, List<String>> pendingRangeMap = probe.getPendingRangeToEndpoingMap(null);
-        Map<Range, List<String>> rangesToIterate = new HashMap<Range, List<String>>();
+        Map<Token, String> tokenToEndpoint = probe.getTokenToEndpointMap();
+        List<Token> sortedTokens = new ArrayList<Token>(tokenToEndpoint.keySet());
+        Collections.sort(sortedTokens);
 
-        rangesToIterate.putAll(pendingRangeMap);
-        rangesToIterate.putAll(rangeMap);
-
-        List<Range> ranges = new ArrayList<Range>(rangesToIterate.keySet());
-        Collections.sort(ranges);
         Set<String> liveNodes = probe.getLiveNodes();
         Set<String> deadNodes = probe.getUnreachableNodes();
         Set<String> joiningNodes = probe.getJoiningNodes();
@@ -115,13 +110,11 @@ public class NodeCmd {
         
         // show pre-wrap token twice so you can always read a node's range as
         // (previous line token, current line token]
-        if (ranges.size() > 1)
-            outs.println(String.format("%-14s%-11s%-14s%-43s", "", "", "", ranges.get(0).left));
+        if (sortedTokens.size() > 1)
+            outs.println(String.format("%-14s%-11s%-14s%-43s", "", "", "", sortedTokens.get(sortedTokens.size() - 1)));
 
-        for (Range range : ranges) {
-            List<String> endpoints = rangesToIterate.get(range);
-            
-            String primaryEndpoint = endpoints.get(0);
+        for (Token token : sortedTokens) {
+            String primaryEndpoint = tokenToEndpoint.get(token);
             outs.print(String.format("%-16s", primaryEndpoint));
 
             String status =
@@ -138,7 +131,7 @@ public class NodeCmd {
 
             outs.print(String.format("%-16s", loadMap.containsKey(primaryEndpoint) ? loadMap.get(primaryEndpoint) : "?"));
 
-            outs.print(String.format("%-44s", range.right));
+            outs.print(String.format("%-44s", token));
 
             outs.println();
         }
@@ -255,9 +248,9 @@ public class NodeCmd {
         // get a list of column family stores
         Iterator<Map.Entry<String, ColumnFamilyStoreMBean>> cfamilies = probe.getColumnFamilyStoreMBeanProxies();
 
-        for (;cfamilies.hasNext();)
+        while (cfamilies.hasNext())
         {
-            Map.Entry<String, ColumnFamilyStoreMBean> entry = cfamilies.next();
+            Entry<String, ColumnFamilyStoreMBean> entry = cfamilies.next();
             String tableName = entry.getKey();
             ColumnFamilyStoreMBean cfsProxy = entry.getValue();
 

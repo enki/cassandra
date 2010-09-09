@@ -25,6 +25,9 @@ import java.util.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.sun.jna.Native;
+import org.apache.cassandra.utils.CLibrary;
+
 
 public class FileUtils
 {
@@ -34,6 +37,11 @@ public class FileUtils
     private static final double mb_ = 1024*1024d;
     private static final double gb_ = 1024*1024*1024d;
     private static final double tb_ = 1024*1024*1024*1024d;
+
+    public static void deleteWithConfirm(String file) throws IOException
+    {
+        deleteWithConfirm(new File(file));
+    }
 
     public static void deleteWithConfirm(File file) throws IOException
     {
@@ -205,6 +213,30 @@ public class FileUtils
      * @throws IOException if an error has occurred while creating the link.
      */
     public static void createHardLink(File sourceFile, File destinationFile) throws IOException
+    {
+        int errno = Integer.MIN_VALUE;
+        try
+        {
+            int result = CLibrary.link(sourceFile.getAbsolutePath(), destinationFile.getAbsolutePath());
+            if (result != 0)
+                errno = Native.getLastError();
+        }
+        catch (UnsatisfiedLinkError e)
+        {
+            createHardLinkWithExec(sourceFile, destinationFile);
+            return;
+        }
+
+        if (errno != Integer.MIN_VALUE)
+        {
+            // there are 17 different error codes listed on the man page.  punt until/unless we find which
+            // ones actually turn up in practice.
+            throw new IOException(String.format("Unable to create hard link from %s to %s (errno %d)", 
+                                                sourceFile, destinationFile, errno));
+        }
+    }
+
+    private static void createHardLinkWithExec(File sourceFile, File destinationFile) throws IOException
     {
         String osname = System.getProperty("os.name");
         ProcessBuilder pb;

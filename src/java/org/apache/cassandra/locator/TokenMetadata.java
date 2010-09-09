@@ -185,24 +185,10 @@ public class TokenMetadata
         }
     }
 
-    public void removeLeavingEndpoint(InetAddress endpoint)
+    public void removeEndpoint(InetAddress endpoint)
     {
         assert endpoint != null;
 
-        lock.writeLock().lock();
-        try
-        {
-            leavingEndpoints.remove(endpoint);
-        }
-        finally
-        {
-            lock.writeLock().unlock();
-        }
-    }
-
-    public void removeEndpoint(InetAddress endpoint)
-    {
-        assert tokenToEndpointMap.containsValue(endpoint);
         lock.writeLock().lock();
         try
         {
@@ -566,5 +552,16 @@ public class TokenMetadata
         }
 
         return endpoints;
+    }
+
+    /**
+     * Return the Token to Endpoint map for all the node in the cluster, including bootstrapping ones.
+     */
+    public Map<Token, InetAddress> getTokenToEndpointMap()
+    {
+        Map<Token, InetAddress> map = new HashMap<Token, InetAddress>(tokenToEndpointMap.size() + bootstrapTokens.size());
+        map.putAll(tokenToEndpointMap);
+        map.putAll(bootstrapTokens);
+        return map;
     }
 }

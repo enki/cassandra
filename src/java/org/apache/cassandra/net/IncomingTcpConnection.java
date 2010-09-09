@@ -27,7 +27,9 @@ import java.net.Socket;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.net.sink.SinkManager;
 import org.apache.cassandra.streaming.IncomingStreamReader;
+import org.apache.cassandra.streaming.StreamHeader;
 
 public class IncomingTcpConnection extends Thread
 {
@@ -64,14 +66,20 @@ public class IncomingTcpConnection extends Thread
 
                 if (isStream)
                 {
-                    new IncomingStreamReader(socket.getChannel()).read();
+                    int size = input.readInt();
+                    byte[] headerBytes = new byte[size];
+                    input.readFully(headerBytes);
+                    StreamHeader streamHeader = StreamHeader.serializer().deserialize(new DataInputStream(new ByteArrayInputStream(headerBytes)));
+                    new IncomingStreamReader(streamHeader, socket.getChannel()).read();
                 }
                 else
                 {
                     int size = input.readInt();
                     byte[] contentBytes = new byte[size];
                     input.readFully(contentBytes);
-                    MessagingService.getDeserializationExecutor().submit(new MessageDeserializationTask(new ByteArrayInputStream(contentBytes)));
+                    
+                    Message message = Message.serializer().deserialize(new DataInputStream(new ByteArrayInputStream(contentBytes)));
+                    MessagingService.receive(message);
                 }
             }
             catch (EOFException e)

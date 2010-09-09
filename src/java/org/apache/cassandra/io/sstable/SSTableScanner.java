@@ -26,10 +26,9 @@ import java.util.Iterator;
 import java.util.Arrays;
 
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.filter.IColumnIterator;
+import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import org.slf4j.Logger;
@@ -182,7 +181,7 @@ public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
                 }
                 else
                 {
-                    return row = filter.getSSTableColumnIterator(sstable, file, key, dataStart);
+                    return row = filter.getSSTableColumnIterator(sstable, file, key);
                 }
             }
             catch (IOException e)

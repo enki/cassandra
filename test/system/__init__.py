@@ -142,12 +142,13 @@ class ThriftTester(BaseTester):
         self.client.transport.close()
         
     def define_schema(self):
-        keyspace1 = Cassandra.KsDef('Keyspace1', 'org.apache.cassandra.locator.RackUnawareStrategy', 1,
+        keyspace1 = Cassandra.KsDef('Keyspace1', 'org.apache.cassandra.locator.SimpleStrategy', None, 1,
         [
             Cassandra.CfDef('Keyspace1', 'Standard1'),
             Cassandra.CfDef('Keyspace1', 'Standard2'), 
             Cassandra.CfDef('Keyspace1', 'StandardLong1', comparator_type='LongType'), 
             Cassandra.CfDef('Keyspace1', 'StandardLong2', comparator_type='LongType'), 
+            Cassandra.CfDef('Keyspace1', 'StandardInteger1', comparator_type='IntegerType'),
             Cassandra.CfDef('Keyspace1', 'Super1', column_type='Super', subcomparator_type='LongType', row_cache_size=1000, key_cache_size=0), 
             Cassandra.CfDef('Keyspace1', 'Super2', column_type='Super', subcomparator_type='LongType'), 
             Cassandra.CfDef('Keyspace1', 'Super3', column_type='Super', subcomparator_type='LongType'), 
@@ -155,7 +156,7 @@ class ThriftTester(BaseTester):
             Cassandra.CfDef('Keyspace1', 'Indexed1', column_metadata=[Cassandra.ColumnDef('birthdate', 'LongType', Cassandra.IndexType.KEYS, 'birthdate')]),
         ])
 
-        keyspace2 = Cassandra.KsDef('Keyspace2', 'org.apache.cassandra.locator.RackUnawareStrategy', 1,
+        keyspace2 = Cassandra.KsDef('Keyspace2', 'org.apache.cassandra.locator.SimpleStrategy', None, 1,
         [
             Cassandra.CfDef('Keyspace2', 'Standard1'),
             Cassandra.CfDef('Keyspace2', 'Standard3'),
@@ -163,19 +164,7 @@ class ThriftTester(BaseTester):
             Cassandra.CfDef('Keyspace2', 'Super4', column_type='Super', subcomparator_type='TimeUUIDType'),
         ])
 
-        keyspace3 = Cassandra.KsDef('Keyspace3', 'org.apache.cassandra.locator.RackUnawareStrategy', 5,
-        [
-            Cassandra.CfDef('Keyspace3', 'Standard1'),
-        ])
-
-        keyspace4 = Cassandra.KsDef('Keyspace4', 'org.apache.cassandra.locator.RackUnawareStrategy', 3,
-        [
-            Cassandra.CfDef('Keyspace4', 'Standard1'),
-            Cassandra.CfDef('Keyspace4', 'Standard3'),
-            Cassandra.CfDef('Keyspace4', 'Super3', column_type='Super', subcomparator_type='BytesType'),
-            Cassandra.CfDef('Keyspace4', 'Super4', column_type='Super', subcomparator_type='TimeUUIDType')
-        ])
-        for ks in [keyspace1, keyspace2, keyspace3, keyspace4]:
+        for ks in [keyspace1, keyspace2]:
             self.client.system_add_keyspace(ks)
 
 class AvroTester(BaseTester):
@@ -192,8 +181,7 @@ class AvroTester(BaseTester):
         keyspace1 = dict()
         keyspace1['name'] = 'Keyspace1'
         keyspace1['replication_factor'] = 1
-        keyspace1['strategy_class'] = \
-                'org.apache.cassandra.locator.RackUnawareStrategy'
+        keyspace1['strategy_class'] = 'org.apache.cassandra.locator.SimpleStrategy'
 
         keyspace1['cf_defs'] = [{
             'keyspace': 'Keyspace1',
@@ -212,7 +200,65 @@ class AvroTester(BaseTester):
             'preload_row_cache': False,
             'key_cache_size': 0
         })
+        
+        keyspace1['cf_defs'].append({
+            'keyspace': 'Keyspace1',
+            'name': 'Super2',
+            'column_type': 'Super',
+            'subcomparator_type': 'LongType',
+        })
+        
+        keyspace1['cf_defs'].append({
+            'keyspace': 'Keyspace1',
+            'name': 'Super3',
+            'column_type': 'Super',
+            'subcomparator_type': 'LongType',
+        })
+        
+        keyspace1['cf_defs'].append({
+            'keyspace': 'Keyspace1',
+            'name': 'Super4',
+            'column_type': 'Super',
+            'subcomparator_type': 'UTF8Type',
+        })
+
+        keyspace1['cf_defs'].append({
+            'keyspace': 'Keyspace1',
+            'name': 'Indexed1',
+            'column_metadata': [{'name': 'birthdate', 'validation_class': 'LongType', 'index_type': 'KEYS', 'index_name': 'birthdate'}],
+        })
 
         self.client.request('system_add_keyspace', {'ks_def': keyspace1})
+        
+        keyspace2 = dict()
+        keyspace2['name'] = 'Keyspace2'
+        keyspace2['replication_factor'] = 1
+        keyspace2['strategy_class'] = 'org.apache.cassandra.locator.SimpleStrategy'
+        
+        keyspace2['cf_defs'] = [{
+            'keyspace': 'Keyspace2',
+            'name': 'Standard1',
+        }]
+        
+        keyspace2['cf_defs'].append({
+            'keyspace': 'Keyspace2',
+            'name': 'Standard3',
+        })
+        
+        keyspace2['cf_defs'].append({
+            'keyspace': 'Keyspace2',
+            'name': 'Super3',
+            'column_type': 'Super',
+            'subcomparator_type': 'BytesType',
+        })
+        
+        keyspace2['cf_defs'].append({
+            'keyspace': 'Keyspace2',
+            'name': 'Super4',
+            'column_type': 'Super',
+            'subcomparator_type': 'TimeUUIDType',
+        });
+        
+        self.client.request('system_add_keyspace', {'ks_def': keyspace2})
 
 # vim:ai sw=4 ts=4 tw=0 et

@@ -46,7 +46,7 @@ namespace rb CassandraThrift
 #           for every edit that doesn't result in a change to major/minor.
 #
 # See the Semantic Versioning Specification (SemVer) http://semver.org.
-const string VERSION = "9.0.0"
+const string VERSION = "14.0.0"
 
 
 #
@@ -153,8 +153,8 @@ exception AuthorizationException {
  *   ANY          Ensure that the write has been written once somewhere, including possibly being hinted in a non-target node.
  *   ONE          Ensure that the write has been written to at least 1 node's commit log and memory table
  *   QUORUM       Ensure that the write has been written to <ReplicationFactor> / 2 + 1 nodes
- *   DCQUORUM     Ensure that the write has been written to <ReplicationFactor> / 2 + 1 nodes, within the local datacenter (requires DatacenterShardStrategy)
- *   DCQUORUMSYNC Ensure that the write has been written to <ReplicationFactor> / 2 + 1 nodes in each datacenter (requires DatacenterShardStrategy)
+ *   DCQUORUM     Ensure that the write has been written to <ReplicationFactor> / 2 + 1 nodes, within the local datacenter (requires NetworkTopologyStrategy)
+ *   DCQUORUMSYNC Ensure that the write has been written to <ReplicationFactor> / 2 + 1 nodes in each datacenter (requires NetworkTopologyStrategy)
  *   ALL          Ensure that the write is written to <code>&lt;ReplicationFactor&gt;</code> nodes before responding to the client.
  *
  * Read:
@@ -244,6 +244,10 @@ struct SlicePredicate {
 
 enum IndexOperator {
     EQ,
+    GTE,
+    GT,
+    LTE,
+    LT
 }
 
 struct IndexExpression {
@@ -254,8 +258,8 @@ struct IndexExpression {
 
 struct IndexClause {
     1: required list<IndexExpression> expressions
-    2: required i32 count=100,
-    3: optional binary start_key,
+    2: required binary start_key,
+    3: required i32 count=100,
 }
 
 /**
@@ -272,12 +276,6 @@ struct KeyRange {
     3: optional string start_token,
     4: optional string end_token,
     5: required i32 count=100
-}
-
-struct RowPredicate {
-    1: optional list<binary> keys,
-    2: optional KeyRange key_range,
-    3: optional IndexClause index_clause
 }
 
 /**
@@ -319,22 +317,8 @@ struct TokenRange {
     3: required list<string> endpoints,
 }
 
-/** The AccessLevel is an enum that expresses the authorized access level granted to an API user:
- *
- *      NONE       No access permitted.
- *      READONLY   Only read access is allowed.
- *      READWRITE  Read and write access is allowed.
- *      FULL       Read, write, and remove access is allowed.
-*/
-enum AccessLevel {
-    NONE = 0,
-    READONLY = 16,
-    READWRITE = 32,
-    FULL = 64,
-}
-
 /**
-    Authentication requests can contain any data, dependent on the AuthenticationBackend used
+    Authentication requests can contain any data, dependent on the IAuthenticator used
 */
 struct AuthenticationRequest {
     1: required map<string, string> credentials
@@ -366,22 +350,25 @@ struct CfDef {
     9: optional double row_cache_size=0,
     10: optional bool preload_row_cache=0,
     11: optional double key_cache_size=200000,
-    12: optional double read_repair_chance=1.0
-    13: optional list<ColumnDef> column_metadata
-    14: optional i32 gc_grace_seconds
+    12: optional double read_repair_chance=1.0,
+    13: optional list<ColumnDef> column_metadata,
+    14: optional i32 gc_grace_seconds,
+    15: optional string default_validation_class,
+    16: optional i32 id,
 }
 
 /* describes a keyspace. */
 struct KsDef {
     1: required string name,
     2: required string strategy_class,
-    3: required i32 replication_factor,
-    5: required list<CfDef> cf_defs,    
+    3: optional map<string,string> strategy_options,
+    4: required i32 replication_factor,
+    5: required list<CfDef> cf_defs,
 }
 
 service Cassandra {
   # auth methods
-  AccessLevel login(1: required AuthenticationRequest auth_request) throws (1:AuthenticationException authnx, 2:AuthorizationException authzx),
+  void login(1: required AuthenticationRequest auth_request) throws (1:AuthenticationException authnx, 2:AuthorizationException authzx),
  
   # set keyspace
   void set_keyspace(1: required string keyspace) throws (1:InvalidRequestException ire),
@@ -408,16 +395,6 @@ service Cassandra {
                             throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
   /**
-    Performs a get_slice for column_parent and predicate for the given keys in parallel.
-    @Deprecated; use `scan`
-  */
-  map<binary,list<ColumnOrSuperColumn>> multiget_slice(1:required list<binary> keys, 
-                                                       2:required ColumnParent column_parent, 
-                                                       3:required SlicePredicate predicate, 
-                                                       4:required ConsistencyLevel consistency_level=ONE)
-                                        throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
-
-  /**
     returns the number of columns matching <code>predicate</code> for a particular <code>key</code>, 
     <code>ColumnFamily</code> and optionally <code>SuperColumn</code>.
   */
@@ -428,18 +405,25 @@ service Cassandra {
       throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
   /**
+    Performs a get_slice for column_parent and predicate for the given keys in parallel.
+  */
+  map<binary,list<ColumnOrSuperColumn>> multiget_slice(1:required set<binary> keys, 
+                                                       2:required ColumnParent column_parent, 
+                                                       3:required SlicePredicate predicate, 
+                                                       4:required ConsistencyLevel consistency_level=ONE)
+                                        throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
+
+  /**
     Perform a get_count in parallel on the given list<binary> keys. The return value maps keys to the count found.
   */
-  map<binary, i32> multiget_count(1:required string keyspace,
-                2:required list<binary> keys,
-                3:required ColumnParent column_parent,
-                4:required SlicePredicate predicate,
-                5:required ConsistencyLevel consistency_level=ONE)
+  map<binary, i32> multiget_count(1:required set<binary> keys,
+                2:required ColumnParent column_parent,
+                3:required SlicePredicate predicate,
+                4:required ConsistencyLevel consistency_level=ONE)
       throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
   /**
-   returns a subset of columns for a range of keys.
-   @Deprecated; use `scan`
+   returns a subset of columns for a contiguous range of keys.
   */
   list<KeySlice> get_range_slices(1:required ColumnParent column_parent, 
                                   2:required SlicePredicate predicate,
@@ -447,19 +431,12 @@ service Cassandra {
                                   4:required ConsistencyLevel consistency_level=ONE)
                  throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
-  /** Returns the subset of columns specified in SlicePredicate for the rows requested in RowsPredicate */
-  list<KeySlice> scan(1:required ColumnParent column_parent,
-                      2:required RowPredicate row_predicate,
-                      3:required SlicePredicate column_predicate,
-                      4:required ConsistencyLevel consistency_level=ONE)
+  /** Returns the subset of columns specified in SlicePredicate for the rows matching the IndexClause */
+  list<KeySlice> get_indexed_slices(1:required ColumnParent column_parent,
+                                    2:required IndexClause index_clause,
+                                    3:required SlicePredicate column_predicate,
+                                    4:required ConsistencyLevel consistency_level=ONE)
                  throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
-
-  /** Counts the subset of columns specified in SlicePredicate for the rows requested in RowsPredicate */
-  list<KeyCount> scan_count(1:required ColumnParent column_parent,
-                           2:required RowPredicate row_predicate,
-                           3:required SlicePredicate column_predicate,
-                           4:required ConsistencyLevel consistency_level=ONE)
-      throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
   # modification methods
 
@@ -507,15 +484,15 @@ service Cassandra {
   // rather than user data.  The nodeprobe program provides usage examples.
   
   /** 
-   * ask the cluster if they all are using the same migration id. returns a map of version->hosts-on-that-version.
-   * hosts that did not respond will be under the key DatabaseDescriptor.INITIAL_VERSION. agreement can be determined
-   * by checking if the size of the map is 1. 
+   * for each schema version present in the cluster, returns a list of nodes at that version.
+   * hosts that do not respond will be under the key DatabaseDescriptor.INITIAL_VERSION. 
+   * the cluster is all on the same version if the size of the map is 1. 
    */
-  map<string, list<string>> check_schema_agreement()
+  map<string, list<string>> describe_schema_versions()
        throws (1: InvalidRequestException ire),
 
   /** list the defined keyspaces in this cluster */
-  set<string> describe_keyspaces(),
+  list<KsDef> describe_keyspaces(),
 
   /** get the cluster name */
   string describe_cluster_name(),
@@ -538,19 +515,18 @@ service Cassandra {
   string describe_partitioner(),
 
   /** describe specified keyspace */
-  map<string, map<string, string>> describe_keyspace(1:required string keyspace)
-                                   throws (1:NotFoundException nfe),
+  KsDef describe_keyspace(1:required string keyspace)
+        throws (1:NotFoundException nfe),
 
   /** experimental API for hadoop/parallel query support.  
       may change violently and without warning. 
 
       returns list of token strings such that first subrange is (list[0], list[1]],
       next is (list[1], list[2]], etc. */
-  list<string> describe_splits(1:required string keyspace,
-                               2:required string cfName,
-                               3:required string start_token, 
-                               4:required string end_token,
-                               5:required i32 keys_per_split),
+  list<string> describe_splits(1:required string cfName,
+                               2:required string start_token, 
+                               3:required string end_token,
+                               4:required i32 keys_per_split),
 
   /** adds a column family. returns the new schema id. */
   string system_add_column_family(1:required CfDef cf_def)
@@ -576,4 +552,11 @@ service Cassandra {
   string system_rename_keyspace(1:required string old_name, 2:required string new_name)
     throws (1:InvalidRequestException ire),
   
+  /** updates properties of a keyspace. returns the new schema id. */
+  string system_update_keyspace(1:required KsDef ks_def)
+    throws (1:InvalidRequestException ire),
+        
+  /** updates properties of a column family. returns the new schema id. */
+  string system_update_column_family(1:required CfDef cf_def)
+    throws (1:InvalidRequestException ire),
 }

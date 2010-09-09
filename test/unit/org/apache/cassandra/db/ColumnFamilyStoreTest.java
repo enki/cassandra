@@ -19,17 +19,19 @@
 package org.apache.cassandra.db;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 
 import org.apache.commons.lang.ArrayUtils;
+import org.apache.commons.lang.StringUtils;
+
 import static org.junit.Assert.assertNull;
 import org.junit.Test;
 
 import static junit.framework.Assert.assertEquals;
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.IndexClause;
@@ -91,7 +93,7 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         {
             public void runMayThrow() throws IOException
             {
-                QueryFilter sliceFilter = QueryFilter.getSliceFilter(Util.dk("key1"), new QueryPath("Standard2", null, null), ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, null, false, 1);
+                QueryFilter sliceFilter = QueryFilter.getSliceFilter(Util.dk("key1"), new QueryPath("Standard2", null, null), ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, false, 1);
                 ColumnFamily cf = store.getColumnFamily(sliceFilter);
                 assert cf.isMarkedForDelete();
                 assert cf.getColumnsMap().isEmpty();
@@ -167,21 +169,88 @@ public class ColumnFamilyStoreTest extends CleanupHelper
         rm.apply();
 
         rm = new RowMutation("Keyspace1", "k3".getBytes());
-        rm.add(new QueryPath("Indexed1", null, "notbirthdate".getBytes("UTF8")), FBUtilities.toByteArray(1L), new TimestampClock(0));
+        rm.add(new QueryPath("Indexed1", null, "notbirthdate".getBytes("UTF8")), FBUtilities.toByteArray(2L), new TimestampClock(0));
         rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(1L), new TimestampClock(0));
         rm.apply();
+        
+        rm = new RowMutation("Keyspace1", "k4aaaa".getBytes());
+        rm.add(new QueryPath("Indexed1", null, "notbirthdate".getBytes("UTF8")), FBUtilities.toByteArray(2L), new TimestampClock(0));
+        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(3L), new TimestampClock(0));
+        rm.apply();
 
+        // basic single-expression query
         IndexExpression expr = new IndexExpression("birthdate".getBytes("UTF8"), IndexOperator.EQ, FBUtilities.toByteArray(1L));
-        IndexClause clause = new IndexClause(Arrays.asList(expr), 100);
+        IndexClause clause = new IndexClause(Arrays.asList(expr), ArrayUtils.EMPTY_BYTE_ARRAY, 100);
         IFilter filter = new IdentityQueryFilter();
-        List<Row> rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, filter);
+        IPartitioner p = StorageService.getPartitioner();
+        Range range = new Range(p.getMinimumToken(), p.getMinimumToken());
+        List<Row> rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, range, filter);
 
         assert rows != null;
-        assert rows.size() == 2;
+        assert rows.size() == 2 : StringUtils.join(rows, ",");
         assert Arrays.equals("k1".getBytes(), rows.get(0).key.key);
         assert Arrays.equals("k3".getBytes(), rows.get(1).key.key);
         assert Arrays.equals(FBUtilities.toByteArray(1L), rows.get(0).cf.getColumn("birthdate".getBytes("UTF8")).value());
         assert Arrays.equals(FBUtilities.toByteArray(1L), rows.get(1).cf.getColumn("birthdate".getBytes("UTF8")).value());
+
+        // add a second expression
+        IndexExpression expr2 = new IndexExpression("notbirthdate".getBytes("UTF8"), IndexOperator.GTE, FBUtilities.toByteArray(2L));
+        clause = new IndexClause(Arrays.asList(expr, expr2), ArrayUtils.EMPTY_BYTE_ARRAY, 100);
+        rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, range, filter);
+
+        assert rows.size() == 1 : StringUtils.join(rows, ",");
+        assert Arrays.equals("k3".getBytes(), rows.get(0).key.key);
+
+        // same query again, but with resultset not including the subordinate expression
+        rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, range, new NamesQueryFilter("birthdate".getBytes("UTF8")));
+
+        assert rows.size() == 1 : StringUtils.join(rows, ",");
+        assert Arrays.equals("k3".getBytes(), rows.get(0).key.key);
+        assert rows.get(0).cf.getColumnCount() == 1 : rows.get(0).cf;
+
+        // once more, this time with a slice rowset that needs to be expanded
+        SliceQueryFilter sqf = new SliceQueryFilter(ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, false, 0);
+        rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, range, sqf);
+
+        assert rows.size() == 1 : StringUtils.join(rows, ",");
+        assert Arrays.equals("k3".getBytes(), rows.get(0).key.key);
+        assert rows.get(0).cf.getColumnCount() == 0;
+    }
+
+    @Test
+    public void testIndexUpdate() throws IOException
+    {
+        Table table = Table.open("Keyspace2");
+
+        // create a row and update the birthdate value, test that the index query fetches the new version
+        RowMutation rm;
+        rm = new RowMutation("Keyspace2", "k1".getBytes());
+        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(1L), new TimestampClock(1));
+        rm.apply();
+        rm = new RowMutation("Keyspace2", "k1".getBytes());
+        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(2L), new TimestampClock(2));
+        rm.apply();
+
+        IndexExpression expr = new IndexExpression("birthdate".getBytes("UTF8"), IndexOperator.EQ, FBUtilities.toByteArray(1L));
+        IndexClause clause = new IndexClause(Arrays.asList(expr), ArrayUtils.EMPTY_BYTE_ARRAY, 100);
+        IFilter filter = new IdentityQueryFilter();
+        IPartitioner p = StorageService.getPartitioner();
+        Range range = new Range(p.getMinimumToken(), p.getMinimumToken());
+        List<Row> rows = table.getColumnFamilyStore("Indexed1").scan(clause, range, filter);
+        assert rows.size() == 0;
+
+        expr = new IndexExpression("birthdate".getBytes("UTF8"), IndexOperator.EQ, FBUtilities.toByteArray(2L));
+        clause = new IndexClause(Arrays.asList(expr), ArrayUtils.EMPTY_BYTE_ARRAY, 100);
+        rows = table.getColumnFamilyStore("Indexed1").scan(clause, range, filter);
+        assert Arrays.equals("k1".getBytes(), rows.get(0).key.key);
+
+        // update the birthdate value with an OLDER timestamp, and test that the index ignores this
+        rm = new RowMutation("Keyspace2", "k1".getBytes());
+        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(3L), new TimestampClock(0));
+        rm.apply();
+
+        rows = table.getColumnFamilyStore("Indexed1").scan(clause, range, filter);
+        assert Arrays.equals("k1".getBytes(), rows.get(0).key.key);
     }
 
     private ColumnFamilyStore insertKey1Key2() throws IOException, ExecutionException, InterruptedException

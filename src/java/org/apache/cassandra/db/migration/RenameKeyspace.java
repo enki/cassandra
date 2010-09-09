@@ -24,37 +24,27 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.DefsTable;
 import org.apache.cassandra.db.HintedHandOffManager;
-import org.apache.cassandra.db.RowMutation;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.commons.lang.StringUtils;
+
 public class RenameKeyspace extends Migration
 {
-    private static final Serializer serializer = new Serializer();
-    
     private String oldName;
     private String newName;
     
-    RenameKeyspace(DataInputStream din) throws IOException
-    {
-        super(UUIDGen.makeType1UUID(din), UUIDGen.makeType1UUID(din));
-        rm = RowMutation.serializer().deserialize(din);
-        oldName = din.readUTF();
-        newName = din.readUTF();
-    }
+    /** Required no-arg constructor */
+    protected RenameKeyspace() { /* pass */ }
     
     public RenameKeyspace(String oldName, String newName) throws ConfigurationException, IOException
     {
@@ -67,6 +57,8 @@ public class RenameKeyspace extends Migration
             throw new ConfigurationException("Keyspace either does not exist or does not match the one currently defined.");
         if (DatabaseDescriptor.getTableDefinition(newName) != null)
             throw new ConfigurationException("Keyspace already exists.");
+        if (!Migration.isLegalName(newName))
+            throw new ConfigurationException("Invalid keyspace name: " + newName);
         
         // clone the ksm, replacing thename.
         KSMetaData newKsm = rename(oldKsm, newName, false); 
@@ -85,13 +77,7 @@ public class RenameKeyspace extends Migration
                 CFMetaData.purge(oldCf);
             newCfs.add(CFMetaData.renameTable(oldCf, newName));
         }
-        return new KSMetaData(newName, ksm.strategyClass, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
-    }
-
-    @Override
-    public ICompactSerializer getSerializer()
-    {
-        return serializer;
+        return new KSMetaData(newName, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
     }
 
     @Override
@@ -126,52 +112,37 @@ public class RenameKeyspace extends Migration
         {
             Table.clear(oldKsm.name);
             Table.open(newName);
-            // this isn't strictly necessary since the set of all cfs was not modified.
-            CommitLog.instance().forceNewSegment();
-    
             HintedHandOffManager.renameHints(oldName, newName);
         }
     }
     
     private static void renameKsStorageFiles(String oldKs, String newKs) throws IOException
     {
-        IOException mostRecentProblem = null;
-        Set<String> cfNames = DatabaseDescriptor.getTableDefinition(oldKs).cfMetaData().keySet();
-        for (String cfName : cfNames)
+        ArrayList<File> failed = new ArrayList<File>();
+        for (String dataDir : DatabaseDescriptor.getAllDataFileLocations())
         {
-            for (File existing : DefsTable.getFiles(oldKs, cfName))
-            {
-                try
-                {
-                    File newParent = new File(existing.getParentFile().getParent(), newKs);
-                    newParent.mkdirs();
-                    FileUtils.renameWithConfirm(existing, new File(newParent, existing.getName()));
-                }
-                catch (IOException ex)
-                {
-                    mostRecentProblem = ex;
-                }
-            }
-        }
-        if (mostRecentProblem != null)
-            throw new IOException("One or more IOExceptions encountered while renaming files. Most recent problem is included.", mostRecentProblem);
-    }
-    
-    private static final class Serializer implements ICompactSerializer<RenameKeyspace>
-    {
-        public void serialize(RenameKeyspace renameKeyspace, DataOutputStream dout) throws IOException
-        {
-            dout.write(UUIDGen.decompose(renameKeyspace.newVersion));
-            dout.write(UUIDGen.decompose(renameKeyspace.lastVersion));
-            RowMutation.serializer().serialize(renameKeyspace.rm, dout);
-            
-            dout.writeUTF(renameKeyspace.oldName);
-            dout.writeUTF(renameKeyspace.newName);
+            File ksDir = new File(dataDir, oldKs);
+            if (ksDir.exists())
+                if (!ksDir.renameTo(new File(dataDir, newKs)))
+                    failed.add(ksDir);
         }
 
-        public RenameKeyspace deserialize(DataInputStream dis) throws IOException
-        {
-            return new RenameKeyspace(dis);
-        }
+        if (!failed.isEmpty())
+            throw new IOException("One or more problems encountered while renaming " + StringUtils.join(failed, ","));
+    }
+    
+    public void subdeflate(org.apache.cassandra.db.migration.avro.Migration mi)
+    {
+        org.apache.cassandra.db.migration.avro.RenameKeyspace rks = new org.apache.cassandra.db.migration.avro.RenameKeyspace();
+        rks.old_ksname = new org.apache.avro.util.Utf8(oldName);
+        rks.new_ksname = new org.apache.avro.util.Utf8(newName);
+        mi.migration = rks;
+    }
+
+    public void subinflate(org.apache.cassandra.db.migration.avro.Migration mi)
+    {
+        org.apache.cassandra.db.migration.avro.RenameKeyspace rks = (org.apache.cassandra.db.migration.avro.RenameKeyspace)mi.migration;
+        oldName = rks.old_ksname.toString();
+        newName = rks.new_ksname.toString();
     }
 }

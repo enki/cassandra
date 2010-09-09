@@ -19,13 +19,18 @@ package org.apache.cassandra.db.clock;
 
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.IClock.ClockRelationship;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Keeps the column with the highest timestamp. If both are equal
  * return the left column.
  */
-public class TimestampReconciler extends AbstractReconciler
+public final class TimestampReconciler extends AbstractReconciler
 {
+    public static final TimestampReconciler instance = new TimestampReconciler();
+
+    private TimestampReconciler()
+    {/* singleton */}
 
     public Column reconcile(Column left, Column right)
     {
@@ -33,6 +38,13 @@ public class TimestampReconciler extends AbstractReconciler
         switch (cr)
         {
         case EQUAL:
+            // tombstones take precedence.  (if both are tombstones, then it doesn't matter which one we use.)
+            if (left.isMarkedForDelete())
+                return left;
+            if (right.isMarkedForDelete())
+                return right;
+            // break ties by comparing values.
+            return FBUtilities.compareByteArrays(left.value(), right.value()) < 0 ? right : left;
         case GREATER_THAN:
             return left;
         case LESS_THAN:

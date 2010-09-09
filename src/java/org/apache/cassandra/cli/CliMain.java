@@ -21,12 +21,7 @@ package org.apache.cassandra.cli;
 import jline.ConsoleReader;
 import jline.History;
 import org.apache.cassandra.auth.SimpleAuthenticator;
-import org.apache.cassandra.thrift.AuthenticationException;
-import org.apache.cassandra.thrift.AuthenticationRequest;
-import org.apache.cassandra.thrift.AuthorizationException;
-import org.apache.cassandra.thrift.Cassandra;
-import org.apache.cassandra.thrift.InvalidRequestException;
-import org.apache.cassandra.thrift.NotFoundException;
+import org.apache.cassandra.thrift.*;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.transport.TFramedTransport;
@@ -80,7 +75,7 @@ public class CliMain
             transport_ = socket;
         }
 
-        TBinaryProtocol binaryProtocol = new TBinaryProtocol(transport_, false, false);
+        TBinaryProtocol binaryProtocol = new TBinaryProtocol(transport_, true, true);
         Cassandra.Client cassandraClient = new Cassandra.Client(binaryProtocol);
 
         try
@@ -106,7 +101,13 @@ public class CliMain
             try {
                 thriftClient_.set_keyspace(css_.keyspace);
                 cliClient_.setKeyspace(css_.keyspace);
-                updateCompletor(cliClient_.getCFMetaData(css_.keyspace).keySet());
+
+                Set<String> cfnames = new HashSet<String>();
+                KsDef ksd = cliClient_.getKSMetaData(css_.keyspace);
+                for (CfDef cfd : ksd.cf_defs) {
+                    cfnames.add(cfd.name);
+                }
+                updateCompletor(cfnames);
                 
             }
             catch (InvalidRequestException e)
@@ -232,14 +233,21 @@ public class CliMain
         {
             css_.err.println(ire.why);
             if (css_.debug)
-                ire.printStackTrace();
+                ire.printStackTrace(css_.err);
+            
+            // Abort a batch run when errors are encountered
+            if (css_.batch)
+                System.exit(4);
         }
         catch (Exception e)
         {
             css_.err.println("Exception " + e.getMessage());
             if (css_.debug)
-                e.printStackTrace();
-
+                e.printStackTrace(css_.err);
+            
+            // Abort a batch run when errors are encountered
+            if (css_.batch)
+                System.exit(8);
         }
     }
 
@@ -263,19 +271,27 @@ public class CliMain
         }
 
         ConsoleReader reader = new ConsoleReader();
-        reader.addCompletor(completer_);
-        reader.setBellEnabled(false);
-
-        String historyFile = System.getProperty("user.home") + File.separator + HISTORYFILE;
-
-        try
+        
+        if (!css_.batch)
         {
-            History history = new History(new File(historyFile));
-            reader.setHistory(history);
+            reader.addCompletor(completer_);
+            reader.setBellEnabled(false);
+            
+            String historyFile = System.getProperty("user.home") + File.separator + HISTORYFILE;
+
+            try
+            {
+                History history = new History(new File(historyFile));
+                reader.setHistory(history);
+            }
+            catch (IOException exp)
+            {
+                css_.err.printf("Unable to open %s for writing%n", historyFile);
+            }
         }
-        catch (IOException exp)
+        else
         {
-            css_.err.printf("Unable to open %s for writing%n", historyFile);
+            css_.out.close();
         }
 
         printBanner();

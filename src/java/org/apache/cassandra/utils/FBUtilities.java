@@ -41,13 +41,13 @@ import org.apache.commons.collections.iterators.CollatingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.sun.jna.Native;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IClock;
 import org.apache.cassandra.db.IClock.ClockRelationship;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -306,7 +306,8 @@ public class FBUtilities
 
     public static byte[] hexToBytes(String str)
     {
-        assert str.length() % 2 == 0;
+        if (str.length() % 2 == 1)
+            str = "0" + str;
         byte[] bytes = new byte[str.length()/2];
         for (int i = 0; i < bytes.length; i++)
         {
@@ -483,19 +484,6 @@ public class FBUtilities
         return Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
     }
 
-    /**
-     * Test if a particular bit is set using a bit mask.
-     *
-     * @param v the value in which a bit must be tested
-     * @param mask the bit mask use to select a bit of <code>v</code>
-     * @return true if the bit of <code>v</code> selected by <code>mask<code>
-     * is set, false otherwise.
-     */
-    public static boolean testBitUsingBitMask(int v, int mask)
-    {
-        return (v & mask) != 0;
-    }
-
     public static byte[] toByteArray(long n)
     {
         byte[] bytes = new byte[8];
@@ -522,9 +510,10 @@ public class FBUtilities
             props.load(in);
             return props.getProperty("CassandraVersion");
         }
-        catch (IOException ioe)
+        catch (Exception e)
         {
-            throw new IOError(ioe);
+            logger_.warn("Unable to load version.properties", e);
+            return "debug version";
         }
     }
 
@@ -554,35 +543,17 @@ public class FBUtilities
         }
     }
 
-    public static IPartitioner newPartitioner(String partitionerClassName)
+    public static IPartitioner newPartitioner(String partitionerClassName) throws ConfigurationException
     {
         if (!partitionerClassName.contains("."))
             partitionerClassName = "org.apache.cassandra.dht." + partitionerClassName;
-
-        try
-        {
-            Class cls = Class.forName(partitionerClassName);
-            return (IPartitioner) cls.getConstructor().newInstance();
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException("Invalid partitioner class " + partitionerClassName);
-        }
+        return FBUtilities.<IPartitioner>construct(partitionerClassName, "partitioner");
     }
 
     public static AbstractType getComparator(String compareWith) throws ConfigurationException
     {
         String className = compareWith.contains(".") ? compareWith : "org.apache.cassandra.db.marshal." + compareWith;
-        Class<? extends AbstractType> typeClass;
-        try
-        {
-            typeClass = (Class<? extends AbstractType>) Class.forName(className);
-        }
-        catch (ClassNotFoundException e)
-        {
-            throw new ConfigurationException("Unable to load class " + className);
-        }
-
+        Class<? extends AbstractType> typeClass = FBUtilities.<AbstractType>classForName(className, "abstract-type");
         try
         {
             Field field = typeClass.getDeclaredField("instance");
@@ -599,6 +570,90 @@ public class FBUtilities
             ConfigurationException ex = new ConfigurationException("Invalid comparator: must define a public static instance field.");
             ex.initCause(e);
             throw ex;
+        }
+    }
+
+    /**
+     * @return The Class for the given name.
+     * @param classname Fully qualified classname.
+     * @param readable Descriptive noun for the role the class plays.
+     * @throws ConfigurationException If the class cannot be found.
+     */
+    public static <T> Class<T> classForName(String classname, String readable) throws ConfigurationException
+    {
+        try
+        {
+            return (Class<T>)Class.forName(classname);
+        }
+        catch (ClassNotFoundException e)
+        {
+            throw new ConfigurationException(String.format("Unable to find %s class '%s': is the CLASSPATH set correctly?", readable, classname));
+        }
+    }
+
+    /**
+     * Constructs an instance of the given class, which must have a no-arg constructor.
+     * TODO: Similar method for our 'instance member' singleton pattern would be nice.
+     * @param classname Fully qualified classname.
+     * @param readable Descriptive noun for the role the class plays.
+     * @throws ConfigurationException If the class cannot be found.
+     */
+    public static <T> T construct(String classname, String readable) throws ConfigurationException
+    {
+        Class<T> cls = FBUtilities.<T>classForName(classname, readable);
+        try
+        {
+            Constructor ctor = cls.getConstructor();
+            return (T)ctor.newInstance();
+        }
+        catch (NoSuchMethodException e)
+        {
+            throw new ConfigurationException(String.format("No default constructor for %s class '%s'.", readable, classname));
+        }
+        catch (IllegalAccessException e)
+        {
+            throw new ConfigurationException(String.format("Default constructor for %s class '%s' is inaccessible.", readable, classname));
+        }
+        catch (InstantiationException e)
+        {
+            throw new ConfigurationException(String.format("Cannot use abstract class '%s' as %s.", classname, readable));
+        }
+        catch (InvocationTargetException e)
+        {
+            if (e.getCause() instanceof ConfigurationException)
+                throw (ConfigurationException)e.getCause();
+            throw new ConfigurationException(String.format("Error instantiating %s class '%s'.", readable, classname), e);
+        }
+    }
+
+    public static void tryMlockall()
+    {
+        int errno = Integer.MIN_VALUE;
+        try
+        {
+            int result = CLibrary.mlockall(CLibrary.MCL_CURRENT);
+            if (result != 0)
+                errno = Native.getLastError();
+        }
+        catch (UnsatisfiedLinkError e)
+        {
+            // this will have already been logged by CLibrary, no need to repeat it
+            return;
+        }
+
+        if (errno != Integer.MIN_VALUE)
+        {
+            if (errno == CLibrary.ENOMEM && System.getProperty("os.name").toLowerCase().contains("linux"))
+            {
+                logger_.warn("Unable to lock JVM memory (ENOMEM)."
+                             + " This can result in part of the JVM being swapped out, especially with mmapped I/O enabled."
+                             + " Increase RLIMIT_MEMLOCK or run Cassandra as root.");
+            }
+            else if (!System.getProperty("os.name").toLowerCase().contains("mac"))
+            {
+                // OS X allows mlockall to be called, but always returns an error
+                logger_.warn("Unknown mlockall error " + errno);
+            }
         }
     }
 }

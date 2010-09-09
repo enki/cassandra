@@ -1,4 +1,25 @@
 package org.apache.cassandra.config;
+/*
+ * 
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ * 
+ */
+
 
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -54,18 +75,18 @@ public class ColumnDefinition {
         return result;
     }
 
-    public org.apache.cassandra.avro.ColumnDef deflate()
+    public org.apache.cassandra.config.avro.ColumnDef deflate()
     {
-        org.apache.cassandra.avro.ColumnDef cd = new org.apache.cassandra.avro.ColumnDef();
+        org.apache.cassandra.config.avro.ColumnDef cd = new org.apache.cassandra.config.avro.ColumnDef();
         cd.name = ByteBuffer.wrap(name);
         cd.validation_class = new Utf8(validator.getClass().getName());
         cd.index_type = index_type == null ? null :
-            Enum.valueOf(org.apache.cassandra.avro.IndexType.class, index_type.name());
+            Enum.valueOf(org.apache.cassandra.config.avro.IndexType.class, index_type.name());
         cd.index_name = index_name == null ? null : new Utf8(index_name);
         return cd;
     }
 
-    public static ColumnDefinition inflate(org.apache.cassandra.avro.ColumnDef cd) throws ConfigurationException
+    public static ColumnDefinition inflate(org.apache.cassandra.config.avro.ColumnDef cd)
     {
         byte[] name = new byte[cd.name.remaining()];
         cd.name.get(name, 0, name.length);
@@ -86,6 +107,14 @@ public class ColumnDefinition {
     {
         return new ColumnDefinition(cd.name, cd.validation_class, cd.index_type, cd.index_name);
     }
+    
+    public static ColumnDefinition fromColumnDef(org.apache.cassandra.avro.ColumnDef cd) throws ConfigurationException
+    {
+        return new ColumnDefinition(cd.name.array(),
+                cd.validation_class.toString(),
+                IndexType.valueOf(cd.index_type == null ? org.apache.cassandra.avro.CassandraServer.D_COLDEF_INDEXTYPE : cd.index_type.name()),
+                cd.index_name == null ? org.apache.cassandra.avro.CassandraServer.D_COLDEF_INDEXNAME : cd.index_name.toString());
+    }
 
     public static Map<byte[], ColumnDefinition> fromColumnDef(List<ColumnDef> thriftDefs) throws ConfigurationException
     {
@@ -96,6 +125,20 @@ public class ColumnDefinition {
         for (ColumnDef thriftColumnDef : thriftDefs)
         {
             cds.put(thriftColumnDef.name, fromColumnDef(thriftColumnDef));
+        }
+
+        return Collections.unmodifiableMap(cds);
+    }
+    
+    public static Map<byte[], ColumnDefinition> fromColumnDefs(Iterable<org.apache.cassandra.avro.ColumnDef> avroDefs) throws ConfigurationException
+    {
+        if (avroDefs == null)
+            return Collections.emptyMap();
+
+        Map<byte[], ColumnDefinition> cds = new TreeMap<byte[], ColumnDefinition>(FBUtilities.byteArrayComparator);
+        for (org.apache.cassandra.avro.ColumnDef avroColumnDef : avroDefs)
+        {
+            cds.put(avroColumnDef.name.array(), fromColumnDef(avroColumnDef));
         }
 
         return Collections.unmodifiableMap(cds);

@@ -26,7 +26,7 @@ import java.io.*;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.db.filter.IColumnIterator;
+import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 
 public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterator>, IColumnIterator
@@ -66,7 +66,7 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
             file.seek(this.dataStart);
             IndexHelper.skipBloomFilter(file);
             IndexHelper.skipIndex(file);
-            columnFamily = sstable.makeColumnFamily();
+            columnFamily = sstable.createColumnFamily();
             ColumnFamily.serializer().deserializeFromSSTableNoColumns(columnFamily, file);
             columnCount = file.readInt();
             columnPosition = file.getFilePointer();

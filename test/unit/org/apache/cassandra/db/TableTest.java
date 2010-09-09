@@ -18,16 +18,15 @@
 
 package org.apache.cassandra.db;
 
+import java.nio.ByteBuffer;
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
 import java.util.*;
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
+import java.util.concurrent.ExecutionException;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.Predicate;
-import org.apache.commons.collections.PredicateUtils;
+
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.ArrayUtils;
 import org.junit.Test;
@@ -40,7 +39,6 @@ import static org.apache.cassandra.Util.column;
 import static org.apache.cassandra.Util.getBytes;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -81,7 +79,7 @@ public class TableTest extends CleanupHelper
                 cf = cfStore.getColumnFamily(QueryFilter.getNamesFilter(TEST_KEY, new QueryPath("Standard3"), new TreeSet<byte[]>()));
                 assertColumns(cf);
 
-                cf = cfStore.getColumnFamily(QueryFilter.getSliceFilter(TEST_KEY, new QueryPath("Standard3"), ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, null, false, 0));
+                cf = cfStore.getColumnFamily(QueryFilter.getSliceFilter(TEST_KEY, new QueryPath("Standard3"), ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, false, 0));
                 assertColumns(cf);
 
                 cf = cfStore.getColumnFamily(QueryFilter.getNamesFilter(TEST_KEY, new QueryPath("Standard3"), "col99".getBytes()));
@@ -226,6 +224,38 @@ public class TableTest extends CleanupHelper
         };
 
         reTest(table.getColumnFamilyStore("Standard1"), verify);
+    }
+
+    @Test
+    public void testReversedWithFlushing() throws IOException, ExecutionException, InterruptedException
+    {
+        final Table table = Table.open("Keyspace1");
+        final ColumnFamilyStore cfs = table.getColumnFamilyStore("StandardLong1");
+        final DecoratedKey ROW = Util.dk("row4");
+
+        for (int i = 0; i < 10; i++)
+        {
+            RowMutation rm = new RowMutation("Keyspace1", ROW.key);
+            ColumnFamily cf = ColumnFamily.create("Keyspace1", "StandardLong1");
+            cf.addColumn(new Column(FBUtilities.toByteArray((long)i), ArrayUtils.EMPTY_BYTE_ARRAY, new TimestampClock(0)));
+            rm.add(cf);
+            rm.apply();
+        }
+
+        cfs.forceBlockingFlush();
+
+        for (int i = 10; i < 20; i++)
+        {
+            RowMutation rm = new RowMutation("Keyspace1", ROW.key);
+            ColumnFamily cf = ColumnFamily.create("Keyspace1", "StandardLong1");
+            cf.addColumn(new Column(FBUtilities.toByteArray((long)i), ArrayUtils.EMPTY_BYTE_ARRAY, new TimestampClock(0)));
+            rm.add(cf);
+            rm.apply();
+
+            cf = cfs.getColumnFamily(ROW, new QueryPath("StandardLong1"), ArrayUtils.EMPTY_BYTE_ARRAY, ArrayUtils.EMPTY_BYTE_ARRAY, true, 1);
+            assertEquals(1, cf.getColumnNames().size());
+            assertEquals(i, ByteBuffer.wrap(cf.getColumnNames().iterator().next()).getLong());
+        }
     }
 
     private void validateGetSliceNoMatch(Table table) throws IOException
@@ -473,12 +503,10 @@ public class TableTest extends CleanupHelper
         }
 
         assert Arrays.equals(la, columnNames1)
-                : String.format("Columns [%s(as string: %s)])] is not expected [%s] (bitmasks %s)",
+                : String.format("Columns [%s(as string: %s)])] is not expected [%s]",
                                 ((cf == null) ? "" : cf.getComparator().getColumnsString(columns)),
                                 lasb.toString(),
-                                StringUtils.join(columnNames1, ","),
-                                SliceFromReadCommand.getBitmaskDescription(null));
-
+                                StringUtils.join(columnNames1, ","));
     }
 
 }

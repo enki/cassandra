@@ -36,6 +36,7 @@
 
 package org.apache.cassandra.db;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 
 import org.apache.cassandra.dht.AbstractBounds;
@@ -90,7 +91,6 @@ public class RangeSliceCommand
         DataOutputBuffer dob = new DataOutputBuffer();
         serializer.serialize(this, dob);
         return new Message(FBUtilities.getLocalAddress(),
-                           StageManager.READ_STAGE,
                            StorageService.Verb.RANGE_SLICE,
                            Arrays.copyOf(dob.getData(), dob.getLength()));
     }

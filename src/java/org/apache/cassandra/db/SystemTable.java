@@ -51,7 +51,7 @@ public class SystemTable
     public static final String STATUS_CF = "LocationInfo"; // keep the old CF string for backwards-compatibility
     private static final byte[] LOCATION_KEY = "L".getBytes(UTF_8);
     private static final byte[] BOOTSTRAP_KEY = "Bootstrap".getBytes(UTF_8);
-    private static final byte[] GRAVEYARD_KEY = "Graveyard".getBytes(UTF_8);
+    private static final byte[] COOKIE_KEY = "Cookies".getBytes(UTF_8);
     private static final byte[] BOOTSTRAP = "B".getBytes(UTF_8);
     private static final byte[] TOKEN = "Token".getBytes(UTF_8);
     private static final byte[] GENERATION = "Generation".getBytes(UTF_8);
@@ -62,6 +62,25 @@ public class SystemTable
     private static DecoratedKey decorate(byte[] key)
     {
         return StorageService.getPartitioner().decorateKey(key);
+    }
+    
+    /* if hints become incompatible across versions of cassandra, that logic (and associated purging) is managed here. */
+    public static void purgeIncompatibleHints() throws IOException
+    {
+        // 0.6->0.7
+        final byte[] hintsPurged6to7 = "Hints purged as part of upgrading from 0.6.x to 0.7".getBytes();
+        Table table = Table.open(Table.SYSTEM_TABLE);
+        QueryFilter dotSeven = QueryFilter.getNamesFilter(decorate(COOKIE_KEY), new QueryPath(STATUS_CF), hintsPurged6to7);
+        ColumnFamily cf = table.getColumnFamilyStore(STATUS_CF).getColumnFamily(dotSeven);
+        if (cf == null)
+        {
+            // upgrading from 0.6 to 0.7.
+            logger.info("Upgrading to 0.7. Purging hints if there are any. Old hints will be snapshotted.");
+            new Truncation(Table.SYSTEM_TABLE, HintedHandOffManager.HINTS_CF).apply();
+            RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, COOKIE_KEY);
+            rm.add(new QueryPath(STATUS_CF, null, hintsPurged6to7), "oh yes, it they were purged.".getBytes(), new TimestampClock(System.currentTimeMillis()));
+            rm.apply();
+        }
     }
 
     /**
@@ -306,38 +325,6 @@ public class SystemTable
         ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
         cf.addColumn(new Column(BOOTSTRAP, new byte[] { (byte) (isBootstrapped ? 1 : 0) }, new TimestampClock(System.currentTimeMillis())));
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, BOOTSTRAP_KEY);
-        rm.add(cf);
-        try
-        {
-            rm.apply();
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public static ColumnFamily getDroppedCFs() throws IOException
-    {
-        ColumnFamilyStore cfs = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(SystemTable.STATUS_CF);
-        return cfs.getColumnFamily(QueryFilter.getSliceFilter(decorate(GRAVEYARD_KEY), new QueryPath(STATUS_CF), "".getBytes(), "".getBytes(), null, false, 100));
-    }
-    
-    public static void deleteDroppedCfMarkers(Collection<IColumn> cols) throws IOException
-    {
-        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, GRAVEYARD_KEY);
-        long now = System.currentTimeMillis();
-        for (IColumn col : cols)
-            rm.delete(new QueryPath(STATUS_CF, null, col.name()), new TimestampClock(now));
-        rm.apply();
-    }
-    
-    /** when a cf is dropped, it needs to be marked so its files get deleted at some point. */
-    public static void markForRemoval(CFMetaData cfm)
-    {
-        ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
-        cf.addColumn(new Column((cfm.tableName + "-" + cfm.cfName + "-" + cfm.cfId).getBytes(), ArrayUtils.EMPTY_BYTE_ARRAY, new TimestampClock(System.currentTimeMillis())));
-        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, GRAVEYARD_KEY);
         rm.add(cf);
         try
         {

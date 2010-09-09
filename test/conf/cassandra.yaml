@@ -26,7 +26,7 @@ request_scheduler: org.apache.cassandra.scheduler.RoundRobinScheduler
 request_scheduler_id: keyspace
 keyspaces:
     - name: Keyspace1
-      replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy
+      replica_placement_strategy: org.apache.cassandra.locator.SimpleStrategy
       replication_factor: 1
       column_families:
         - name: Standard1
@@ -48,6 +48,9 @@ keyspaces:
 
         - name: StandardLong2
           compare_with: LongType
+
+        - name: StandardInteger1
+          compare_with: IntegerType
 
         - name: Super1
           column_type: Super
@@ -74,10 +77,9 @@ keyspaces:
               index_type: KEYS
 
     - name: Keyspace2
-      replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy
+      replica_placement_strategy: org.apache.cassandra.locator.SimpleStrategy
       replication_factor: 1
       column_families:
-
         - name: Standard1
 
         - name: Standard3
@@ -89,15 +91,21 @@ keyspaces:
           column_type: Super
           compare_subcolumns_with: TimeUUIDType
 
+        - name: Indexed1
+          column_metadata:
+            - name: birthdate
+              validator_class: LongType
+              index_type: KEYS
+
     - name: Keyspace3
-      replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy
+      replica_placement_strategy: org.apache.cassandra.locator.SimpleStrategy
       replication_factor: 5
       column_families:
 
         - name: Standard1
 
     - name: Keyspace4
-      replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy
+      replica_placement_strategy: org.apache.cassandra.locator.SimpleStrategy
       replication_factor: 3
       column_families:
 
@@ -113,7 +121,7 @@ keyspaces:
           compare_subcolumns_with: TimeUUIDType
 
     - name: Keyspace5
-      replica_placement_strategy: org.apache.cassandra.locator.RackUnawareStrategy
+      replica_placement_strategy: org.apache.cassandra.locator.SimpleStrategy
       replication_factor: 2
       column_families:
 

@@ -78,7 +78,8 @@ parser.add_option('-p', '--port', type="int", default=9160, dest="port",
 parser.add_option('-m', '--unframed', action="store_true", dest="unframed",
                   help="use unframed transport")
 parser.add_option('-o', '--operation', type="choice", dest="operation",
-                  default="insert", choices=('insert', 'read', 'rangeslice'),
+                  default="insert", choices=('insert', 'read', 'rangeslice',
+                  'multiget'),
                   help="operation to perform")
 parser.add_option('-u', '--supercolumns', type="int", dest="supers", default=1,
                   help="number of super columns per key")
@@ -151,9 +152,9 @@ def get_client(host='127.0.0.1', port=9160):
     return client
 
 def make_keyspaces():
-    cfams = [CfDef('Keyspace1', 'Standard1'),
-             CfDef('Keyspace1', 'Super1', 'Super')]
-    keyspace = KsDef('Keyspace1', 'org.apache.cassandra.locator.RackUnawareStrategy', options.replication, cfams)
+    cfams = [CfDef(keyspace='Keyspace1', name='Standard1'),
+             CfDef(keyspace='Keyspace1', name='Super1', column_type='Super')]
+    keyspace = KsDef(name='Keyspace1', strategy_class='org.apache.cassandra.locator.SimpleStrategy', replication_factor=options.replication, cf_defs=cfams)
     client = get_client(nodes[0], options.port)
     client.transport.open()
     try:
@@ -187,7 +188,7 @@ class Operation(Thread):
 class Inserter(Operation):
     def run(self):
         data = md5(str(get_ident())).hexdigest()
-        columns = [Column('C' + str(j), data, Clock(0)) for j in xrange(columns_per_key)]
+        columns = [Column('C' + str(j), data, Clock(time.time() * 1000000)) for j in xrange(columns_per_key)]
         fmt = '%0' + str(len(str(total_keys))) + 'd'
         if 'super' == options.cftype:
             supers = [SuperColumn('S' + str(j), columns) for j in xrange(supers_per_key)]
@@ -266,7 +267,7 @@ class RangeSlicer(Operation):
                 keyrange = KeyRange(fmt % current, fmt % last, count = options.rangecount)
                 res = []
                 for j in xrange(supers_per_key):
-                    parent = ColumnParent('Super1', chr(ord('A') + j)) 
+                    parent = ColumnParent('Super1', 'S' + str(j)) 
                     begin = time.time()
                     try:
                         res = self.cclient.get_range_slices(parent, p, keyrange, consistency)
@@ -308,6 +309,46 @@ class RangeSlicer(Operation):
                 self.keycounts[self.idx] += len(r)
 
 
+class MultiGetter(Operation):
+    def run(self):
+        p = SlicePredicate(slice_range=SliceRange('', '', False, columns_per_key))
+        if 'super' == options.cftype:
+            keys = [key_generator() for i in xrange(keys_per_thread)]
+            for j in xrange(supers_per_key):
+                parent = ColumnParent('Super1', 'S' + str(j))
+                start = time.time()
+                try:
+                    r = self.cclient.multiget_slice(keys, parent, p, consistency)
+                    if not r: raise RuntimeError("Keys %s not found" % keys)
+                except KeyboardInterrupt:
+                    raise
+                except Exception, e:
+                    if options.ignore:
+                        print e
+                    else:
+                        raise
+                self.latencies[self.idx] += time.time() - start
+                self.opcounts[self.idx] += 1
+                self.keycounts[self.idx] += len(keys)
+        else:
+            parent = ColumnParent('Standard1')
+            keys = [key_generator() for i in xrange(keys_per_thread)]
+            start = time.time()
+            try:
+                r = self.cclient.multiget_slice(keys, parent, p, consistency)
+                if not r: raise RuntimeError("Keys %s not found" % keys)
+            except KeyboardInterrupt:
+                raise
+            except Exception, e:
+                if options.ignore:
+                    print e
+                else:
+                    raise
+            self.latencies[self.idx] += time.time() - start
+            self.opcounts[self.idx] += 1
+            self.keycounts[self.idx] += len(keys)
+
+
 class OperationFactory:
     @staticmethod
     def create(type, i, opcounts, keycounts, latencies):
@@ -317,6 +358,8 @@ class OperationFactory:
             return Inserter(i, opcounts, keycounts, latencies)
         elif type == 'rangeslice':
             return RangeSlicer(i, opcounts, keycounts, latencies)
+        elif type == 'multiget':
+            return MultiGetter(i, opcounts, keycounts, latencies)
         else:
             raise RuntimeError, 'Unsupported op!'
 
@@ -376,6 +419,10 @@ class Stress(object):
         
     def rangeslice(self):
         threads = self.create_threads('rangeslice')
+        self.run_test(options.file,threads);
+
+    def multiget(self):
+        threads = self.create_threads('multiget')
         self.run_test(options.file,threads);
 
 stresser = Stress()

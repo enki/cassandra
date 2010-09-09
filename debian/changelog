@@ -1,3 +1,15 @@
+cassandra (0.7.0~beta1) unstable; urgency=low
+
+  * New beta release.
+
+ -- Eric Evans <eevans@apache.org>  Tue, 10 Aug 2010 09:20:17 -0700
+
+cassandra (0.6.4) unstable; urgency=low
+
+  * New stable point release.
+
+ -- Eric Evans <eevans@apache.org>  Tue, 27 Jul 2010 15:47:09 -0500
+
 cassandra (0.6.3) unstable; urgency=low
 
   * New stable point release.

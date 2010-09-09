@@ -31,6 +31,7 @@ import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.TimestampClock;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
@@ -159,7 +160,7 @@ public class SSTableExport
     {
         IPartitioner partitioner = StorageService.getPartitioner();
         Descriptor desc = Descriptor.fromFilename(ssTableFile);
-        BufferedRandomAccessFile input = new BufferedRandomAccessFile(SSTable.indexFilename(ssTableFile), "r");
+        BufferedRandomAccessFile input = new BufferedRandomAccessFile(desc.filenameFor(Component.PRIMARY_INDEX), "r");
         while (!input.isEOF())
         {
             DecoratedKey decoratedKey = SSTableReader.decodeKey(partitioner,
@@ -197,7 +198,7 @@ public class SSTableExport
     public static void export(String ssTableFile, PrintStream outs, String[] keys, String[] excludes)
     throws IOException
     {
-        SSTableReader reader = SSTableReader.open(ssTableFile);
+        SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(ssTableFile));
         SSTableScanner scanner = reader.getScanner(INPUT_FILE_BUFFER_SIZE);
         IPartitioner<?> partitioner = DatabaseDescriptor.getPartitioner();    
         Set<String> excludeSet = new HashSet();
@@ -309,7 +310,7 @@ public class SSTableExport
      */
     public static void export(String ssTableFile, PrintStream outs, String[] excludes) throws IOException
     {
-        SSTableReader reader = SSTableReader.open(ssTableFile);
+        SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(ssTableFile));
         export(reader, outs, excludes);
     }
     

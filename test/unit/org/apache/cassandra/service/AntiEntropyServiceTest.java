@@ -21,7 +21,6 @@ package org.apache.cassandra.service;
 import java.net.InetAddress;
 import java.util.*;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadPoolExecutor;
 
@@ -32,6 +31,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
@@ -71,7 +71,7 @@ public class AntiEntropyServiceTest extends CleanupHelper
         // generate a fake endpoint for which we can spoof receiving/sending trees
         REMOTE = InetAddress.getByName("127.0.0.2");
         store = Table.open(tablename).getColumnFamilyStores().iterator().next();
-        cfname = store.columnFamily_;
+        cfname = store.columnFamily;
     }
 
     @Before
@@ -188,9 +188,9 @@ public class AntiEntropyServiceTest extends CleanupHelper
         addTokens(1 + (2 * DatabaseDescriptor.getReplicationFactor(tablename)));
         AbstractReplicationStrategy ars = StorageService.instance.getReplicationStrategy(tablename);
         Set<InetAddress> expected = new HashSet<InetAddress>();
-        for (Range replicaRange : ars.getAddressRanges(tablename).get(FBUtilities.getLocalAddress()))
+        for (Range replicaRange : ars.getAddressRanges().get(FBUtilities.getLocalAddress()))
         {
-            expected.addAll(ars.getRangeAddresses(tmd, tablename).get(replicaRange));
+            expected.addAll(ars.getRangeAddresses(tmd).get(replicaRange));
         }
         expected.remove(FBUtilities.getLocalAddress());
         assertEquals(expected, AntiEntropyService.getNeighbors(tablename));
@@ -241,7 +241,7 @@ public class AntiEntropyServiceTest extends CleanupHelper
 
     void flushAES() throws Exception
     {
-        final ThreadPoolExecutor stage = StageManager.getStage(StageManager.AE_SERVICE_STAGE);
+        final ThreadPoolExecutor stage = StageManager.getStage(Stage.AE_SERVICE);
         final Callable noop = new Callable<Object>()
         {
             public Boolean call()

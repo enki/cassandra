@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db.commitlog;
 
+import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -25,6 +26,7 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.RowMutation;
 import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.UnserializableColumnFamilyException;
 import org.apache.cassandra.io.DeletionService;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 import org.apache.cassandra.io.util.FileUtils;
@@ -174,7 +176,8 @@ public class CommitLog
         for (File f : files)
         {
             FileUtils.delete(CommitLogHeader.getHeaderPathFromSegmentPath(f.getAbsolutePath())); // may not actually exist
-            FileUtils.deleteWithConfirm(f);
+            if (!f.delete())
+                logger.error("Unable to remove " + f + "; you should remove it manually or next restart will replay it again (harmless, but time-consuming)");
         }
         logger.info("Log replay complete");
     }
@@ -184,119 +187,147 @@ public class CommitLog
         Set<Table> tablesRecovered = new HashSet<Table>();
         List<Future<?>> futures = new ArrayList<Future<?>>();
         byte[] bytes = new byte[4096];
+        Map<Integer, AtomicInteger> invalidMutations = new HashMap<Integer, AtomicInteger>();
 
         for (File file : clogs)
         {
-            CommitLogHeader clHeader = null;
             int bufferSize = (int)Math.min(file.length(), 32 * 1024 * 1024);
             BufferedRandomAccessFile reader = new BufferedRandomAccessFile(file.getAbsolutePath(), "r", bufferSize);
 
-            int replayPosition = 0;
-            String headerPath = CommitLogHeader.getHeaderPathFromSegmentPath(file.getAbsolutePath());
             try
             {
-                clHeader = CommitLogHeader.readCommitLogHeader(headerPath);
-                replayPosition = clHeader.getReplayPosition();
-            }
-            catch (IOException ioe)
-            {
-                logger.info(headerPath + " incomplete, missing or corrupt.  Everything is ok, don't panic.  CommitLog will be replayed from the beginning");
-                logger.debug("exception was", ioe);
-            }
-            if (replayPosition < 0)
-            {
-                logger.debug("skipping replay of fully-flushed {}", file);
-                continue;
-            }
-            reader.seek(replayPosition);
-
-            if (logger.isDebugEnabled())
-                logger.debug("Replaying " + file + " starting at " + reader.getFilePointer());
-
-            /* read the logs populate RowMutation and apply */
-            while (!reader.isEOF())
-            {
-                if (logger.isDebugEnabled())
-                    logger.debug("Reading mutation at " + reader.getFilePointer());
-
-                long claimedCRC32;
-
-                Checksum checksum = new CRC32();
-                int serializedSize;
+                CommitLogHeader clHeader = null;
+                int replayPosition = 0;
+                String headerPath = CommitLogHeader.getHeaderPathFromSegmentPath(file.getAbsolutePath());
                 try
                 {
-                    // any of the reads may hit EOF
-                    serializedSize = reader.readInt();
-                    long claimedSizeChecksum = reader.readLong();
-                    checksum.update(serializedSize);
-                    if (checksum.getValue() != claimedSizeChecksum || serializedSize <= 0)
-                        break; // entry wasn't synced correctly/fully.  that's ok.
-
-                    if (serializedSize > bytes.length)
-                        bytes = new byte[(int) (1.2 * serializedSize)];
-                    reader.readFully(bytes, 0, serializedSize);
-                    claimedCRC32 = reader.readLong();
+                    clHeader = CommitLogHeader.readCommitLogHeader(headerPath);
+                    replayPosition = clHeader.getReplayPosition();
                 }
-                catch(EOFException eof)
+                catch (IOException ioe)
                 {
-                    break; // last CL entry didn't get completely written.  that's ok.
+                    logger.info(headerPath + " incomplete, missing or corrupt.  Everything is ok, don't panic.  CommitLog will be replayed from the beginning");
+                    logger.debug("exception was", ioe);
                 }
-
-                checksum.update(bytes, 0, serializedSize);
-                if (claimedCRC32 != checksum.getValue())
+                if (replayPosition < 0)
                 {
-                    // this entry must not have been fsynced.  probably the rest is bad too,
-                    // but just in case there is no harm in trying them (since we still read on an entry boundary)
+                    logger.debug("skipping replay of fully-flushed {}", file);
                     continue;
                 }
+                reader.seek(replayPosition);
 
-                /* deserialize the commit log entry */
-                ByteArrayInputStream bufIn = new ByteArrayInputStream(bytes, 0, serializedSize);
-                final RowMutation rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn));
                 if (logger.isDebugEnabled())
-                    logger.debug(String.format("replaying mutation for %s.%s: %s",
-                                                rm.getTable(),
-                                                rm.key(),
-                                                "{" + StringUtils.join(rm.getColumnFamilies(), ", ") + "}"));
-                final Table table = Table.open(rm.getTable());
-                tablesRecovered.add(table);
-                final Collection<ColumnFamily> columnFamilies = new ArrayList<ColumnFamily>(rm.getColumnFamilies());
-                final long entryLocation = reader.getFilePointer();
-                final CommitLogHeader finalHeader = clHeader;
-                Runnable runnable = new WrappedRunnable()
+                    logger.debug("Replaying " + file + " starting at " + reader.getFilePointer());
+
+                /* read the logs populate RowMutation and apply */
+                while (!reader.isEOF())
                 {
-                    public void runMayThrow() throws IOException
+                    if (logger.isDebugEnabled())
+                        logger.debug("Reading mutation at " + reader.getFilePointer());
+
+                    long claimedCRC32;
+
+                    Checksum checksum = new CRC32();
+                    int serializedSize;
+                    try
                     {
-                        RowMutation newRm = new RowMutation(rm.getTable(), rm.key());
-                        
-                        // Rebuild the row mutation, omitting column families that a) have already been flushed,
-                        // b) are part of a cf that was dropped. Keep in mind that the cf.name() is suspect. do every
-                        // thing based on the cfid instead.
-                        for (ColumnFamily columnFamily : columnFamilies)
-                        {
-                            if (CFMetaData.getCF(columnFamily.id()) == null)
-                                // null means the cf has been dropped
-                                continue;
-                            
-                            if (finalHeader == null || (finalHeader.isDirty(columnFamily.id()) && entryLocation >= finalHeader.getPosition(columnFamily.id())))
-                                newRm.add(columnFamily);
-                        }
-                        if (!newRm.isEmpty())
-                        {
-                            Table.open(newRm.getTable()).apply(newRm, null, false);
-                        }
+                        // any of the reads may hit EOF
+                        serializedSize = reader.readInt();
+                        long claimedSizeChecksum = reader.readLong();
+                        checksum.update(serializedSize);
+                        if (checksum.getValue() != claimedSizeChecksum || serializedSize <= 0)
+                            break; // entry wasn't synced correctly/fully.  that's ok.
+
+                        if (serializedSize > bytes.length)
+                            bytes = new byte[(int) (1.2 * serializedSize)];
+                        reader.readFully(bytes, 0, serializedSize);
+                        claimedCRC32 = reader.readLong();
                     }
-                };
-                futures.add(StageManager.getStage(StageManager.MUTATION_STAGE).submit(runnable));
-                if (futures.size() > MAX_OUTSTANDING_REPLAY_COUNT)
-                {
-                    FBUtilities.waitOnFutures(futures);
-                    futures.clear();
+                    catch(EOFException eof)
+                    {
+                        break; // last CL entry didn't get completely written.  that's ok.
+                    }
+
+                    checksum.update(bytes, 0, serializedSize);
+                    if (claimedCRC32 != checksum.getValue())
+                    {
+                        // this entry must not have been fsynced.  probably the rest is bad too,
+                        // but just in case there is no harm in trying them (since we still read on an entry boundary)
+                        continue;
+                    }
+
+                    /* deserialize the commit log entry */
+                    ByteArrayInputStream bufIn = new ByteArrayInputStream(bytes, 0, serializedSize);
+                    RowMutation rm = null;
+                    try
+                    {
+                        rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn));
+                    }
+                    catch (UnserializableColumnFamilyException ex)
+                    {
+                        AtomicInteger i = invalidMutations.get(ex.cfId);
+                        if (i == null)
+                        {
+                            i = new AtomicInteger(1);
+                            invalidMutations.put(ex.cfId, i);
+                        }
+                        else
+                            i.incrementAndGet();
+                        continue;
+                    }
+                    
+                    if (logger.isDebugEnabled())
+                        logger.debug(String.format("replaying mutation for %s.%s: %s",
+                                                    rm.getTable(),
+                                                    rm.key(),
+                                                    "{" + StringUtils.join(rm.getColumnFamilies(), ", ") + "}"));
+                    final Table table = Table.open(rm.getTable());
+                    tablesRecovered.add(table);
+                    final Collection<ColumnFamily> columnFamilies = new ArrayList<ColumnFamily>(rm.getColumnFamilies());
+                    final long entryLocation = reader.getFilePointer();
+                    final CommitLogHeader finalHeader = clHeader;
+                    final RowMutation frm = rm;
+                    Runnable runnable = new WrappedRunnable()
+                    {
+                        public void runMayThrow() throws IOException
+                        {
+                            RowMutation newRm = new RowMutation(frm.getTable(), frm.key());
+
+                            // Rebuild the row mutation, omitting column families that a) have already been flushed,
+                            // b) are part of a cf that was dropped. Keep in mind that the cf.name() is suspect. do every
+                            // thing based on the cfid instead.
+                            for (ColumnFamily columnFamily : columnFamilies)
+                            {
+                                if (CFMetaData.getCF(columnFamily.id()) == null)
+                                    // null means the cf has been dropped
+                                    continue;
+
+                                if (finalHeader == null || (finalHeader.isDirty(columnFamily.id()) && entryLocation >= finalHeader.getPosition(columnFamily.id())))
+                                    newRm.add(columnFamily);
+                            }
+                            if (!newRm.isEmpty())
+                            {
+                                Table.open(newRm.getTable()).apply(newRm, null, false);
+                            }
+                        }
+                    };
+                    futures.add(StageManager.getStage(Stage.MUTATION).submit(runnable));
+                    if (futures.size() > MAX_OUTSTANDING_REPLAY_COUNT)
+                    {
+                        FBUtilities.waitOnFutures(futures);
+                        futures.clear();
+                    }
                 }
             }
-            reader.close();
-            logger.info("Finished reading " + file);
+            finally
+            {
+                reader.close();
+                logger.info("Finished reading " + file);
+            }
         }
+        
+        for (Map.Entry<Integer, AtomicInteger> entry : invalidMutations.entrySet())
+            logger.info(String.format("Skipped %d mutations from unknown (probably removed) CF with id %d", entry.getValue().intValue(), entry.getKey()));
 
         // wait for all the writes to finish on the mutation stage
         FBUtilities.waitOnFutures(futures);
@@ -441,31 +472,6 @@ public class CommitLog
         }
     }
     
-    public void forceNewSegment()
-    {
-        Callable task = new Callable()
-        {
-            public Object call() throws Exception
-            {
-                sync();
-                segments.add(new CommitLogSegment());
-                return null;
-            }
-        };
-        try
-        {
-            executor.submit(task).get();
-        }
-        catch (InterruptedException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
-    }
-
     void sync() throws IOException
     {
         currentSegment().sync();

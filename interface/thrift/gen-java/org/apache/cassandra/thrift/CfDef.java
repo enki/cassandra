@@ -63,6 +63,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   private static final TField READ_REPAIR_CHANCE_FIELD_DESC = new TField("read_repair_chance", TType.DOUBLE, (short)12);
   private static final TField COLUMN_METADATA_FIELD_DESC = new TField("column_metadata", TType.LIST, (short)13);
   private static final TField GC_GRACE_SECONDS_FIELD_DESC = new TField("gc_grace_seconds", TType.I32, (short)14);
+  private static final TField DEFAULT_VALIDATION_CLASS_FIELD_DESC = new TField("default_validation_class", TType.STRING, (short)15);
+  private static final TField ID_FIELD_DESC = new TField("id", TType.I32, (short)16);
 
   public String keyspace;
   public String name;
@@ -78,6 +80,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   public double read_repair_chance;
   public List<ColumnDef> column_metadata;
   public int gc_grace_seconds;
+  public String default_validation_class;
+  public int id;
 
   /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
   public enum _Fields implements TFieldIdEnum {
@@ -94,7 +98,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     KEY_CACHE_SIZE((short)11, "key_cache_size"),
     READ_REPAIR_CHANCE((short)12, "read_repair_chance"),
     COLUMN_METADATA((short)13, "column_metadata"),
-    GC_GRACE_SECONDS((short)14, "gc_grace_seconds");
+    GC_GRACE_SECONDS((short)14, "gc_grace_seconds"),
+    DEFAULT_VALIDATION_CLASS((short)15, "default_validation_class"),
+    ID((short)16, "id");
 
     private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
 
@@ -137,6 +143,10 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
           return COLUMN_METADATA;
         case 14: // GC_GRACE_SECONDS
           return GC_GRACE_SECONDS;
+        case 15: // DEFAULT_VALIDATION_CLASS
+          return DEFAULT_VALIDATION_CLASS;
+        case 16: // ID
+          return ID;
         default:
           return null;
       }
@@ -182,7 +192,8 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
   private static final int __KEY_CACHE_SIZE_ISSET_ID = 2;
   private static final int __READ_REPAIR_CHANCE_ISSET_ID = 3;
   private static final int __GC_GRACE_SECONDS_ISSET_ID = 4;
-  private BitSet __isset_bit_vector = new BitSet(5);
+  private static final int __ID_ISSET_ID = 5;
+  private BitSet __isset_bit_vector = new BitSet(6);
 
   public static final Map<_Fields, FieldMetaData> metaDataMap;
   static {
@@ -215,6 +226,10 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         new ListMetaData(TType.LIST, 
             new StructMetaData(TType.STRUCT, ColumnDef.class))));
     tmpMap.put(_Fields.GC_GRACE_SECONDS, new FieldMetaData("gc_grace_seconds", TFieldRequirementType.OPTIONAL, 
+        new FieldValueMetaData(TType.I32)));
+    tmpMap.put(_Fields.DEFAULT_VALIDATION_CLASS, new FieldMetaData("default_validation_class", TFieldRequirementType.OPTIONAL, 
+        new FieldValueMetaData(TType.STRING)));
+    tmpMap.put(_Fields.ID, new FieldMetaData("id", TFieldRequirementType.OPTIONAL, 
         new FieldValueMetaData(TType.I32)));
     metaDataMap = Collections.unmodifiableMap(tmpMap);
     FieldMetaData.addStructMetaDataMap(CfDef.class, metaDataMap);
@@ -294,6 +309,10 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       this.column_metadata = __this__column_metadata;
     }
     this.gc_grace_seconds = other.gc_grace_seconds;
+    if (other.isSetDefault_validation_class()) {
+      this.default_validation_class = other.default_validation_class;
+    }
+    this.id = other.id;
   }
 
   public CfDef deepCopy() {
@@ -651,6 +670,53 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     __isset_bit_vector.set(__GC_GRACE_SECONDS_ISSET_ID, value);
   }
 
+  public String getDefault_validation_class() {
+    return this.default_validation_class;
+  }
+
+  public CfDef setDefault_validation_class(String default_validation_class) {
+    this.default_validation_class = default_validation_class;
+    return this;
+  }
+
+  public void unsetDefault_validation_class() {
+    this.default_validation_class = null;
+  }
+
+  /** Returns true if field default_validation_class is set (has been asigned a value) and false otherwise */
+  public boolean isSetDefault_validation_class() {
+    return this.default_validation_class != null;
+  }
+
+  public void setDefault_validation_classIsSet(boolean value) {
+    if (!value) {
+      this.default_validation_class = null;
+    }
+  }
+
+  public int getId() {
+    return this.id;
+  }
+
+  public CfDef setId(int id) {
+    this.id = id;
+    setIdIsSet(true);
+    return this;
+  }
+
+  public void unsetId() {
+    __isset_bit_vector.clear(__ID_ISSET_ID);
+  }
+
+  /** Returns true if field id is set (has been asigned a value) and false otherwise */
+  public boolean isSetId() {
+    return __isset_bit_vector.get(__ID_ISSET_ID);
+  }
+
+  public void setIdIsSet(boolean value) {
+    __isset_bit_vector.set(__ID_ISSET_ID, value);
+  }
+
   public void setFieldValue(_Fields field, Object value) {
     switch (field) {
     case KEYSPACE:
@@ -765,6 +831,22 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       }
       break;
 
+    case DEFAULT_VALIDATION_CLASS:
+      if (value == null) {
+        unsetDefault_validation_class();
+      } else {
+        setDefault_validation_class((String)value);
+      }
+      break;
+
+    case ID:
+      if (value == null) {
+        unsetId();
+      } else {
+        setId((Integer)value);
+      }
+      break;
+
     }
   }
 
@@ -816,6 +898,12 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     case GC_GRACE_SECONDS:
       return new Integer(getGc_grace_seconds());
 
+    case DEFAULT_VALIDATION_CLASS:
+      return getDefault_validation_class();
+
+    case ID:
+      return new Integer(getId());
+
     }
     throw new IllegalStateException();
   }
@@ -855,6 +943,10 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       return isSetColumn_metadata();
     case GC_GRACE_SECONDS:
       return isSetGc_grace_seconds();
+    case DEFAULT_VALIDATION_CLASS:
+      return isSetDefault_validation_class();
+    case ID:
+      return isSetId();
     }
     throw new IllegalStateException();
   }
@@ -1002,6 +1094,24 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         return false;
     }
 
+    boolean this_present_default_validation_class = true && this.isSetDefault_validation_class();
+    boolean that_present_default_validation_class = true && that.isSetDefault_validation_class();
+    if (this_present_default_validation_class || that_present_default_validation_class) {
+      if (!(this_present_default_validation_class && that_present_default_validation_class))
+        return false;
+      if (!this.default_validation_class.equals(that.default_validation_class))
+        return false;
+    }
+
+    boolean this_present_id = true && this.isSetId();
+    boolean that_present_id = true && that.isSetId();
+    if (this_present_id || that_present_id) {
+      if (!(this_present_id && that_present_id))
+        return false;
+      if (this.id != that.id)
+        return false;
+    }
+
     return true;
   }
 
@@ -1144,6 +1254,24 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         return lastComparison;
       }
     }
+    lastComparison = Boolean.valueOf(isSetDefault_validation_class()).compareTo(typedOther.isSetDefault_validation_class());
+    if (lastComparison != 0) {
+      return lastComparison;
+    }
+    if (isSetDefault_validation_class()) {      lastComparison = TBaseHelper.compareTo(this.default_validation_class, typedOther.default_validation_class);
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+    }
+    lastComparison = Boolean.valueOf(isSetId()).compareTo(typedOther.isSetId());
+    if (lastComparison != 0) {
+      return lastComparison;
+    }
+    if (isSetId()) {      lastComparison = TBaseHelper.compareTo(this.id, typedOther.id);
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+    }
     return 0;
   }
 
@@ -1248,14 +1376,14 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         case 13: // COLUMN_METADATA
           if (field.type == TType.LIST) {
             {
-              TList _list29 = iprot.readListBegin();
-              this.column_metadata = new ArrayList<ColumnDef>(_list29.size);
-              for (int _i30 = 0; _i30 < _list29.size; ++_i30)
+              TList _list25 = iprot.readListBegin();
+              this.column_metadata = new ArrayList<ColumnDef>(_list25.size);
+              for (int _i26 = 0; _i26 < _list25.size; ++_i26)
               {
-                ColumnDef _elem31;
-                _elem31 = new ColumnDef();
-                _elem31.read(iprot);
-                this.column_metadata.add(_elem31);
+                ColumnDef _elem27;
+                _elem27 = new ColumnDef();
+                _elem27.read(iprot);
+                this.column_metadata.add(_elem27);
               }
               iprot.readListEnd();
             }
@@ -1267,6 +1395,21 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
           if (field.type == TType.I32) {
             this.gc_grace_seconds = iprot.readI32();
             setGc_grace_secondsIsSet(true);
+          } else { 
+            TProtocolUtil.skip(iprot, field.type);
+          }
+          break;
+        case 15: // DEFAULT_VALIDATION_CLASS
+          if (field.type == TType.STRING) {
+            this.default_validation_class = iprot.readString();
+          } else { 
+            TProtocolUtil.skip(iprot, field.type);
+          }
+          break;
+        case 16: // ID
+          if (field.type == TType.I32) {
+            this.id = iprot.readI32();
+            setIdIsSet(true);
           } else { 
             TProtocolUtil.skip(iprot, field.type);
           }
@@ -1363,9 +1506,9 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
         oprot.writeFieldBegin(COLUMN_METADATA_FIELD_DESC);
         {
           oprot.writeListBegin(new TList(TType.STRUCT, this.column_metadata.size()));
-          for (ColumnDef _iter32 : this.column_metadata)
+          for (ColumnDef _iter28 : this.column_metadata)
           {
-            _iter32.write(oprot);
+            _iter28.write(oprot);
           }
           oprot.writeListEnd();
         }
@@ -1375,6 +1518,18 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
     if (isSetGc_grace_seconds()) {
       oprot.writeFieldBegin(GC_GRACE_SECONDS_FIELD_DESC);
       oprot.writeI32(this.gc_grace_seconds);
+      oprot.writeFieldEnd();
+    }
+    if (this.default_validation_class != null) {
+      if (isSetDefault_validation_class()) {
+        oprot.writeFieldBegin(DEFAULT_VALIDATION_CLASS_FIELD_DESC);
+        oprot.writeString(this.default_validation_class);
+        oprot.writeFieldEnd();
+      }
+    }
+    if (isSetId()) {
+      oprot.writeFieldBegin(ID_FIELD_DESC);
+      oprot.writeI32(this.id);
       oprot.writeFieldEnd();
     }
     oprot.writeFieldStop();
@@ -1499,6 +1654,22 @@ public class CfDef implements TBase<CfDef, CfDef._Fields>, java.io.Serializable,
       if (!first) sb.append(", ");
       sb.append("gc_grace_seconds:");
       sb.append(this.gc_grace_seconds);
+      first = false;
+    }
+    if (isSetDefault_validation_class()) {
+      if (!first) sb.append(", ");
+      sb.append("default_validation_class:");
+      if (this.default_validation_class == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.default_validation_class);
+      }
+      first = false;
+    }
+    if (isSetId()) {
+      if (!first) sb.append(", ");
+      sb.append("id:");
+      sb.append(this.id);
       first = false;
     }
     sb.append(")");

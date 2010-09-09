@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
  import org.apache.commons.lang.ArrayUtils;
 
+ import org.apache.cassandra.concurrent.Stage;
  import org.apache.cassandra.locator.TokenMetadata;
  import org.apache.cassandra.locator.AbstractReplicationStrategy;
  import org.apache.cassandra.net.*;
@@ -149,10 +150,10 @@ public class BootStrapper
     {
         assert tokenMetadata.sortedTokens().size() > 0;
         final AbstractReplicationStrategy strat = StorageService.instance.getReplicationStrategy(table);
-        Collection<Range> myRanges = strat.getPendingAddressRanges(tokenMetadata, token, address, table);
+        Collection<Range> myRanges = strat.getPendingAddressRanges(tokenMetadata, token, address);
 
         Multimap<Range, InetAddress> myRangeAddresses = ArrayListMultimap.create();
-        Multimap<Range, InetAddress> rangeAddresses = strat.getRangeAddresses(tokenMetadata, table);
+        Multimap<Range, InetAddress> rangeAddresses = strat.getRangeAddresses(tokenMetadata);
         for (Range myRange : myRanges)
         {
             for (Range range : rangeAddresses.keySet())
@@ -171,7 +172,7 @@ public class BootStrapper
 
     static Token<?> getBootstrapTokenFrom(InetAddress maxEndpoint)
     {
-        Message message = new Message(FBUtilities.getLocalAddress(), "", StorageService.Verb.BOOTSTRAP_TOKEN, ArrayUtils.EMPTY_BYTE_ARRAY);
+        Message message = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.BOOTSTRAP_TOKEN, ArrayUtils.EMPTY_BYTE_ARRAY);
         BootstrapTokenCallback btc = new BootstrapTokenCallback();
         MessagingService.instance.sendRR(message, maxEndpoint, btc);
         return btc.getToken();
