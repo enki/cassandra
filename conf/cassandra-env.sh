@@ -17,7 +17,7 @@
 
 # The amount of memory to allocate to the JVM at startup, you almost
 # certainly want to adjust this for your environment.
-MAX_HEAP_SIZE="1G" 
+MAX_HEAP_SIZE="512M" 
 
 # Specifies the default port over which Cassandra will be available for
 # JMX connections.
