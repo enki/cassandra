@@ -14,34 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-calculate_heap_size()
-{
-    case "`uname`" in
-        Linux)
-            system_memory_in_mb=`free -m | awk '/Mem:/ {print $2}'`
-            MAX_HEAP_SIZE=$((system_memory_in_mb / 2))M
-            return 0
-        ;;
-        FreeBSD)
-            system_memory_in_bytes=`sysctl hw.physmem | awk '{print $2}'`
-            MAX_HEAP_SIZE=$((system_memory_in_bytes / 1024 / 1024 / 2))M
-            return 0
-        ;;
-        *)
-            MAX_HEAP_SIZE=1024M
-            return 1
-        ;;
-    esac
-}
 
 # The amount of memory to allocate to the JVM at startup, you almost
-# certainly want to adjust this for your environment. If left commented
-# out, the heap size will be automatically determined by calculate_heap_size
-# MAX_HEAP_SIZE="4G"
-
-if [ "x$MAX_HEAP_SIZE" = "x" ]; then
-    calculate_heap_size
-fi
+# certainly want to adjust this for your environment.
+MAX_HEAP_SIZE="1G" 
 
 # Specifies the default port over which Cassandra will be available for
 # JMX connections.
@@ -70,13 +46,10 @@ JVM_OPTS="$JVM_OPTS -Xms$MAX_HEAP_SIZE"
 JVM_OPTS="$JVM_OPTS -Xmx$MAX_HEAP_SIZE"
 JVM_OPTS="$JVM_OPTS -XX:+HeapDumpOnOutOfMemoryError" 
 
-if [ "`uname`" = "Linux" ] ; then
-    # reduce the per-thread stack size to minimize the impact of Thrift
-    # thread-per-client.  (Best practice is for client connections to
-    # be pooled anyway.) Only do so on Linux where it is known to be
-    # supported.
-    JVM_OPTS="$JVM_OPTS -Xss128k"
-fi
+# reduce the per-thread stack size to minimize the impact of Thrift
+# thread-per-client.  (Best practice is for client connections to
+# be pooled anyway.)
+JVM_OPTS="$JVM_OPTS -Xss128k" 
 
 # GC tuning options.
 JVM_OPTS="$JVM_OPTS -XX:+UseParNewGC" 
