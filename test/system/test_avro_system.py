@@ -42,25 +42,26 @@ class TestSystemOperations(AvroTester):
         cfdef['keyspace'] = 'CreateKeyspace'
         cfdef['name'] = 'CreateKsCf'
         keyspace['cf_defs'] = [cfdef]
-        
+
+        #test invalid strategy class
+        keyspace['strategy_class'] = 'InvalidStrategy'
+        avro_utils.assert_raises(AvroRemoteException,
+                self.client.request,
+                'system_add_keyspace',
+                {'ks_def': keyspace})
+
+        keyspace['strategy_class'] = 'org.apache.cassandra.locator.SimpleStrategy'
         s = self.client.request('system_add_keyspace', {'ks_def' : keyspace})
         assert isinstance(s, unicode), 'returned type is %s, (not \'unicode\')' % type(s)
         
         self.client.request('set_keyspace', {'keyspace' : 'CreateKeyspace'})
         
-        # modify invalid
+        # modify valid
         modified_keyspace = {'name': 'CreateKeyspace', 
                              'strategy_class': 'org.apache.cassandra.locator.OldNetworkTopologyStrategy',
                              'strategy_options': {}, 
-                             'replication_factor': 2, 
+                             'replication_factor': 1, 
                              'cf_defs': []}
-        avro_utils.assert_raises(AvroRemoteException,
-                self.client.request,
-                'system_update_keyspace',
-                {'ks_def': modified_keyspace})
-        
-        # modify valid
-        modified_keyspace['replication_factor'] = 1
         self.client.request('system_update_keyspace', {'ks_def': modified_keyspace})
         modks = self.client.request('describe_keyspace', {'keyspace': 'CreateKeyspace'})
         assert modks['replication_factor'] == modified_keyspace['replication_factor']

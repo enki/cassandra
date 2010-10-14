@@ -8,6 +8,31 @@ dev
  * lock row cache updates to prevent race condition (CASSANDRA-1293)
  * remove assertion causing rare (and harmless) error messages in
    commitlog (CASSANDRA-1330)
+ * fix moving nodes with no keyspaces defined (CASSANDRA-1574)
+ * fix unbootstrap when no data is present in a transfer range (CASSANDRA-1573)
+ * take advantage of AVRO-495 to simplify our avro IDL (CASSANDRA-1436)
+ * extend authorization hierarchy to column family (CASSANDRA-1554)
+ * deletion support in secondary indexes (CASSANDRA-1571)
+ * meaningful error message for invalid replication strategy class 
+   (CASSANDRA-1566)
+ * allow keyspace creation with RF > N (CASSANDRA-1428)
+ * improve cli error handling (CASSANDRA-1580)
+ * add cache save/load ability (CASSANDRA-1417, 1606)
+ * add StorageService.getDrainProgress (CASSANDRA-1588)
+ * Disallow bootstrap to an in-use token (CASSANDRA-1561)
+ * Allow dynamic secondary index creation and destruction (CASSANDRA-1532)
+ * log auto-guessed memtable thresholds (CASSANDRA-1595)
+ * add ColumnDef support to cli (CASSANDRA-1583)
+ * reduce index sample time by 75% (CASSANDRA-1572)
+ * add cli support for column, strategy metadata (CASSANDRA-1578, 1612)
+ * add cli support for schema modification (CASSANDRA-1584)
+ * delete temp files on failed compactions (CASSANDRA-1596)
+ * avoid blocking for dead nodes during removetoken (CASSANDRA-1605)
+ * remove ConsistencyLevel.ZERO (CASSANDRA-1607)
+ * expose in-progress compaction type in jmx (CASSANDRA-1586)
+ * removed IClock & related classes from internals (CASSANDRA-1502)
+ * fix removing tokens from SystemTable on decommission and removetoken
+   (CASSANDRA-1609)
 
 
 0.7-beta2
@@ -120,6 +145,8 @@ dev
  * make nodetool compact and cleanup blocking (CASSANDRA-1449)
  * add memtable, cache information to GCInspector logs (CASSANDRA-1558)
  * enable/disable HintedHandoff via JMX (CASSANDRA-1550)
+ * Ignore stray files in the commit log directory (CASSANDRA-1547)
+ * Disallow bootstrap to an in-use token (CASSANDRA-1561)
 
 
 0.7-beta1
@@ -174,6 +201,12 @@ dev
  * faster comparison for UUID types (CASSANDRA-1043)
  * secondary index support (CASSANDRA-749 and subtasks)
 
+
+0.6.6
+ * Allow using DynamicEndpointSnitch with RackAwareStrategy (CASSANDRA-1429)
+ * remove the remaining vestiges of the unfinished DatacenterShardStrategy 
+   (replaced by NetworkTopologyStrategy in 0.7)
+   
 
 0.6.5
  * fix key ordering in range query results with RandomPartitioner

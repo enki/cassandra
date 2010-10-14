@@ -23,6 +23,7 @@ package org.apache.cassandra.dht;
  import java.net.InetAddress;
  import java.util.*;
  import java.util.concurrent.locks.Condition;
+ import java.util.concurrent.CountDownLatch;
 
  import com.google.common.collect.ArrayListMultimap;
  import com.google.common.collect.HashMultimap;
@@ -36,6 +37,7 @@ package org.apache.cassandra.dht;
  import org.apache.cassandra.gms.FailureDetector;
  import org.apache.cassandra.gms.IFailureDetector;
  import org.apache.cassandra.locator.AbstractReplicationStrategy;
+ import org.apache.cassandra.config.ConfigurationException;
  import org.apache.cassandra.locator.TokenMetadata;
  import org.apache.cassandra.net.IAsyncCallback;
  import org.apache.cassandra.net.IVerbHandler;
@@ -67,49 +69,56 @@ public class BootStrapper
         tokenMetadata = tmd;
     }
 
-    public void startBootstrap() throws IOException
+    public void bootstrap() throws IOException
     {
         if (logger.isDebugEnabled())
             logger.debug("Beginning bootstrap process");
 
-        final Multimap<InetAddress, String> bootstrapNodes = HashMultimap.create();
         final Multimap<String, Map.Entry<InetAddress, Collection<Range>>> rangesToFetch = HashMultimap.create();
 
+        int requests = 0;
         for (String table : DatabaseDescriptor.getNonSystemTables())
         {
             Map<InetAddress, Collection<Range>> workMap = getWorkMap(getRangesWithSources(table)).asMap();
             for (Map.Entry<InetAddress, Collection<Range>> entry : workMap.entrySet())
             {
-                bootstrapNodes.put(entry.getKey(), table);
+                requests++;
                 rangesToFetch.put(table, entry);
             }
         }
 
+        final CountDownLatch latch = new CountDownLatch(requests);
         for (final String table : rangesToFetch.keySet())
         {
             /* Send messages to respective folks to stream data over to me */
             for (Map.Entry<InetAddress, Collection<Range>> entry : rangesToFetch.get(table))
             {
                 final InetAddress source = entry.getKey();
+                Collection<Range> ranges = entry.getValue();
                 final Runnable callback = new Runnable()
                 {
                     public void run()
                     {
-                        synchronized (bootstrapNodes)
-                        {
-                            bootstrapNodes.remove(source, table);
-                            if (logger.isDebugEnabled())
-                                logger.debug(String.format("Removed %s/%s as a bootstrap source; remaining is [%s]",
-                                                           source, table, StringUtils.join(bootstrapNodes.keySet(), ", ")));
-                            if (bootstrapNodes.isEmpty())
-                                StorageService.instance.finishBootstrapping();
-                        }
+                        latch.countDown();
+                        if (logger.isDebugEnabled())
+                            logger.debug(String.format("Removed %s/%s as a bootstrap source; remaining is %s",
+                                                       source, table, latch.getCount()));
                     }
                 };
                 if (logger.isDebugEnabled())
-                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(entry.getValue(), ", "));
-                StreamIn.requestRanges(source, table, entry.getValue(), callback);
+                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(ranges, ", "));
+                StreamIn.requestRanges(source, table, ranges, callback);
             }
+        }
+
+        try
+        {
+            latch.await();
+            StorageService.instance.finishBootstrapping();
+        }
+        catch (InterruptedException e)
+        {
+            throw new AssertionError(e);
         }
     }
 
@@ -117,12 +126,15 @@ public class BootStrapper
      * if initialtoken was specified, use that.
      * otherwise, pick a token to assume half the load of the most-loaded node.
      */
-    public static Token getBootstrapToken(final TokenMetadata metadata, final Map<InetAddress, Double> load) throws IOException
+    public static Token getBootstrapToken(final TokenMetadata metadata, final Map<InetAddress, Double> load) throws IOException, ConfigurationException
     {
         if (DatabaseDescriptor.getInitialToken() != null)
         {
             logger.debug("token manually specified as " + DatabaseDescriptor.getInitialToken());
-            return StorageService.getPartitioner().getTokenFactory().fromString(DatabaseDescriptor.getInitialToken());
+            Token token = StorageService.getPartitioner().getTokenFactory().fromString(DatabaseDescriptor.getInitialToken());
+            if (metadata.getEndpoint(token) != null)
+                throw new ConfigurationException("Bootstraping to existing token " + token + " is not allowed (decommission/removetoken the old node first).");
+            return token;
         }
 
         return getBalancedToken(metadata, load);

@@ -23,7 +23,6 @@ import static org.junit.Assert.assertNotNull;
 import org.apache.avro.specific.SpecificRecord;
 
 import org.apache.cassandra.CleanupHelper;
-import org.apache.cassandra.db.clock.TimestampReconciler;
 import org.apache.cassandra.db.migration.AddKeyspace;
 import org.apache.cassandra.locator.SimpleStrategy;
 import org.apache.cassandra.io.SerDeUtils;
@@ -45,13 +44,6 @@ public class DatabaseDescriptorTest
     }
     
     @Test
-    public void testGetReconciler() throws ConfigurationException
-    {
-        assert DatabaseDescriptor.getReconciler("TimestampReconciler") == TimestampReconciler.instance;
-        assert DatabaseDescriptor.getReconciler(TimestampReconciler.class.getName()) == TimestampReconciler.instance;
-    }
-
-    @Test
     public void testCFMetaDataSerialization() throws IOException, ConfigurationException
     {
         // test serialization of all defined test CFs.
@@ -59,7 +51,7 @@ public class DatabaseDescriptorTest
         {
             for (CFMetaData cfm : DatabaseDescriptor.getTableMetaData(table).values())
             {
-                CFMetaData cfmDupe = CFMetaData.inflate(serDe(cfm.deflate(), new org.apache.cassandra.config.avro.CfDef()));
+                CFMetaData cfmDupe = CFMetaData.inflate(serDe(cfm.deflate(), new org.apache.cassandra.avro.CfDef()));
                 assert cfmDupe != null;
                 assert cfmDupe.equals(cfm);
             }
@@ -71,7 +63,7 @@ public class DatabaseDescriptorTest
     {
         for (KSMetaData ksm : DatabaseDescriptor.tables.values())
         {
-            KSMetaData ksmDupe = KSMetaData.inflate(serDe(ksm.deflate(), new org.apache.cassandra.config.avro.KsDef()));
+            KSMetaData ksmDupe = KSMetaData.inflate(serDe(ksm.deflate(), new org.apache.cassandra.avro.KsDef()));
             assert ksmDupe != null;
             assert ksmDupe.equals(ksm);
         }

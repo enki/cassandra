@@ -18,16 +18,13 @@
 
 package org.apache.cassandra.db;
 
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FilenameFilter;
-import java.io.IOError;
-import java.io.IOException;
+import java.io.*;
 import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
@@ -39,11 +36,11 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.concurrent.RetryingScheduledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.IClock.ClockRelationship;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.commitlog.CommitLog;
@@ -67,6 +64,9 @@ import org.apache.cassandra.utils.WrappedRunnable;
 public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 {
     private static Logger logger = LoggerFactory.getLogger(ColumnFamilyStore.class);
+
+    private static final ScheduledThreadPoolExecutor cacheSavingExecutor =
+            new RetryingScheduledThreadPoolExecutor("CACHE-SAVER", Thread.MIN_PRIORITY);
 
     /*
      * submitFlush first puts [Binary]Memtable.getSortedContents on the flushSorter executor,
@@ -133,6 +133,22 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private int minCompactionThreshold;
     private int maxCompactionThreshold;
 
+    private final Runnable rowCacheSaverTask = new WrappedRunnable()
+    {
+        protected void runMayThrow() throws IOException
+        {
+            ssTables.saveRowCache();
+        }
+    };
+
+    private final Runnable keyCacheSaverTask = new WrappedRunnable()
+    {
+        protected void runMayThrow() throws Exception
+        {
+            ssTables.saveKeyCache();
+        }
+    };
+
     private ColumnFamilyStore(Table table, String columnFamilyName, IPartitioner partitioner, int generation, CFMetaData metadata)
     {
         assert metadata != null : "null metadata for " + table + ":" + columnFamilyName;
@@ -143,20 +159,23 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         this.maxCompactionThreshold = metadata.maxCompactionThreshold;
         this.partitioner = partitioner;
         fileIndexGenerator.set(generation);
-        memtable = new Memtable(this, this.partitioner);
+        memtable = new Memtable(this);
         binaryMemtable = new AtomicReference<BinaryMemtable>(new BinaryMemtable(this));
 
         if (logger.isDebugEnabled())
             logger.debug("Starting CFS {}", columnFamily);
-        
+
         // scan for sstables corresponding to this cf and load them
+        ssTables = new SSTableTracker(table.name, columnFamilyName);
+        Set<DecoratedKey> savedKeys = readSavedCache(DatabaseDescriptor.getSerializedKeyCachePath(table.name, columnFamilyName));
+        logger.info("read " + savedKeys.size() + " from saved key cache");
         List<SSTableReader> sstables = new ArrayList<SSTableReader>();
         for (Map.Entry<Descriptor,Set<Component>> sstableFiles : files(table.name, columnFamilyName, false).entrySet())
         {
             SSTableReader sstable;
             try
             {
-                sstable = SSTableReader.open(sstableFiles.getKey(), sstableFiles.getValue(), metadata, this.partitioner);
+                sstable = SSTableReader.open(sstableFiles.getKey(), sstableFiles.getValue(), savedKeys, ssTables, metadata, this.partitioner);
             }
             catch (FileNotFoundException ex)
             {
@@ -170,7 +189,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
             sstables.add(sstable);
         }
-        ssTables = new SSTableTracker(table.name, columnFamilyName);
         ssTables.add(sstables);
 
         // create the private ColumnFamilyStores for the secondary column indexes
@@ -194,6 +212,38 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {
             throw new RuntimeException(e);
         }
+    }
+
+    protected Set<DecoratedKey> readSavedCache(File path)
+    {
+        Set<DecoratedKey> keys = new TreeSet<DecoratedKey>();
+        try
+        {
+            long start = System.currentTimeMillis();
+
+            if (path.exists())
+            {
+                if (logger.isDebugEnabled())
+                    logger.debug(String.format("reading saved cache from %s", path));
+                ObjectInputStream in = new ObjectInputStream(new BufferedInputStream(new FileInputStream(path)));
+                while (in.available() > 0)
+                {
+                    int size = in.readInt();
+                    byte[] bytes = new byte[size];
+                    in.readFully(bytes);
+                    keys.add(StorageService.getPartitioner().decorateKey(bytes));
+                }
+                in.close();
+                if (logger.isDebugEnabled())
+                    logger.debug(String.format("completed reading (%d ms; %d keys) from saved cache at %s",
+                                               System.currentTimeMillis() - start, keys.size(), path));
+            }
+        }
+        catch (IOException ioe)
+        {
+            logger.warn(String.format("error reading saved cache at %s", path.getAbsolutePath()), ioe);
+        }
+        return keys;
     }
 
     public void addIndex(final ColumnDefinition info)
@@ -278,8 +328,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         long min = 0;
         for (SSTableReader sstable : ssTables)
         {
-           if (min == 0 || sstable.getEstimatedRowSize().min() < min)
-               min = sstable.getEstimatedRowSize().min();
+            if (min == 0 || sstable.getEstimatedRowSize().min() < min)
+                min = sstable.getEstimatedRowSize().min();
         }
         return min;
     }
@@ -371,8 +421,63 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 }
             }
         }
+
+        // cleanup incomplete saved caches
+        Pattern tmpCacheFilePattern = Pattern.compile(table + "-" + columnFamily + "-(Key|Row)Cache.*\\.tmp$");
+        File dir = new File(DatabaseDescriptor.getSavedCachesLocation());
+
+        if (dir.exists())
+        {
+            assert dir.isDirectory();
+            for (File file : dir.listFiles())
+                if (tmpCacheFilePattern.matcher(file.getName()).matches())
+                    if (!file.delete())
+                        logger.warn("could not delete " + file.getAbsolutePath());
+        }
     }
-    
+
+    // must be called after all sstables are loaded since row cache merges all row versions
+    public void initRowCache()
+    {
+        String msgSuffix = String.format(" row cache for %s of %s", columnFamily, table.name);
+        int rowCacheSavePeriodInSeconds = DatabaseDescriptor.getTableMetaData(table.name).get(columnFamily).rowCacheSavePeriodInSeconds;
+        int keyCacheSavePeriodInSeconds = DatabaseDescriptor.getTableMetaData(table.name).get(columnFamily).keyCacheSavePeriodInSeconds;
+
+        long start = System.currentTimeMillis();
+        logger.info(String.format("loading%s", msgSuffix));
+        // sort the results on read because there are few reads and many writes and reads only happen at startup
+        Set<DecoratedKey> savedKeys = readSavedCache(DatabaseDescriptor.getSerializedRowCachePath(table.name, columnFamily));
+        for (DecoratedKey key : savedKeys)
+            cacheRow(key);
+        logger.info(String.format("completed loading (%d ms; %d keys) %s",
+                                  System.currentTimeMillis()-start, ssTables.getRowCache().getSize(), msgSuffix));
+        if (rowCacheSavePeriodInSeconds > 0)
+        {
+            cacheSavingExecutor.scheduleWithFixedDelay(rowCacheSaverTask,
+                                                       rowCacheSavePeriodInSeconds,
+                                                       rowCacheSavePeriodInSeconds,
+                                                       TimeUnit.SECONDS);
+        }
+
+        if (keyCacheSavePeriodInSeconds > 0)
+        {
+            cacheSavingExecutor.scheduleWithFixedDelay(keyCacheSaverTask,
+                                                       keyCacheSavePeriodInSeconds,
+                                                       keyCacheSavePeriodInSeconds,
+                                                       TimeUnit.SECONDS);
+        }
+    }
+
+    public Future<?> submitRowCacheWrite()
+    {
+        return cacheSavingExecutor.submit(rowCacheSaverTask);
+    }
+
+    public Future<?> submitKeyCacheWrite()
+    {
+        return cacheSavingExecutor.submit(keyCacheSaverTask);
+    }
+
     /**
      * Collects a map of sstable components.
      */
@@ -444,10 +549,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     /** flush the given memtable and swap in a new one for its CFS, if it hasn't been frozen already.  threadsafe. */
     Future<?> maybeSwitchMemtable(Memtable oldMemtable, final boolean writeCommitLog)
     {
-        /**
-         *  If we can get the writelock, that means no new updates can come in and 
-         *  all ongoing updates to memtables have completed. We can get the tail
-         *  of the log and use it as the starting position for log replay on recovery.
+        /*
+         * If we can get the writelock, that means no new updates can come in and
+         * all ongoing updates to memtables have completed. We can get the tail
+         * of the log and use it as the starting position for log replay on recovery.
+         *
+         * This is why we Table.flusherLock needs to be global instead of per-Table:
+         * we need to schedule discardCompletedSegments calls in the same order as their
+         * contexts (commitlog position) were read, even though the flush executor
+         * is multithreaded.
          */
         Table.flusherLock.writeLock().lock();
         try
@@ -472,7 +582,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             for (ColumnFamilyStore cfs : icc)
             {
                 submitFlush(cfs.memtable, latch);
-                cfs.memtable = new Memtable(cfs, cfs.partitioner);
+                cfs.memtable = new Memtable(cfs);
             }
 
             // when all the memtables have been written, including for indexes, mark the flush in the commitlog header.
@@ -615,17 +725,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             // (a) the column itself is tombstoned or
             // (b) the CF is tombstoned and the column is not newer than it
             // (we split the test to avoid computing ClockRelationship if not necessary)
-            if ((c.isMarkedForDelete() && c.getLocalDeletionTime() <= gcBefore))
+            if ((c.isMarkedForDelete() && c.getLocalDeletionTime() <= gcBefore)
+                || c.timestamp() <= cf.getMarkedForDeleteAt())
             {
                 cf.remove(cname);
-            }
-            else
-            {
-                ClockRelationship rel = c.clock().compare(cf.getMarkedForDeleteAt());
-                if ((ClockRelationship.LESS_THAN == rel) || (ClockRelationship.EQUAL == rel))
-                {
-                    cf.remove(cname);
-                }
             }
         }
     }
@@ -638,25 +741,16 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         for (Map.Entry<byte[], IColumn> entry : cf.getColumnsMap().entrySet())
         {
             SuperColumn c = (SuperColumn) entry.getValue();
-            List<IClock> clocks = Arrays.asList(cf.getMarkedForDeleteAt());
-            IClock minClock = c.getMarkedForDeleteAt().getSuperset(clocks);
+            long minTimestamp = Math.max(c.getMarkedForDeleteAt(), cf.getMarkedForDeleteAt());
             for (IColumn subColumn : c.getSubColumns())
             {
                 // remove subcolumns if
                 // (a) the subcolumn itself is tombstoned or
                 // (b) the supercolumn is tombstoned and the subcolumn is not newer than it
-                // (we split the test to avoid computing ClockRelationship if not necessary)
-                if (subColumn.isMarkedForDelete() && subColumn.getLocalDeletionTime() <= gcBefore)
+                if (subColumn.timestamp() <= minTimestamp
+                    || (subColumn.isMarkedForDelete() && subColumn.getLocalDeletionTime() <= gcBefore))
                 {
                     c.remove(subColumn.name());
-                }
-                else
-                {
-                    ClockRelationship subRel = subColumn.clock().compare(minClock);
-                    if ((ClockRelationship.LESS_THAN == subRel) || (ClockRelationship.EQUAL == subRel))
-                    {
-                        c.remove(subColumn.name());
-                    }
                 }
             }
             if (c.getSubColumns().isEmpty() && c.getLocalDeletionTime() <= gcBefore)
@@ -1353,14 +1447,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             try
             {
                 // mkdir
-                File dataDirectory = ssTable.getDescriptor().directory.getParentFile();
+                File dataDirectory = ssTable.descriptor.directory.getParentFile();
                 String snapshotDirectoryPath = Table.getSnapshotPath(dataDirectory.getAbsolutePath(), table.name, snapshotName);
                 FileUtils.createDirectory(snapshotDirectoryPath);
 
                 // hard links
-                for (Component component : ssTable.getComponents())
+                for (Component component : ssTable.components)
                 {
-                    File sourceFile = new File(ssTable.getDescriptor().filenameFor(component));
+                    File sourceFile = new File(ssTable.descriptor.filenameFor(component));
                     File targetLink = new File(snapshotDirectoryPath, sourceFile.getName());
                     FileUtils.createHardLink(sourceFile, targetLink);
                 }

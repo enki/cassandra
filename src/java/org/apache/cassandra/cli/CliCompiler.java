@@ -58,7 +58,8 @@ public class CliCompiler
 
     public static CommonTree compileQuery(String query)
     {
-        CommonTree queryTree = null;
+        CommonTree queryTree;
+        
         try
         {
             ANTLRStringStream input = new ANTLRNoCaseStringStream(query);
@@ -77,9 +78,10 @@ public class CliCompiler
         }
         catch(Exception e)
         {
-            System.err.println("Exception " + e.getMessage());
-            e.printStackTrace(System.err);
+            // if there was an exception we don't want to process request any further
+            throw new RuntimeException(e.getMessage(), e);
         }
+        
         return queryTree;
     }
     /*
@@ -88,15 +90,11 @@ public class CliCompiler
 
     public static String getColumnFamily(CommonTree astNode)
     {
-        assert(astNode.getType() == CliParser.NODE_COLUMN_ACCESS);
-
         return astNode.getChild(0).getText();
     }
 
     public static String getKey(CommonTree astNode)
     {
-        assert(astNode.getType() == CliParser.NODE_COLUMN_ACCESS);
-
         return CliUtils.unescapeSQLString(astNode.getChild(1).getText());
     }
 

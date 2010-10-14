@@ -25,21 +25,16 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.*;
 import java.util.concurrent.*;
-
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
-import org.apache.log4j.Level;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
-import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.concurrent.*;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.migration.AddKeyspace;
@@ -65,6 +60,7 @@ import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SkipNullRepresenter;
 import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.log4j.Level;
 import org.yaml.snakeyaml.Dumper;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -140,6 +136,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private static IPartitioner partitioner_ = DatabaseDescriptor.getPartitioner();
     public static VersionedValue.VersionedValueFactory valueFactory = new VersionedValue.VersionedValueFactory(partitioner_);
 
+    public static RetryingScheduledThreadPoolExecutor scheduledTasks = new RetryingScheduledThreadPoolExecutor("ScheduledTasks");
+
     public static final StorageService instance = new StorageService();
 
     public static IPartitioner getPartitioner() {
@@ -173,7 +171,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     private Set<InetAddress> replicatingNodes;
     private InetAddress removingNode;
-    private CountDownLatch replicateLatch;
 
     /* Are we starting this node in bootstrap mode? */
     private boolean isBootstrapMode;
@@ -182,6 +179,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private boolean initialized;
     private String operationMode;
     private MigrationManager migrationManager = new MigrationManager();
+
+    /* Used for tracking drain progress */
+    private volatile int totalCFs, remainingCFs;
 
     public void finishBootstrapping()
     {
@@ -326,7 +326,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MigrationManager.announce(DatabaseDescriptor.getDefsVersion(), DatabaseDescriptor.getSeeds());
     }
 
-    public synchronized void initServer() throws IOException
+    public synchronized void initServer() throws IOException, org.apache.cassandra.config.ConfigurationException
     {
         logger_.info("Cassandra version: " + FBUtilities.getReleaseVersionString());
         logger_.info("Thrift API version: " + Constants.VERSION);
@@ -395,7 +395,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             Token token = BootStrapper.getBootstrapToken(tokenMetadata_, StorageLoadBalancer.instance.getLoadInfo());
             // don't bootstrap if there are no tables defined.
             if (DatabaseDescriptor.getNonSystemTables().size() > 0)
-                startBootstrap(token);
+            {
+                bootstrap(token);
+                assert !isBootstrapMode; // bootstrap will block until finished
+            }
             else
             {
                 isBootstrapMode = false;
@@ -403,18 +406,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 tokenMetadata_.updateNormalToken(token, FBUtilities.getLocalAddress());
                 Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.normal(token));
                 setMode("Normal", false);
-            }
-            // don't finish startup (enabling thrift) until after bootstrap is done
-            while (isBootstrapMode)
-            {
-                try
-                {
-                    Thread.sleep(100);
-                }
-                catch (InterruptedException e)
-                {
-                    throw new AssertionError(e);
-                }
             }
         }
         else
@@ -458,7 +449,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.info(m);
     }
 
-    private void startBootstrap(Token token) throws IOException
+    private void bootstrap(Token token) throws IOException
     {
         isBootstrapMode = true;
         SystemTable.updateToken(token); // DON'T use setToken, that makes us part of the ring locally which is incorrect until we are done bootstrapping
@@ -473,7 +464,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             throw new AssertionError(e);
         }
         setMode("Bootstrapping", true);
-        new BootStrapper(FBUtilities.getLocalAddress(), token, tokenMetadata_).startBootstrap(); // handles token update
+        new BootStrapper(FBUtilities.getLocalAddress(), token, tokenMetadata_).bootstrap(); // handles token update
     }
 
     public boolean isBootstrapMode()
@@ -685,8 +676,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                                        endpoint, currentNode, token, endpoint));
         }
 
-        if(pieces.length > 2) {
-            handleStateRemoving(endpoint, pieces);
+        if (pieces.length > 2)
+        {
+            assert pieces.length == 4;
+            handleStateRemoving(endpoint, getPartitioner().getTokenFactory().fromString(pieces[3]), pieces[2]);
         }
 
         calculatePendingRanges();
@@ -739,35 +732,19 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         assert pieces.length == 2;
         Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
 
-        // endpoint itself is leaving
         if (logger_.isDebugEnabled())
             logger_.debug("Node " + endpoint + " state left, token " + token);
 
-        // If the node is member, remove all references to it. If not, call
-        // removeBootstrapToken just in case it is there (very unlikely chain of events)
-        if (tokenMetadata_.isMember(endpoint))
-        {
-            if (!tokenMetadata_.getToken(endpoint).equals(token))
-                logger_.warn("Node " + endpoint + " 'left' token mismatch. Long network partition?");
-            tokenMetadata_.removeEndpoint(endpoint);
-            HintedHandOffManager.deleteHintsForEndPoint(endpoint);
-        }
-
-        // remove token from bootstrap tokens just in case it is still there
-        tokenMetadata_.removeBootstrapToken(token);
-        calculatePendingRanges();
+        excise(token, endpoint);
     }
 
     /**
      * Handle node being actively removed from the ring.
      *
      * @param endpoint node
-     * @param moveValue (token to notify of removal)<Delimiter>(token to remove)
      */
-    private void handleStateRemoving(InetAddress endpoint, String[] pieces)
+    private void handleStateRemoving(InetAddress endpoint, Token removeToken, String state)
     {
-        assert pieces.length == 4;
-        Token removeToken = getPartitioner().getTokenFactory().fromString(pieces[3]);
         InetAddress removeEndpoint = tokenMetadata_.getEndpoint(removeToken);
         
         if (removeEndpoint == null)
@@ -779,14 +756,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             return;
         }
 
-        if (VersionedValue.REMOVED_TOKEN.equals(pieces[2]))
+        if (VersionedValue.REMOVED_TOKEN.equals(state))
         {
-            Gossiper.instance.removeEndpoint(removeEndpoint);
-            tokenMetadata_.removeEndpoint(removeEndpoint);
-            HintedHandOffManager.deleteHintsForEndPoint(removeEndpoint);
-            tokenMetadata_.removeBootstrapToken(removeToken);
+            excise(removeToken, removeEndpoint);
         }
-        else if (VersionedValue.REMOVING_TOKEN.equals(pieces[2]))
+        else if (VersionedValue.REMOVING_TOKEN.equals(state))
         {
             if (logger_.isDebugEnabled())
                 logger_.debug("Token " + removeToken + " removed manually (endpoint was " + removeEndpoint + ")");
@@ -798,10 +772,19 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             // grab any data we are now responsible for and notify responsible node
             restoreReplicaCount(removeEndpoint, endpoint);
         }
+    }
+
+    private void excise(Token token, InetAddress endpoint)
+    {
+        Gossiper.instance.removeEndpoint(endpoint);
+        tokenMetadata_.removeEndpoint(endpoint);
+        HintedHandOffManager.deleteHintsForEndPoint(endpoint);
+        tokenMetadata_.removeBootstrapToken(token);
+        calculatePendingRanges();
         if (!isClientMode)
         {
-            logger_.info("Removing token " + removeToken + " for " + removeEndpoint);
-            SystemTable.removeToken(removeToken);
+            logger_.info("Removing token " + token + " for " + endpoint);
+            SystemTable.removeToken(token);
         }
     }
 
@@ -889,27 +872,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (logger_.isDebugEnabled())
             logger_.debug("Pending ranges:\n" + (pendingRanges.isEmpty() ? "<empty>" : tm.printPendingRanges()));
-    }
-
-    /**
-     * Determines the endpoints that are going to become responsible for data due to
-     * a node leaving the cluster.
-     *
-     * @param endpoint the node that is leaving the cluster
-     * @return A set of endpoints
-     */
-    private Set<InetAddress> getNewEndpoints(InetAddress endpoint)
-    {
-        Set<InetAddress> newEndpoints = new HashSet<InetAddress>();
-
-        for (String table : DatabaseDescriptor.getNonSystemTables())
-        {
-            // get all ranges that change ownership (that is, a node needs
-            // to take responsibility for new range)
-            Multimap<Range, InetAddress> changedRanges = getChangedRangesForLeaving(table, endpoint);
-            newEndpoints.addAll(changedRanges.values());
-        }
-        return newEndpoints;
     }
 
     /**
@@ -1711,7 +1673,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     bootstrapToken = BootStrapper.getBalancedToken(tokenMetadata_, StorageLoadBalancer.instance.getLoadInfo());
                 }
                 logger_.info("re-bootstrapping to new token {}", bootstrapToken);
-                startBootstrap(bootstrapToken);
+                bootstrap(bootstrapToken);
             }
         };
         unbootstrap(finishMoving);
@@ -1734,12 +1696,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * Force a remove operation to complete. This may be necessary if a remove operation
      * blocks forever due to node/stream failure.
      */
-    public void finishRemoval()
+    public void forceRemoveCompletion()
     {
-        while (replicateLatch != null && replicateLatch.getCount() > 0)
-        {
-            replicateLatch.countDown();
-        }
+        if (!replicatingNodes.isEmpty())
+            logger_.warn("Removal not confirmed for for " + StringUtils.join(this.replicatingNodes, ","));
+        replicatingNodes.clear();
     }
 
     /**
@@ -1767,12 +1728,25 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (tokenMetadata_.isLeaving(endpoint)) 
             throw new UnsupportedOperationException("Node " + endpoint + " is already being removed.");
 
-        if (replicatingNodes != null || replicateLatch != null)
+        if (replicatingNodes != null)
             throw new UnsupportedOperationException("This node is already processing a removal. Wait for it to complete.");
 
         // Find the endpoints that are going to become responsible for data
-        replicatingNodes = Collections.synchronizedSet(getNewEndpoints(endpoint));
-        replicateLatch = new CountDownLatch(replicatingNodes.size());
+        replicatingNodes = Collections.synchronizedSet(new HashSet<InetAddress>());
+        for (String table : DatabaseDescriptor.getNonSystemTables())
+        {
+            // get all ranges that change ownership (that is, a node needs
+            // to take responsibility for new range)
+            Multimap<Range, InetAddress> changedRanges = getChangedRangesForLeaving(table, endpoint);
+            IFailureDetector failureDetector = FailureDetector.instance;
+            for (InetAddress ep : changedRanges.values())
+            {
+                if (failureDetector.isAlive(ep))
+                    replicatingNodes.add(ep);
+                else
+                    logger_.warn("Endpoint " + ep + " is down and will not receive data for re-replication of " + endpoint);
+            }
+        }
         removingNode = endpoint;
 
         tokenMetadata_.addLeavingEndpoint(endpoint);
@@ -1781,38 +1755,35 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // but indicate the leaving token so that it can be dealt with.
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.removingNonlocal(localToken, token));
 
+        // kick off streaming commands
         restoreReplicaCount(endpoint, myAddress);
 
-        try
+        // wait for ReplicationFinishedVerbHandler to signal we're done
+        while (!replicatingNodes.isEmpty())
         {
-            replicateLatch.await();
-        }
-        catch (InterruptedException e)
-        {
-            logger_.error("Interrupted while waiting for replication confirmation.");
+            try
+            {
+                Thread.sleep(100);
+            }
+            catch (InterruptedException e)
+            {
+                throw new AssertionError(e);
+            }
         }
 
-        Gossiper.instance.removeEndpoint(endpoint);
-        tokenMetadata_.removeBootstrapToken(token);
-        tokenMetadata_.removeEndpoint(endpoint);
-        HintedHandOffManager.deleteHintsForEndPoint(endpoint);
+        excise(token, endpoint);
 
         // indicate the token has left
-        calculatePendingRanges();
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.removedNonlocal(localToken, token));
-
-        if(!replicatingNodes.isEmpty())
-            logger_.error("Failed to recieve removal confirmation for " + StringUtils.join(replicatingNodes, ","));
 
         replicatingNodes = null;
         removingNode = null;
-        replicateLatch = null;
     }
 
     public void confirmReplication(InetAddress node)
     {
-        if(replicatingNodes != null && replicatingNodes.remove(node))
-            replicateLatch.countDown();
+        assert replicatingNodes != null;
+        replicatingNodes.remove(node);
     }
 
     public boolean isClientMode()
@@ -1851,7 +1822,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         return operationMode;
     }
-    
+
+    public String getDrainProgress()
+    {
+        return String.format("Drained %s/%s ColumnFamilies", remainingCFs, totalCFs);
+    }
+
     /** shuts node off to writes, empties memtables and the commit log. */
     public synchronized void drain() throws IOException, InterruptedException, ExecutionException
     {
@@ -1867,20 +1843,29 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.shutdown();
         setMode("Draining: emptying MessageService pools", false);
         MessagingService.waitFor();
-       
+
         setMode("Draining: clearing mutation stage", false);
         mutationStage.shutdown();
         mutationStage.awaitTermination(3600, TimeUnit.SECONDS);
 
         // lets flush.
         setMode("Draining: flushing column families", false);
+        List<ColumnFamilyStore> cfses = new ArrayList<ColumnFamilyStore>();
         for (String tableName : DatabaseDescriptor.getNonSystemTables())
-            for (Future f : Table.open(tableName).flush())
-                f.get();
+        {
+            Table table = Table.open(tableName);
+            cfses.addAll(table.getColumnFamilyStores());
+        }
+        totalCFs = remainingCFs = cfses.size();
+        for (ColumnFamilyStore cfs : cfses)
+        {
+            cfs.forceBlockingFlush();
+            remainingCFs--;
+        }
 
         ColumnFamilyStore.postFlushExecutor.shutdown();
         ColumnFamilyStore.postFlushExecutor.awaitTermination(60, TimeUnit.SECONDS);
-       
+
         // want to make sure that any segments deleted as a result of flushing are gone.
         DeletionService.waitFor();
 
@@ -1913,13 +1898,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 if (DatabaseDescriptor.getDefsVersion().timestamp() > 0 || Migration.getLastMigrationId() != null)
                     throw new ConfigurationException("Cannot load from XML on top of pre-existing schemas.");
              
-                // cycle through first to make sure we can satisfy live nodes constraint.
-                int totalNodes = Gossiper.instance.getLiveMembers().size() + Gossiper.instance.getUnreachableMembers().size();
-                for (KSMetaData table : tables)
-                    if (totalNodes < table.replicationFactor)
-                        throw new ConfigurationException(String.format("%s live nodes are not enough to support replication factor %s",
-                                                                       totalNodes, table.replicationFactor));
-                
                 Migration migration = null;
                 for (KSMetaData table : tables)
                 {
@@ -1929,7 +1907,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 return migration;
             }
         };
-        Migration migration = null;
+        Migration migration;
         try
         {
             migration = StageManager.getStage(Stage.MIGRATION).submit(call).get();
@@ -2041,14 +2019,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
     
     // Never ever do this at home. Used by tests.
-    Map<String, AbstractReplicationStrategy> setReplicationStrategyUnsafe(Map<String, AbstractReplicationStrategy> replacement)
-    {
-        Map<String, AbstractReplicationStrategy> old = replicationStrategies;
-        replicationStrategies = replacement;
-        return old;
-    }
-
-    // Never ever do this at home. Used by tests.
     IPartitioner setPartitionerUnsafe(IPartitioner newPartitioner)
     {
         IPartitioner oldPartitioner = partitioner_;
@@ -2068,4 +2038,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         StorageProxy.truncateBlocking(keyspace, columnFamily);
     }
+
+    public void saveCaches() throws ExecutionException, InterruptedException
+    {
+        List<Future<?>> futures = new ArrayList<Future<?>>();
+        logger_.debug("submitting cache saves");
+        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+        {
+            futures.add(cfs.submitKeyCacheWrite());
+            futures.add(cfs.submitRowCacheWrite());
+        }
+        FBUtilities.waitOnFutures(futures);
+        logger_.debug("cache saves completed");
+    }
+
 }

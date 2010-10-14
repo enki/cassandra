@@ -156,27 +156,36 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
 
     public static SSTableReader open(Descriptor descriptor, Set<Component> components, CFMetaData metadata, IPartitioner partitioner) throws IOException
     {
+        return open(descriptor, components, Collections.<DecoratedKey>emptySet(), null, metadata, partitioner);
+    }
+
+    public static SSTableReader open(Descriptor descriptor, Set<Component> components, Set<DecoratedKey> savedKeys, SSTableTracker tracker, CFMetaData metadata, IPartitioner partitioner) throws IOException
+    {
         assert partitioner != null;
 
         long start = System.currentTimeMillis();
         logger.info("Sampling index for " + descriptor);
 
         SSTableReader sstable = new SSTableReader(descriptor, components, metadata, partitioner, null, null, null, null, System.currentTimeMillis(), null, null);
+        sstable.setTrackedBy(tracker);
 
         // versions before 'c' encoded keys as utf-16 before hashing to the filter
         if (descriptor.hasStringsInBloomFilter)
         {
-            sstable.load(true);
+            sstable.load(true, savedKeys);
         }
         else
         {
-            sstable.load(false);
+            sstable.load(false, savedKeys);
             sstable.loadBloomFilter();
         }
         sstable.loadStatistics(descriptor);
 
         if (logger.isDebugEnabled())
             logger.debug("INDEX LOAD TIME for " + descriptor + ": " + (System.currentTimeMillis() - start) + " ms.");
+
+        if (logger.isDebugEnabled() && sstable.getKeyCache() != null)
+            logger.debug(String.format("key cache contains %s/%s keys", sstable.getKeyCache().getSize(), sstable.getKeyCache().getCapacity()));
 
         return sstable;
     }
@@ -217,14 +226,17 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
 
     public void setTrackedBy(SSTableTracker tracker)
     {
-        phantomReference = new SSTableDeletingReference(tracker, this, finalizerQueue);
-        finalizers.add(phantomReference);
-        keyCache = tracker.getKeyCache();
+        if (tracker != null)
+        {
+            phantomReference = new SSTableDeletingReference(tracker, this, finalizerQueue);
+            finalizers.add(phantomReference);
+            keyCache = tracker.getKeyCache();
+        }
     }
 
     void loadBloomFilter() throws IOException
     {
-        DataInputStream stream = new DataInputStream(new FileInputStream(desc.filenameFor(Component.FILTER)));
+        DataInputStream stream = new DataInputStream(new FileInputStream(descriptor.filenameFor(Component.FILTER)));
         try
         {
             bf = BloomFilter.serializer().deserialize(stream);
@@ -238,32 +250,48 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
     /**
      * Loads ifile, dfile and indexSummary, and optionally recreates the bloom filter.
      */
-    private void load(boolean recreatebloom) throws IOException
+    private void load(boolean recreatebloom, Set<DecoratedKey> keysToLoadInCache) throws IOException
     {
+        boolean cacheLoading = keyCache != null && !keysToLoadInCache.isEmpty();
         SegmentedFile.Builder ibuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
         SegmentedFile.Builder dbuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
 
         // we read the positions in a BRAF so we don't have to worry about an entry spanning a mmap boundary.
-        indexSummary = new IndexSummary();
-        BufferedRandomAccessFile input = new BufferedRandomAccessFile(desc.filenameFor(Component.PRIMARY_INDEX), "r");
+        BufferedRandomAccessFile input = new BufferedRandomAccessFile(descriptor.filenameFor(Component.PRIMARY_INDEX), "r");
         try
         {
+            if (keyCache != null && keyCache.getCapacity() - keyCache.getSize() < keysToLoadInCache.size())
+                keyCache.updateCapacity(keyCache.getSize() + keysToLoadInCache.size());
+
             long indexSize = input.length();
+            long estimatedKeys = SSTable.estimateRowsFromIndex(input);
+            indexSummary = new IndexSummary(estimatedKeys);
             if (recreatebloom)
                 // estimate key count based on index length
-                bf = BloomFilter.getFilter((int)(input.length() / 32), 15);
+                bf = BloomFilter.getFilter(estimatedKeys, 15);
             while (true)
             {
                 long indexPosition = input.getFilePointer();
                 if (indexPosition == indexSize)
                     break;
 
-                DecoratedKey decoratedKey = decodeKey(partitioner, desc, FBUtilities.readShortByteArray(input));
-                if (recreatebloom)
-                    bf.add(decoratedKey.key);
+                boolean shouldAddEntry = indexSummary.shouldAddEntry();
+                byte[] key = (shouldAddEntry || cacheLoading || recreatebloom)
+                             ? FBUtilities.readShortByteArray(input)
+                             : FBUtilities.skipShortByteArray(input);
                 long dataPosition = input.readLong();
+                if (key != null)
+                {
+                    DecoratedKey decoratedKey = decodeKey(partitioner, descriptor, key);
+                    if (recreatebloom)
+                        bf.add(decoratedKey.key);
+                    if (shouldAddEntry)
+                        indexSummary.addEntry(decoratedKey, indexPosition);
+                    if (cacheLoading && keysToLoadInCache.contains(decoratedKey))
+                        keyCache.put(new Pair(descriptor, decoratedKey), dataPosition);
+                }
 
-                indexSummary.maybeAddEntry(decoratedKey, indexPosition);
+                indexSummary.incrementRowid();
                 ibuilder.addPotentialBoundary(indexPosition);
                 dbuilder.addPotentialBoundary(dataPosition);
             }
@@ -275,9 +303,8 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
         }
 
         // finalize the state of the reader
-        indexSummary.complete();
-        ifile = ibuilder.complete(desc.filenameFor(Component.PRIMARY_INDEX));
-        dfile = dbuilder.complete(desc.filenameFor(Component.DATA));
+        ifile = ibuilder.complete(descriptor.filenameFor(Component.PRIMARY_INDEX));
+        dfile = dbuilder.complete(descriptor.filenameFor(Component.DATA));
     }
 
     /** get the position in the index file to start scanning to find the given key (at most indexInterval keys away) */
@@ -381,7 +408,7 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
             return -1;
 
         // next, the key cache
-        Pair<Descriptor, DecoratedKey> unifiedKey = new Pair<Descriptor, DecoratedKey>(desc, decoratedKey);
+        Pair<Descriptor, DecoratedKey> unifiedKey = new Pair<Descriptor, DecoratedKey>(descriptor, decoratedKey);
         if (keyCache != null && keyCache.getCapacity() > 0)
         {
             Long cachedPosition = keyCache.get(unifiedKey);
@@ -411,7 +438,7 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
                 while (!input.isEOF())
                 {
                     // read key & data position from index entry
-                    DecoratedKey indexDecoratedKey = decodeKey(partitioner, desc, FBUtilities.readShortByteArray(input));
+                    DecoratedKey indexDecoratedKey = decodeKey(partitioner, descriptor, FBUtilities.readShortByteArray(input));
                     long dataPosition = input.readLong();
 
                     int comparison = indexDecoratedKey.compareTo(decoratedKey);
@@ -471,7 +498,7 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
             logger.debug("Marking " + getFilename() + " compacted");
         try
         {
-            if (!new File(desc.filenameFor(Component.COMPACTED_MARKER)).createNewFile())
+            if (!new File(descriptor.filenameFor(Component.COMPACTED_MARKER)).createNewFile())
                 throw new IOException("Unable to create compaction marker");
         }
         catch (IOException e)
@@ -513,7 +540,7 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
 
     public int compareTo(SSTableReader o)
     {
-        return desc.generation - o.desc.generation;
+        return descriptor.generation - o.descriptor.generation;
     }
 
     public AbstractType getColumnComparator()
@@ -529,8 +556,8 @@ public class SSTableReader extends SSTable implements Comparable<SSTableReader>
     public ICompactSerializer2<IColumn> getColumnSerializer()
     {
         return metadata.cfType == ColumnFamilyType.Standard
-               ? Column.serializer(metadata.clockType)
-               : SuperColumn.serializer(getColumnComparator(), metadata.clockType, metadata.reconciler);
+               ? Column.serializer()
+               : SuperColumn.serializer(getColumnComparator());
     }
 
     /**

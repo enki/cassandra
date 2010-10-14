@@ -48,7 +48,8 @@ public class CliClient
         PRELOAD_ROW_CACHE,
         KEY_CACHE_SIZE,
         READ_REPAIR_CHANCE,
-        GC_GRACE_SECONDS
+        GC_GRACE_SECONDS,
+        COLUMN_METADATA
     }
 
     /*
@@ -57,7 +58,8 @@ public class CliClient
      */
     private enum AddKeyspaceArgument {
         REPLICATION_FACTOR,
-        PLACEMENT_STRATEGY
+        PLACEMENT_STRATEGY,
+        STRATEGY_OPTIONS
     }
 
     private Cassandra.Client thriftClient_ = null;
@@ -66,6 +68,8 @@ public class CliClient
     private String username = null;
     private Map<String, KsDef> keyspacesMap = new HashMap<String, KsDef>();
 
+    private final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.SimpleStrategy";
+    
     public CliClient(CliSessionState cliSessionState, Cassandra.Client thriftClient)
     {
         css_ = cliSessionState;
@@ -99,11 +103,17 @@ public class CliClient
                 case CliParser.NODE_THRIFT_COUNT:
                     executeCount(ast);
                     break;
-                case CliParser.NODE_ADD_COLUMN_FAMILY:
-                    executeAddColumnFamily(ast);
-                    break;
                 case CliParser.NODE_ADD_KEYSPACE:
-                    executeAddKeyspace(ast);
+                    executeAddKeyspace(ast.getChild(0));
+                    break;
+                case CliParser.NODE_ADD_COLUMN_FAMILY:
+                    executeAddColumnFamily(ast.getChild(0));
+                    break;
+                case CliParser.NODE_UPDATE_KEYSPACE:
+                    executeUpdateKeyspace(ast.getChild(0));
+                    break;
+                case CliParser.NODE_UPDATE_COLUMN_FAMILY:
+                    executeUpdateColumnFamily(ast.getChild(0));
                     break;
                 case CliParser.NODE_DEL_COLUMN_FAMILY:
                     executeDelColumnFamily(ast);
@@ -124,7 +134,7 @@ public class CliClient
                     executeShowVersion();
                     break;
                 case CliParser.NODE_SHOW_TABLES:
-                    executeShowTables(ast);
+                    executeShowTables();
                     break;
                 case CliParser.NODE_DESCRIBE_TABLE:
                     executeDescribeTable(ast);
@@ -217,12 +227,34 @@ public class CliClient
                 css_.out.println("                        this keyspace. Valid values are");
                 css_.out.println("                        org.apache.cassandra.locator.SimpleStrategy,");
                 css_.out.println("                        org.apache.cassandra.locator.NetworkTopologyStrategy,");
-                css_.out.println("                        and org.apache.cassandra.locator.OldNetworkTopologyStrategy\n");
+                css_.out.println("                        and org.apache.cassandra.locator.OldNetworkTopologyStrategy");
+                css_.out.println("      strategy_options: additional options for placement_strategy.\n");
                 css_.out.println("example:");
                 css_.out.println("create keyspace foo with replication_factor = 3 and ");
                 css_.out.println("        placement_strategy = 'org.apache.cassandra.locator.SimpleStrategy'");
+                css_.out.println("        and strategy_options=[{DC1:2, DC2:2}]");
                 break;
-                
+
+            case CliParser.NODE_UPDATE_KEYSPACE:
+                css_.out.println("update keyspace <keyspace>");
+                css_.out.println("update keyspace <keyspace> with <att1>=<value1>");
+                css_.out.println("update keyspace <keyspace> with <att1>=<value1> and <att2>=<value2> ...\n");
+                css_.out.println("Update a keyspace with the specified values for the given set of attributes.\n");
+                css_.out.println("valid attributes are:");
+                css_.out.println("    replication_factor: to how many nodes should entries to this keyspace be");
+                css_.out.println("                        replicated. Valid entries are integers greater than 0.");
+                css_.out.println("    placement_strategy: the fully qualified class used to place replicas in");
+                css_.out.println("                        this keyspace. Valid values are");
+                css_.out.println("                        org.apache.cassandra.locator.SimpleStrategy,");
+                css_.out.println("                        org.apache.cassandra.locator.NetworkTopologyStrategy,");
+                css_.out.println("                        and org.apache.cassandra.locator.OldNetworkTopologyStrategy");
+                css_.out.println("      strategy_options: additional options for placement_strategy.\n");
+                css_.out.println("example:");
+                css_.out.println("update keyspace foo with replication_factor = 2 and ");
+                css_.out.println("        placement_strategy = 'org.apache.cassandra.locator.LocalStrategy'");
+                css_.out.println("        and strategy_options=[{DC1:1, DC2:4, DC3:2}]");
+                break;
+
             case CliParser.NODE_ADD_COLUMN_FAMILY:
                 css_.out.println("create column family Bar");
                 css_.out.println("create column family Bar with <att1>=<value1>");
@@ -243,12 +275,42 @@ public class CliClient
                 css_.out.println("    - key_cache_size: Number of keys to cache");
                 css_.out.println("    - read_repair_chance: Valid values for this attribute are any number");
                 css_.out.println("                          between 0.0 and 1.0\n");
+                css_.out.println("    - column_metadata: Metadata which describes columns of column family.");
+                css_.out.println("        Supported format is [{ k:v, k:v, ... }, { ... }, ...]");
+                css_.out.println("        Valid attributes: column_name, validation_class (see comparator),");
+                css_.out.println("                          index_type (integer), index_name.");
                 css_.out.println("example:\n");
-                css_.out.println("create column family bar with column_type = 'Super' and comparator = 'AsciiType'");
+                css_.out.println("create column family Bar with column_type = 'Super' and comparator = 'AsciiType'");
                 css_.out.println("      and rows_cached = 10000");
-                css_.out.println("create column family baz with comparator = 'LongType' and rows_cached = 10000");
+                css_.out.println("create column family Baz with comparator = 'LongType' and rows_cached = 10000");
+                css_.out.print("create column family Foo with comparator=LongType and column_metadata=");
+                css_.out.print("[{ column_name:Test, validation_class:IntegerType, index_type:0, index_name:IdxName");
+                css_.out.println("}, { column_name:'other name', validation_class:LongType }]");
                 break;
-                
+
+            case CliParser.NODE_UPDATE_COLUMN_FAMILY:
+                css_.out.println("update column family Bar");
+                css_.out.println("update column family Bar with <att1>=<value1>");
+                css_.out.println("update column family Bar with <att1>=<value1> and <att2>=<value2>...\n");
+                css_.out.println("Update a column family with the specified values for the given set of");
+                css_.out.println("attributes. Note that you must be using a keyspace.\n");
+                css_.out.println("valid attributes are:");
+                css_.out.println("    - comment: Human-readable column family description. Any string is valid.");
+                css_.out.println("    - rows_cached: Number of rows to cache");
+                css_.out.println("    - preload_row_cache: Set to true to automatically load the row cache");
+                css_.out.println("    - key_cache_size: Number of keys to cache");
+                css_.out.println("    - read_repair_chance: Valid values for this attribute are any number");
+                css_.out.println("                          between 0.0 and 1.0\n");
+                css_.out.println("    - column_metadata: Metadata which describes columns of column family.");
+                css_.out.println("        Supported format is [{ k:v, k:v, ... }, { ... }, ...]");
+                css_.out.println("        Valid attributes: column_name, validation_class (see comparator),");
+                css_.out.println("                          index_type (integer), index_name.");
+                css_.out.println("example:\n");
+                css_.out.print("update column family Foo with column_metadata=");
+                css_.out.print("[{ column_name:Test, validation_class:IntegerType, index_type:0, index_name:IdxName");
+                css_.out.println("}] and rows_cached=100 and comment='this is helpful comment.'");
+                break;
+
             case CliParser.NODE_RENAME_KEYSPACE:
                 css_.out.println("rename keyspace <old_name> <new_name>\n");
                 css_.out.println("Renames the specified keyspace with the given new name.\n");
@@ -335,9 +397,13 @@ public class CliClient
             css_.out.println("show keyspaces                                           Show list of keyspaces.");
             css_.out.println("show api version                                        Show server API version.");
             css_.out.println("create keyspace <keyspace> [with <att1>=<value1> [and <att2>=<value2> ...]]");
-            css_.out.println("                   Add a new keyspace with the specified attribute and value(s).");
+            css_.out.println("                Add a new keyspace with the specified attribute(s) and value(s).");
+            css_.out.println("update keyspace <keyspace> [with <att1>=<value1> [and <att2>=<value2> ...]]");
+            css_.out.println("                 Update a keyspace with the specified attribute(s) and value(s).");
             css_.out.println("create column family <cf> [with <att1>=<value1> [and <att2>=<value2> ...]]");
-            css_.out.println("           Create a new column family with the specified attribute and value(s).");
+            css_.out.println("        Create a new column family with the specified attribute(s) and value(s).");
+            css_.out.println("update column family <cf> [with <att1>=<value1> [and <att2>=<value2> ...]]");
+            css_.out.println("            Update a column family with the specified attribute(s) and value(s).");
             css_.out.println("drop keyspace <keyspace>                                      Delete a keyspace.");
             css_.out.println("drop column family <cf>                                  Delete a column family.");
             css_.out.println("rename keyspace <keyspace> <keyspace_new_name>                Rename a keyspace.");
@@ -512,13 +578,20 @@ public class CliClient
         return getFormatTypeForColumn(getCfDef(keyspace,columnFamily).comparator_type).getString(column.name);
     }
 
-    private AbstractType getFormatTypeForColumn(String compareWith) throws IllegalAccessException, InstantiationException, NoSuchFieldException
+    private AbstractType getFormatTypeForColumn(String compareWith)
     {
         AbstractType type;
         try {
             // Get the singleton instance of the AbstractType subclass
             Class c = Class.forName(compareWith);
-            type = (AbstractType) c.getField("instance").get(c);
+            try
+            {
+                type = (AbstractType) c.getField("instance").get(c);
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException(e.getMessage(), e);
+            }
         } catch (ClassNotFoundException e) {
             type = BytesType.instance;
         }
@@ -540,21 +613,8 @@ public class CliClient
         String key = CliCompiler.getKey(columnFamilySpec);
         String columnFamily = CliCompiler.getColumnFamily(columnFamilySpec);
         int columnSpecCnt = CliCompiler.numColumnSpecifiers(columnFamilySpec);
-
-        List<String> cfnames = new ArrayList<String>();
-        for (CfDef cfd : keyspacesMap.get(keySpace).cf_defs)
-        {
-            cfnames.add(cfd.name);
-        }
- 
-        int idx = cfnames.indexOf(columnFamily);
-        if (idx == -1)
-        {
-            css_.out.println("No such column family: " + columnFamily);
-            return;
-        }
-
-        boolean isSuper = keyspacesMap.get(keySpace).cf_defs.get(idx).column_type.equals("Super");
+        CfDef columnFamilyDef = getCfDef(columnFamily);
+        boolean isSuper = columnFamilyDef.comparator_type.equals("Super");
         
         byte[] superColumnName = null;
         String columnName;
@@ -593,12 +653,19 @@ public class CliClient
             return;
         }
 
+        byte[] columnNameInBytes = columnNameAsByteArray(columnName, columnFamily);
+        AbstractType validator = getValidatorForValue(columnFamilyDef, columnNameInBytes);
+        
         // Perform a get()
-        ColumnPath path = new ColumnPath(columnFamily).setSuper_column(superColumnName).setColumn(columnNameAsByteArray(columnName, columnFamily));
+        ColumnPath path = new ColumnPath(columnFamily).setSuper_column(superColumnName).setColumn(columnNameInBytes);
         Column column = thriftClient_.get(key.getBytes(), path, ConsistencyLevel.ONE).column;
+
+        byte[] columnValue = column.getValue();
+        String valueAsString = (validator == null) ? new String(columnValue, "UTF-8") : validator.getString(columnValue);
+
         // print results
         css_.out.printf("=> (column=%s, value=%s, timestamp=%d)\n",
-                        formatColumnName(keySpace, columnFamily, column), new String(column.value, "UTF-8"), column.timestamp);
+                        formatColumnName(keySpace, columnFamily, column), valueAsString, column.timestamp);
     }
 
     // Execute SET statement
@@ -643,9 +710,13 @@ public class CliClient
             columnName = CliCompiler.getColumn(columnFamilySpec, 1);
         }
 
+
+        byte[] columnNameInBytes  = columnNameAsByteArray(columnName, columnFamily);
+        byte[] columnValueInBytes = columnValueAsByteArray(columnNameInBytes, columnFamily, value);
+        
         // do the insert
         thriftClient_.insert(key.getBytes(), new ColumnParent(columnFamily).setSuper_column(superColumnName),
-                             new Column(columnNameAsByteArray(columnName, columnFamily), value.getBytes(), FBUtilities.timestampMicros()), ConsistencyLevel.ONE);
+                             new Column(columnNameInBytes, columnValueInBytes, FBUtilities.timestampMicros()), ConsistencyLevel.ONE);
         
         css_.out.println("Value inserted.");
     }
@@ -659,89 +730,183 @@ public class CliClient
 
     /**
      * Add a keyspace
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * @param statement - a token tree representing current statement
      */
-    private void executeAddKeyspace(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
+    private void executeAddKeyspace(Tree statement)
     {
 
         if (!CliMain.isConnected())
         {
             return;
         }
-        CommonTree newKSSpec = (CommonTree)ast.getChild(0);
+        
+        // defaults
+        List<CfDef> columnList = new LinkedList<CfDef>();
+        
+        // first value is the keyspace name, after that it is all key=value
+        String keyspaceName = statement.getChild(0).getText();
+        KsDef ksDef = new KsDef(keyspaceName, DEFAULT_PLACEMENT_STRATEGY, 1, columnList);
 
-        //parser send the keyspace, plus a series of key value pairs, ie should always be an odd number...
-        assert(newKSSpec.getChildCount() > 0);
-        assert(newKSSpec.getChildCount() % 2 == 1);
-
-        //defaults
-        String replicaPlacementStrategy = "org.apache.cassandra.locator.SimpleStrategy";
-        int replicationFactor = 1;
-
-        /*
-         * first value is the keyspace name, after that it is all key=value
-         */
-        String keyspaceName = newKSSpec.getChild(0).getText();
-        int argumentLength = newKSSpec.getChildCount();
-
-        for(int i = 1; i < argumentLength; i = i + 2)
+        try
         {
-            AddKeyspaceArgument mArgument = AddKeyspaceArgument.valueOf(newKSSpec.getChild(i).getText().toUpperCase());
-            String mValue = newKSSpec.getChild(i + 1).getText();
+            css_.out.println(thriftClient_.system_add_keyspace(updateKsDefAttributes(statement, ksDef)));
+            keyspacesMap.put(keyspaceName, thriftClient_.describe_keyspace(keyspaceName));
+        }
+        catch (InvalidRequestException e)
+        {
+            throw new RuntimeException(e.getWhy());
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
+
+
+    /**
+     * Add a column family
+     * @param statement - a token tree representing current statement
+     */
+    private void executeAddColumnFamily(Tree statement)
+    {
+        if (!CliMain.isConnected() || !hasKeySpace())
+        {
+            return;
+        }
+
+        // first value is the column family name, after that it is all key=value
+        String columnFamilyName = statement.getChild(0).getText();
+        CfDef cfDef = new CfDef(keySpace, columnFamilyName);
+
+        try
+        {
+            css_.out.println(thriftClient_.system_add_column_family(updateCfDefAttributes(statement, cfDef)));
+            keyspacesMap.put(keySpace, thriftClient_.describe_keyspace(keySpace));
+        }
+        catch (InvalidRequestException e)
+        {
+            throw new RuntimeException(e.getWhy());
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Update existing keyspace identified by name
+     * @param statement - tree represeting statement
+     */
+    private void executeUpdateKeyspace(Tree statement)
+    {
+        if (!CliMain.isConnected())
+        {
+            return;
+        }
+
+        String keyspaceName = statement.getChild(0).getText();
+        
+        try
+        {
+            KsDef currentKsDef = getKSMetaData(keyspaceName);
+            KsDef updatedKsDef = updateKsDefAttributes(statement, currentKsDef);
+
+            css_.out.println(thriftClient_.system_update_keyspace(updatedKsDef));
+            keyspacesMap.put(keyspaceName, thriftClient_.describe_keyspace(keyspaceName));
+        }
+        catch (InvalidRequestException e)
+        {
+            throw new RuntimeException(e.getWhy());
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Update existing column family identified by name
+     * @param statement - tree represeting statement
+     */
+    private void executeUpdateColumnFamily(Tree statement)
+    {
+        if (!CliMain.isConnected() || !hasKeySpace())
+        {
+            return;
+        }
+
+        String columnFamilyName = statement.getChild(0).getText();
+        CfDef cfDef = getCfDef(columnFamilyName);
+
+        try
+        {
+            css_.out.println(thriftClient_.system_update_column_family(updateCfDefAttributes(statement, cfDef)));
+            keyspacesMap.put(keySpace, thriftClient_.describe_keyspace(keySpace));
+        }
+        catch (InvalidRequestException e)
+        {
+            throw new RuntimeException(e.getWhy());
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Used to update keyspace definition attributes
+     * @param statement - ANTRL tree representing current statement
+     * @param ksDefToUpdate - keyspace definition to update
+     * @return ksDef - updated keyspace definition
+     */
+    private KsDef updateKsDefAttributes(Tree statement, KsDef ksDefToUpdate)
+    {
+        KsDef ksDef = new KsDef(ksDefToUpdate);
+        
+        // removing all column definitions - thrift system_update_keyspace method requires that 
+        ksDef.setCf_defs(new LinkedList<CfDef>());
+        
+        for(int i = 1; i < statement.getChildCount(); i += 2)
+        {
+            String currentStatement = statement.getChild(i).getText().toUpperCase();
+            AddKeyspaceArgument mArgument = AddKeyspaceArgument.valueOf(currentStatement);
+            String mValue = statement.getChild(i + 1).getText();
 
             switch(mArgument)
             {
-            case PLACEMENT_STRATEGY:
-                replicaPlacementStrategy = CliUtils.unescapeSQLString(mValue);
+            case PLACEMENT_STRATEGY: 
+                ksDef.setStrategy_class(CliUtils.unescapeSQLString(mValue));
                 break;
             case REPLICATION_FACTOR:
-                replicationFactor = Integer.parseInt( mValue);
+                ksDef.setReplication_factor(Integer.parseInt(mValue));
+                break;
+            case STRATEGY_OPTIONS:
+                ksDef.setStrategy_options(getStrategyOptionsFromTree(statement.getChild(i + 1)));
                 break;
             default:
                 //must match one of the above or we'd throw an exception at the valueOf statement above.
                 assert(false);
             }
         }
-        List<CfDef> mList = new LinkedList<CfDef>();
-        KsDef ks_def = new KsDef(keyspaceName, replicaPlacementStrategy, replicationFactor, mList);
-        css_.out.println(thriftClient_.system_add_keyspace(ks_def));
 
-        keyspacesMap.put(keyspaceName, thriftClient_.describe_keyspace(keyspaceName));
+        return ksDef;
     }
-
-
+    
     /**
-     * Add a column family
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * Update column family definition attributes
+     * @param statement - ANTLR tree representing current statement
+     * @param cfDefToUpdate - column family definition to apply updates on
+     * @return cfDef - updated column family definition
      */
-    private void executeAddColumnFamily(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
+    private CfDef updateCfDefAttributes(Tree statement, CfDef cfDefToUpdate)
     {
-        if (!CliMain.isConnected() || !hasKeySpace())
+        CfDef cfDef = new CfDef(cfDefToUpdate);
+
+        for (int i = 1; i < statement.getChildCount(); i += 2)
         {
-            return;
-        }
-        CommonTree newCFTree = (CommonTree)ast.getChild(0);
-        //parser send the keyspace, plus a series of key value pairs, ie should always be an odd number...
-        assert(newCFTree.getChildCount() > 0);
-        assert(newCFTree.getChildCount() % 2 == 1);
-
-
-        /*
-         * first value is the keyspace name, after that it is all key=value
-         */
-        String columnName = newCFTree.getChild(0).getText();
-        int argumentLength = newCFTree.getChildCount();
-        CfDef cfDef = new CfDef(keySpace, columnName);        
-
-        for(int i = 1; i < argumentLength; i = i + 2)
-        {
-            AddColumnFamilyArgument mArgument = AddColumnFamilyArgument.valueOf(newCFTree.getChild(i).getText().toUpperCase());
-            String mValue = newCFTree.getChild(i + 1).getText();
-
+            String currentArgument = statement.getChild(i).getText().toUpperCase();
+            AddColumnFamilyArgument mArgument = AddColumnFamilyArgument.valueOf(currentArgument);
+            String mValue = statement.getChild(i + 1).getText();
 
             switch(mArgument)
             {
@@ -781,21 +946,33 @@ public class CliClient
                 cfDef.setGc_grace_seconds(Integer.parseInt(mValue));
                 break;
 
+            case COLUMN_METADATA:
+                Tree arrayOfMetaAttributes = statement.getChild(i + 1);
+
+                if (!arrayOfMetaAttributes.getText().equals("ARRAY"))
+                {
+                    throw new RuntimeException("'column_metadata' format - [{ k:v, k:v, ..}, { ... }, ...]");
+                }
+
+                cfDef.setColumn_metadata(getCFColumnMetaFromTree(arrayOfMetaAttributes));
+                break;
+
             default:
                 //must match one of the above or we'd throw an exception at the valueOf statement above.
                 assert(false);
 
             }
         }
-        css_.out.println(thriftClient_.system_add_column_family(cfDef));
-        keyspacesMap.put(keySpace, thriftClient_.describe_keyspace(keySpace));
+
+        return cfDef;
     }
 
     /**
      * Delete a keyspace
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * @param ast - a token tree representing current statement
+     * @throws TException - exception
+     * @throws InvalidRequestException - exception
+     * @throws NotFoundException - exception
      */
     private void executeDelKeyspace(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
     {
@@ -811,9 +988,10 @@ public class CliClient
 
     /**
      * Delete a column family
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * @param ast - a token tree representing current statement
+     * @throws TException - exception
+     * @throws InvalidRequestException - exception
+     * @throws NotFoundException - exception
      */
     private void executeDelColumnFamily(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
     {
@@ -826,10 +1004,11 @@ public class CliClient
     }
 
     /**
-     * Add a column family
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * Rename existing keyspace
+     * @param ast - a token tree representing current statement
+     * @throws TException - exception
+     * @throws InvalidRequestException - exception
+     * @throws NotFoundException - exception
      */
     private void executeRenameKeyspace(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
     {
@@ -844,10 +1023,11 @@ public class CliClient
     }
 
     /**
-     * Add a column family
-     * @throws TException
-     * @throws InvalidRequestException 
-     * @throws NotFoundException 
+     * Rename existing column family
+     * @param ast - a token tree representing current statement
+     * @throws TException - exception
+     * @throws InvalidRequestException - exception
+     * @throws NotFoundException - exception
      */
     private void executeRenameColumnFamily(CommonTree ast) throws TException, InvalidRequestException, NotFoundException
     {
@@ -869,7 +1049,7 @@ public class CliClient
     }
 
     // process "show tables" statement
-    private void executeShowTables(CommonTree ast) throws TException, InvalidRequestException
+    private void executeShowTables() throws TException, InvalidRequestException
     {
         if (!CliMain.isConnected())
             return;
@@ -973,22 +1153,18 @@ public class CliClient
         {
             css_.err.println("Exception during authentication to the cassandra node: " +
             		"verify keyspace exists, and you are using correct credentials.");
-            return;
         } 
         catch (AuthorizationException e) 
         {
             css_.err.println("You are not authorized to use keyspace: " + tableName);
-            return;
         }
         catch (InvalidRequestException e)
         {
             css_.err.println(tableName + " does not exist.");
-            return;
         }
         catch (NotFoundException e)
         {
             css_.err.println(tableName + " does not exist.");
-            return;
         } 
         catch (TException e) 
         {
@@ -996,7 +1172,6 @@ public class CliClient
                 e.printStackTrace();
             
             css_.err.println("Login failure. Did you specify 'keyspace', 'username' and 'password'?");
-            return;
         }
     }
 
@@ -1084,49 +1259,290 @@ public class CliClient
         CliMain.connect(css_.hostName, css_.thriftPort);
     }
 
-    private CfDef getCfDef(String ksname, String cfname)
+    /**
+     * To get Column Family Definition object from specified keyspace
+     * @param keySpaceName key space name to search for specific column family
+     * @param columnFamilyName column family name 
+     * @return CfDef - Column family definition object
+     */
+    private CfDef getCfDef(String keySpaceName, String columnFamilyName)
     {
-        List<String> cfnames = new ArrayList<String>();
-        KsDef ksd = keyspacesMap.get(ksname);
-        for (CfDef cfd : ksd.cf_defs) {
-            cfnames.add(cfd.name);
+        KsDef keySpaceDefinition = keyspacesMap.get(keySpaceName);
+        
+        for (CfDef columnFamilyDef : keySpaceDefinition.cf_defs)
+        {
+            if (columnFamilyDef.name.equals(columnFamilyName))
+            {
+                return columnFamilyDef;
+            }
         }
-        int idx = cfnames.indexOf(cfname);
-        return ksd.cf_defs.get(idx);
+
+        throw new RuntimeException("No such column family: " + columnFamilyName);
     }
 
-    private byte[] columnNameAsByteArray(final String column, final String columnFamily) throws NoSuchFieldException, InstantiationException, IllegalAccessException, UnsupportedEncodingException
+    /**
+     * Uses getCfDef(keySpaceName, columnFamilyName) with current keyspace
+     * @param columnFamilyName column family name to find in specified keyspace
+     * @return CfDef - Column family definition object
+     */
+    private CfDef getCfDef(String columnFamilyName)
     {
-        List<String> cfnames = new ArrayList<String>();
-        for (CfDef cfd : keyspacesMap.get(keySpace).cf_defs)
+        return getCfDef(this.keySpace, columnFamilyName);
+    }
+    
+    /**
+     * Used to parse meta tree and compile meta attributes into List<ColumnDef>
+     * @param meta (Tree representing Array of the hashes with metadata attributes)
+     * @return List<ColumnDef> List of the ColumnDef's
+     * 
+     * meta is in following format - ^(ARRAY ^(HASH ^(PAIR .. ..) ^(PAIR .. ..)) ^(HASH ...))
+     */
+    private List<ColumnDef> getCFColumnMetaFromTree(Tree meta)
+    {
+        // this list will be returned
+        List<ColumnDef> columnDefinitions = new ArrayList<ColumnDef>();
+        
+        // each child node is a ^(HASH ...)
+        for (int i = 0; i < meta.getChildCount(); i++)
         {
-            cfnames.add(cfd.name);
+            Tree metaHash = meta.getChild(i);
+
+            ColumnDef columnDefinition = new ColumnDef();
+            
+            // each child node is ^(PAIR $key $value)
+            for (int j = 0; j < metaHash.getChildCount(); j++)
+            {
+                Tree metaPair = metaHash.getChild(j);
+
+                // current $key
+                String metaKey = CliUtils.unescapeSQLString(metaPair.getChild(0).getText());
+                // current $value
+                String metaVal = CliUtils.unescapeSQLString(metaPair.getChild(1).getText());
+
+                if (metaKey.equals("column_name"))
+                {
+                    try
+                    {
+                        columnDefinition.setName(metaVal.getBytes("UTF-8"));
+                    }
+                    catch (UnsupportedEncodingException e)
+                    {
+                        throw new RuntimeException(e.getMessage(), e);
+                    }
+                }
+                else if (metaKey.equals("validation_class"))
+                {
+                    columnDefinition.setValidation_class(metaVal);
+                }
+                else if (metaKey.equals("index_type"))
+                {
+                    columnDefinition.setIndex_type(getIndexTypeFromString(metaVal));
+                }
+                else if (metaKey.equals("index_name"))
+                {
+                    columnDefinition.setIndex_name(metaVal);    
+                }
+            }
+
+            // validating columnDef structure, 'name' and 'validation_class' must be set 
+            try
+            {
+                columnDefinition.validate();
+            }
+            catch (TException e)
+            {
+                throw new RuntimeException(e.getMessage(), e);
+            }
+
+            columnDefinitions.add(columnDefinition);
         }
 
-        int idx = cfnames.indexOf(columnFamily);
-        if (idx == -1)
-        {
-            throw new NoSuchFieldException("No such column family: " + columnFamily);
+        return columnDefinitions;
+    }
+
+    /**
+     * Getting IndexType object from indexType string
+     * @param indexTypeAsString - string return by parser corresponding to IndexType 
+     * @return IndexType - an IndexType object
+     */
+    private IndexType getIndexTypeFromString(String indexTypeAsString)
+    {
+        Integer indexTypeId;
+        IndexType indexType;
+
+        try {
+            indexTypeId = new Integer(indexTypeAsString);
+        }
+        catch (NumberFormatException e) {
+            throw new RuntimeException("Could not convert " + indexTypeAsString + " into Integer.");
         }
 
-        final String comparatorClass  = keyspacesMap.get(keySpace).cf_defs.get(idx).comparator_type;
-        final AbstractType comparator = getFormatTypeForColumn(comparatorClass);
+        indexType = IndexType.findByValue(indexTypeId);
 
+        if (indexType == null) {
+            throw new RuntimeException(indexTypeAsString + " is unsupported.");
+        }
+
+        return indexType;
+    }
+
+    /**
+     * Converts object represented as string into byte[] according to comparator
+     * @param object - object to covert into byte array
+     * @param comparator - comparator used to convert object
+     * @return byte[] - object in the byte array representation
+     * @throws UnsupportedEncodingException - raised but String.getBytes(encoding)
+     */
+    private byte[] getBytesAccordingToType(String object, AbstractType comparator) throws UnsupportedEncodingException
+    {
         if (comparator instanceof LongType)
         {
-            return FBUtilities.toByteArray(Long.valueOf(column));
+            long longType;
+            try
+            {
+                longType = Long.valueOf(object);
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException("'" + object + "' could not be translated into a LongType.");
+            }
+
+            return FBUtilities.toByteArray(longType);
         }
         else if (comparator instanceof IntegerType)
         {
-            return new BigInteger(column).toByteArray();
+            BigInteger integerType;
+
+            try
+            {
+                integerType =  new BigInteger(object);
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException("'" + object + "' could not be translated into an IntegerType.");
+            }
+
+            return integerType.toByteArray();
         }
         else if (comparator instanceof AsciiType)
         {
-            return column.getBytes("US-ASCII");
+            return object.getBytes("US-ASCII");
         }
         else
         {
-            return column.getBytes("UTF-8");
-        }   
+            return object.getBytes("UTF-8");
+        }
     }
+    
+    /**
+     * Converts column name into byte[] according to comparator type
+     * @param column - column name from parser
+     * @param columnFamily - column family name from parser
+     * @return byte[] - array of bytes in which column name was converted according to comparator type
+     * @throws NoSuchFieldException - raised from getFormatTypeForColumn call
+     * @throws InstantiationException - raised from getFormatTypeForColumn call
+     * @throws IllegalAccessException - raised from getFormatTypeForColumn call
+     * @throws UnsupportedEncodingException - raised from getBytes() calls
+     */
+    private byte[] columnNameAsByteArray(String column, String columnFamily) throws NoSuchFieldException, InstantiationException, IllegalAccessException, UnsupportedEncodingException
+    {
+        CfDef columnFamilyDef   = getCfDef(columnFamily);
+        String comparatorClass  = columnFamilyDef.comparator_type;
+
+        return getBytesAccordingToType(column, getFormatTypeForColumn(comparatorClass));   
+    }
+
+    /**
+     * Converts column value into byte[] according to validation class
+     * @param columnName - column name to which value belongs
+     * @param columnFamilyName - column family name
+     * @param columnValue - actual column value
+     * @return byte[] - value in byte array representation
+     */
+    private byte[] columnValueAsByteArray(byte[] columnName, String columnFamilyName, String columnValue)
+    {
+        CfDef columnFamilyDef = getCfDef(columnFamilyName);
+        
+        for (ColumnDef columnDefinition : columnFamilyDef.getColumn_metadata())
+        {
+            byte[] currentColumnName = columnDefinition.getName();
+
+            if (Arrays.equals(currentColumnName, columnName))
+            {
+                try
+                {
+                    String validationClass = columnDefinition.getValidation_class();
+                    return getBytesAccordingToType(columnValue, getFormatTypeForColumn(validationClass));
+                }
+                catch (Exception e)
+                {
+                    throw new RuntimeException(e.getMessage(), e);
+                }
+            }
+        }
+
+        // if no validation were set returning simple .getBytes()
+        return columnValue.getBytes();
+    }
+
+    /**
+     * Get validator for specific column value
+     * @param ColumnFamilyDef - CfDef object representing column family with metadata
+     * @param columnNameInBytes - column name as byte array
+     * @return AbstractType - validator for column value
+     */
+    private AbstractType getValidatorForValue(CfDef ColumnFamilyDef, byte[] columnNameInBytes)
+    {
+        String defaultValidator = ColumnFamilyDef.default_validation_class;
+        
+        for (ColumnDef columnDefinition : ColumnFamilyDef.getColumn_metadata())
+        {
+            byte[] nameInBytes = columnDefinition.getName();
+
+            if (Arrays.equals(nameInBytes, columnNameInBytes))
+            {
+                return getFormatTypeForColumn(columnDefinition.getValidation_class());
+            }
+        }
+
+        if (defaultValidator != null && !defaultValidator.isEmpty()) 
+        {
+            return getFormatTypeForColumn(defaultValidator);
+        }
+
+        return null;
+    }
+
+    /**
+     * Used to get Map of the provided options by create/update keyspace commands
+     * @param options - tree representing options
+     * @return Map - strategy_options map
+     */
+    private Map<String, String> getStrategyOptionsFromTree(Tree options)
+    {
+        // this map will be returned
+        Map<String, String> strategyOptions = new HashMap<String, String>();
+
+        // each child node is a ^(HASH ...)
+        for (int i = 0; i < options.getChildCount(); i++)
+        {
+            Tree optionsHash = options.getChild(i);
+            
+            // each child node is ^(PAIR $key $value)
+            for (int j = 0; j < optionsHash.getChildCount(); j++)
+            {
+                Tree optionPair = optionsHash.getChild(j);
+
+                // current $key
+                String key = CliUtils.unescapeSQLString(optionPair.getChild(0).getText());
+                // current $value
+                String val = CliUtils.unescapeSQLString(optionPair.getChild(1).getText());
+
+                strategyOptions.put(key, val);
+            }
+        }
+
+        return strategyOptions;
+    }
+
 }

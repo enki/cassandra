@@ -29,7 +29,9 @@ import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.google.common.base.Charsets.UTF_8;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.gms.FailureDetector;
@@ -37,14 +39,12 @@ import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.DigestMismatchException;
+import org.apache.cassandra.service.IWriteResponseHandler;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.WriteResponseHandler;
-import org.apache.cassandra.service.IWriteResponseHandler;
 import org.apache.cassandra.thrift.InvalidRequestException;
 import org.apache.cassandra.utils.WrappedRunnable;
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
-
-import static com.google.common.base.Charsets.UTF_8;
 
 
 /**
@@ -85,15 +85,7 @@ public class HintedHandOffManager
 
     private final NonBlockingHashSet<InetAddress> queuedDeliveries = new NonBlockingHashSet<InetAddress>();
 
-    private final ExecutorService executor_;
-
-    public HintedHandOffManager()
-    {
-        int hhPriority = System.getProperty("cassandra.compaction.priority") == null
-                         ? Thread.NORM_PRIORITY
-                         : Integer.parseInt(System.getProperty("cassandra.compaction.priority"));
-        executor_ = new JMXEnabledThreadPoolExecutor("HintedHandoff", hhPriority);
-    }
+    private final ExecutorService executor_ = new JMXEnabledThreadPoolExecutor("HintedHandoff", DatabaseDescriptor.getCompactionThreadPriority());
 
     private static boolean sendMessage(InetAddress endpoint, String tableName, String cfName, byte[] key) throws IOException
     {
@@ -141,10 +133,10 @@ public class HintedHandOffManager
         return true;
     }
 
-    private static void deleteHintKey(byte[] endpointAddress, byte[] key, byte[] tableCF, IClock clock) throws IOException
+    private static void deleteHintKey(byte[] endpointAddress, byte[] key, byte[] tableCF, long timestamp) throws IOException
     {
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, endpointAddress);
-        rm.delete(new QueryPath(HINTS_CF, key, tableCF), clock);
+        rm.delete(new QueryPath(HINTS_CF, key, tableCF), timestamp);
         rm.apply();
     }                                                         
 
@@ -152,7 +144,7 @@ public class HintedHandOffManager
     {
         ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, endpoint.getAddress());
-        rm.delete(new QueryPath(HINTS_CF), new TimestampClock(System.currentTimeMillis()));
+        rm.delete(new QueryPath(HINTS_CF), System.currentTimeMillis());
         try {
             logger_.info("Deleting any stored hints for " + endpoint);
             rm.apply();
@@ -222,7 +214,7 @@ public class HintedHandOffManager
                         String[] parts = getTableAndCFNames(tableCF.name());
                         if (sendMessage(endpoint, parts[0], parts[1], keyColumn.name()))
                         {
-                            deleteHintKey(endpoint.getHostAddress().getBytes(UTF_8), keyColumn.name(), tableCF.name(), tableCF.clock());
+                            deleteHintKey(endpoint.getHostAddress().getBytes(UTF_8), keyColumn.name(), tableCF.name(), tableCF.timestamp());
                             rowsReplayed++;
                         }
                         else
@@ -277,7 +269,7 @@ public class HintedHandOffManager
             RowMutation drop = new RowMutation(Table.SYSTEM_TABLE, oldTableKey.key);
             for (byte[] key : cf.getColumnNames())
             {
-                drop.delete(new QueryPath(HINTS_CF, key), new TimestampClock(now));
+                drop.delete(new QueryPath(HINTS_CF, key), now);
                 startCol = key;
             }
             drop.apply();

@@ -23,7 +23,6 @@ package org.apache.cassandra.io.sstable;
 
 import static org.junit.Assert.*;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -55,12 +54,12 @@ public class SSTableWriterTest extends CleanupHelper {
         RowMutation rm;
 
         rm = new RowMutation("Keyspace1", "k1".getBytes());
-        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(1L), new TimestampClock(0));
+        rm.add(new QueryPath("Indexed1", null, "birthdate".getBytes("UTF8")), FBUtilities.toByteArray(1L), 0);
         rm.apply();
         
         ColumnFamily cf = ColumnFamily.create("Keyspace1", "Indexed1");        
-        cf.addColumn(new Column("birthdate".getBytes(), FBUtilities.toByteArray(1L), new TimestampClock(0)));
-        cf.addColumn(new Column("anydate".getBytes(), FBUtilities.toByteArray(1L), new TimestampClock(0)));
+        cf.addColumn(new Column("birthdate".getBytes(), FBUtilities.toByteArray(1L), 0));
+        cf.addColumn(new Column("anydate".getBytes(), FBUtilities.toByteArray(1L), 0));
         
         Map<byte[], byte[]> entries = new HashMap<byte[], byte[]>();
         
@@ -69,17 +68,17 @@ public class SSTableWriterTest extends CleanupHelper {
         entries.put("k2".getBytes(), Arrays.copyOf(buffer.getData(), buffer.getLength()));        
         cf.clear();
         
-        cf.addColumn(new Column("anydate".getBytes(), FBUtilities.toByteArray(1L), new TimestampClock(0)));
+        cf.addColumn(new Column("anydate".getBytes(), FBUtilities.toByteArray(1L), 0));
         buffer = new DataOutputBuffer();
         ColumnFamily.serializer().serializeWithIndexes(cf, buffer);               
         entries.put("k3".getBytes(), Arrays.copyOf(buffer.getData(), buffer.getLength()));
         
         SSTableReader orig = SSTableUtils.writeRawSSTable("Keyspace1", "Indexed1", entries);        
         // whack the index to trigger the recover
-        FileUtils.deleteWithConfirm(orig.desc.filenameFor(Component.PRIMARY_INDEX));
-        FileUtils.deleteWithConfirm(orig.desc.filenameFor(Component.FILTER));
+        FileUtils.deleteWithConfirm(orig.descriptor.filenameFor(Component.PRIMARY_INDEX));
+        FileUtils.deleteWithConfirm(orig.descriptor.filenameFor(Component.FILTER));
 
-        SSTableReader sstr = CompactionManager.instance.submitSSTableBuild(orig.desc).get();
+        SSTableReader sstr = CompactionManager.instance.submitSSTableBuild(orig.descriptor).get();
         ColumnFamilyStore cfs = Table.open("Keyspace1").getColumnFamilyStore("Indexed1");
         cfs.addSSTable(sstr);
         cfs.buildSecondaryIndexes(cfs.getSSTables(), cfs.getIndexedColumns());

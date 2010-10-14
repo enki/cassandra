@@ -25,7 +25,6 @@ import java.util.*;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.service.StorageService;
 
 public class SSTableUtils
 {
@@ -33,7 +32,7 @@ public class SSTableUtils
     public static String TABLENAME = "Keyspace1";
     public static String CFNAME = "Standard1";
 
-    public static ColumnFamily createCF(IClock mfda, int ldt, IColumn... cols)
+    public static ColumnFamily createCF(long mfda, int ldt, IColumn... cols)
     {
         ColumnFamily cf = ColumnFamily.create(TABLENAME, CFNAME);
         cf.delete(ldt, mfda);
@@ -64,7 +63,7 @@ public class SSTableUtils
         for (String key : keys)
         {
             ColumnFamily cf = ColumnFamily.create(TABLENAME, CFNAME);
-            cf.addColumn(new Column(key.getBytes(), key.getBytes(), new TimestampClock(0)));
+            cf.addColumn(new Column(key.getBytes(), key.getBytes(), 0));
             map.put(key, cf);
         }
         return writeSSTable(map);
@@ -91,8 +90,8 @@ public class SSTableUtils
             sortedEntries.put(writer.partitioner.decorateKey(entry.getKey()), entry.getValue());
         for (Map.Entry<DecoratedKey, byte[]> entry : sortedEntries.entrySet())
             writer.append(entry.getKey(), entry.getValue());
-        new File(writer.desc.filenameFor(Component.PRIMARY_INDEX)).deleteOnExit();
-        new File(writer.desc.filenameFor(Component.FILTER)).deleteOnExit();
+        new File(writer.descriptor.filenameFor(Component.PRIMARY_INDEX)).deleteOnExit();
+        new File(writer.descriptor.filenameFor(Component.FILTER)).deleteOnExit();
         return writer.closeAndOpenReader();
     }
 

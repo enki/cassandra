@@ -150,6 +150,10 @@ public class StreamOut
             session.addFilesToStream(pending);
             session.begin();
         }
+        else
+        {
+            session.close();
+        }
     }
 
     // called prior to sending anything.
@@ -158,7 +162,7 @@ public class StreamOut
         List<PendingFile> pending = new ArrayList<PendingFile>();
         for (SSTableReader sstable : sstables)
         {
-            Descriptor desc = sstable.getDescriptor();
+            Descriptor desc = sstable.descriptor;
             List<Pair<Long,Long>> sections = sstable.getPositionsForRanges(ranges);
             if (sections.isEmpty())
                 continue;

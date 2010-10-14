@@ -21,9 +21,8 @@ package org.apache.cassandra.io.sstable;
 
 import java.io.*;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 
+import org.apache.cassandra.io.util.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,7 +56,7 @@ public class SSTableWriter extends SSTable
     public SSTableWriter(String filename, long keyCount, CFMetaData metadata, IPartitioner partitioner) throws IOException
     {
         super(Descriptor.fromFilename(filename), metadata, partitioner);
-        iwriter = new IndexWriter(desc, partitioner, keyCount);
+        iwriter = new IndexWriter(descriptor, partitioner, keyCount);
         dbuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
         dataFile = new BufferedRandomAccessFile(getFilename(), "rw", DatabaseDescriptor.getInMemoryCompactionLimit());
 
@@ -66,6 +65,30 @@ public class SSTableWriter extends SSTable
         components.add(Component.FILTER);
         components.add(Component.PRIMARY_INDEX);
         components.add(Component.STATS);
+    }
+    
+    /** something bad happened and the files associated with this writer need to be deleted. */
+    public void abort()
+    {
+        try
+        {
+            dataFile.close();
+            FileUtils.deleteWithConfirm(dataFile.getPath());
+        }
+        catch (IOException ex) 
+        {
+            logger.error(String.format("Caught exception while deleting aborted sstable (%s). %s", dataFile.getPath(), ex.getMessage()));
+        }
+        
+        try
+        {
+            iwriter.close();
+            FileUtils.deleteWithConfirm(descriptor.filenameFor(SSTable.COMPONENT_INDEX));
+        }
+        catch (IOException ex)
+        {
+            logger.error(String.format("Caught exception while deleting aborted sstable (%s). %s", descriptor.filenameFor(SSTable.COMPONENT_INDEX), ex.getMessage()));
+        }
     }
 
     private long beforeAppend(DecoratedKey decoratedKey) throws IOException
@@ -148,10 +171,10 @@ public class SSTableWriter extends SSTable
         dataFile.close(); // calls force
 
         // write sstable statistics
-        writeStatistics(desc);
+        writeStatistics(descriptor);
 
         // remove the 'tmp' marker from all components
-        final Descriptor newdesc = rename(desc, components);
+        final Descriptor newdesc = rename(descriptor, components);
 
 
         // finalize in-memory state for the reader
@@ -191,27 +214,6 @@ public class SSTableWriter extends SSTable
         return dataFile.getFilePointer();
     }
     
-    /**
-     * @return An estimate of the number of keys contained in the given data file.
-     */
-    private static long estimateRows(Descriptor desc, BufferedRandomAccessFile dfile) throws IOException
-    {
-        // collect sizes for the first 1000 keys, or first 100 megabytes of data
-        final int SAMPLES_CAP = 1000, BYTES_CAP = (int)Math.min(100000000, dfile.length());
-        int keys = 0;
-        long dataPosition = 0;
-        while (dataPosition < BYTES_CAP && keys < SAMPLES_CAP)
-        {
-            dfile.seek(dataPosition);
-            FBUtilities.readShortByteArray(dfile);
-            long dataSize = SSTableReader.readRowSize(dfile, desc);
-            dataPosition = dfile.getFilePointer() + dataSize;
-            keys++;
-        }
-        dfile.seek(0);
-        return dfile.length() / (dataPosition / keys);
-    }
-
     public static Builder createBuilder(Descriptor desc)
     {
         if (!desc.isLatestVersion)
@@ -259,7 +261,7 @@ public class SSTableWriter extends SSTable
             long estimatedRows;
             try
             {
-                estimatedRows = estimateRows(desc, dfile);
+                estimatedRows = SSTable.estimateRowsFromData(desc, dfile);
                 iwriter = new IndexWriter(desc, StorageService.getPartitioner(), estimatedRows);
             }
             catch(IOException e)
@@ -342,7 +344,7 @@ public class SSTableWriter extends SSTable
             this.partitioner = part;
             indexFile = new BufferedRandomAccessFile(desc.filenameFor(SSTable.COMPONENT_INDEX), "rw", 8 * 1024 * 1024);
             builder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
-            summary = new IndexSummary();
+            summary = new IndexSummary(keyCount);
             bf = BloomFilter.getFilter(keyCount, 15);
         }
 

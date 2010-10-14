@@ -68,8 +68,8 @@ public class NodeCmd {
     {
         HelpFormatter hf = new HelpFormatter();
         String header = String.format(
-                "%nAvailable commands: ring, info, version, cleanup, compact, cfstats, snapshot [snapshotname], clearsnapshot, " +
-                "tpstats, flush, drain, repair, decommission, move, loadbalance, removetoken [status|force]|[token], " +
+                "%nAvailable commands: ring, info, version, cleanup, compact [keyspacename], cfstats, snapshot [snapshotname], " +
+                "clearsnapshot, tpstats, flush, drain, repair, decommission, move, loadbalance, removetoken [status|force]|[token], " +
                 "setcachecapacity [keyspace] [cfname] [keycachecapacity] [rowcachecapacity], " +
                 "getcompactionthreshold [keyspace] [cfname], setcompactionthreshold [cfname] [minthreshold] [maxthreshold], " +
                 "netstats [host]");
@@ -484,7 +484,7 @@ public class NodeCmd {
             else if (arguments[1].equals("force"))
             {
                 nodeCmd.printRemovalStatus(System.out);
-                probe.finishRemoval();
+                probe.forceRemoveCompletion();
             }
             else
                 probe.removeToken(arguments[1]);

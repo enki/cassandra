@@ -34,7 +34,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.base.Charsets;
 import org.apache.commons.collections.iterators.CollatingIterator;
@@ -45,8 +44,6 @@ import com.sun.jna.Native;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.IClock;
-import org.apache.cassandra.db.IClock.ClockRelationship;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
@@ -292,16 +289,31 @@ public class FBUtilities
         }
     }
 
+    /** @return An unsigned short in an integer. */
+    private static int readShortLength(DataInput in) throws IOException
+    {
+        int length = (in.readByte() & 0xFF) << 8;
+        return length | (in.readByte() & 0xFF);
+    }
+
     public static byte[] readShortByteArray(DataInput in) throws IOException
     {
-        int length = 0;
-        length |= (in.readByte() & 0xFF) << 8;
-        length |= in.readByte() & 0xFF;
-        if (!(0 <= length && length <= MAX_UNSIGNED_SHORT))
-            throw new IOException("Corrupt name length " + length);
-        byte[] bytes = new byte[length];
+        byte[] bytes = new byte[readShortLength(in)];
         in.readFully(bytes);
         return bytes;
+    }
+
+    /** @return null */
+    public static byte[] skipShortByteArray(DataInput in) throws IOException
+    {
+        int skip = readShortLength(in);
+        while (skip > 0)
+        {
+            int skipped = in.skipBytes(skip);
+            if (skipped == 0) throw new EOFException();
+            skip -= skipped;
+        }
+        return null;
     }
 
     public static byte[] hexToBytes(String str)
@@ -380,33 +392,6 @@ public class FBUtilities
         {
             long j = atomic.get();
             if (j >= i || atomic.compareAndSet(j, i))
-                break;
-        }
-    }
-
-    /** 
-     * Sets an atomic clock reference to the maximum of its current value and
-     * a new value.
-     *
-     * The function is not synchronized and does not guarantee that the resulting
-     * reference will hold either the old or new value, but it does guarantee
-     * that it will hold a value, v, such that: v = max(oldValue, newValue, v).
-     *
-     * @param atomic the atomic reference to set
-     * @param newClock the new provided value
-     */
-    public static void atomicSetMax(AtomicReference<IClock> atomic, IClock newClock)
-    {
-        while (true)
-        {
-            IClock oldClock = atomic.get();
-            ClockRelationship rel = oldClock.compare(newClock);
-            if (rel == ClockRelationship.DISJOINT)
-            {
-                newClock = oldClock.getSuperset(Arrays.asList(newClock));
-            }
-            if (rel == ClockRelationship.GREATER_THAN || rel == ClockRelationship.EQUAL 
-                || atomic.compareAndSet(oldClock, newClock))
                 break;
         }
     }
@@ -538,7 +523,7 @@ public class FBUtilities
         return System.currentTimeMillis() * 1000;
     }
 
-    public static void waitOnFutures(Collection<Future<?>> futures)
+    public static void waitOnFutures(Iterable<Future<?>> futures)
     {
         for (Future f : futures)
         {

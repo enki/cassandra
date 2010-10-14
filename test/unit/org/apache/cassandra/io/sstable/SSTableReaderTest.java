@@ -63,7 +63,7 @@ public class SSTableReaderTest extends CleanupHelper
         {
             byte[] key = String.valueOf(j).getBytes();
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard2", null, "0".getBytes()), new byte[0], new TimestampClock(j));
+            rm.add(new QueryPath("Standard2", null, "0".getBytes()), new byte[0], j);
             rm.apply();
         }
         store.forceBlockingFlush();
@@ -104,7 +104,7 @@ public class SSTableReaderTest extends CleanupHelper
         {
             byte[] key = String.valueOf(j).getBytes();
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], new TimestampClock(j));
+            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], j);
             rm.apply();
         }
         store.forceBlockingFlush();
@@ -116,8 +116,8 @@ public class SSTableReaderTest extends CleanupHelper
         {
             DecoratedKey dk = Util.dk(String.valueOf(j));
             FileDataInput file = sstable.getFileDataInput(dk, DatabaseDescriptor.getIndexedReadBufferSizeInKB() * 1024);
-            DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.getPartitioner(),
-                                                             sstable.getDescriptor(),
+            DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
+                                                             sstable.descriptor,
                                                              FBUtilities.readShortByteArray(file));
             assert keyInDisk.equals(dk) : String.format("%s != %s in %s", keyInDisk, dk, file.getPath());
         }
@@ -141,7 +141,7 @@ public class SSTableReaderTest extends CleanupHelper
         {
             byte[] key = String.valueOf(j).getBytes();
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], new TimestampClock(j));
+            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], j);
             rm.apply();
         }
         store.forceBlockingFlush();

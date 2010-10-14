@@ -76,16 +76,18 @@ public class Config
     /* Number of minutes to keep a memtable in memory */
     public Integer memtable_flush_after_mins = 60 * 60 * 1000;
     /* Size of the memtable in memory before it is dumped */
-    public Integer memtable_throughput_in_mb = (int) (Runtime.getRuntime().maxMemory() / 1048576 / 8);
+    public Integer memtable_throughput_in_mb;
     /* Number of objects in millions in the memtable before it is dumped */
-    public Double memtable_operations_in_millions = memtable_throughput_in_mb / 64.0 * 0.3;
+    public Double memtable_operations_in_millions;
     
     /* if the size of columns or super-columns are more than this, indexing will kick in */
     public Integer column_index_size_in_kb = 64;
     public Integer in_memory_compaction_limit_in_mb = 256;
     
     public String[] data_file_directories;
-    
+
+    public String saved_caches_directory;
+
     // Commit Log
     public String commitlog_directory;
     public Integer commitlog_rotation_threshold_in_mb;
@@ -95,7 +97,10 @@ public class Config
     
     public String endpoint_snitch;
     public Boolean dynamic_snitch = false;
-    
+    public Integer dynamic_snitch_update_interval_in_ms = 100;
+    public Integer dynamic_snitch_reset_interval_in_ms = 600000;
+    public Double dynamic_snitch_badness_threshold = 0.0;
+
     public String request_scheduler;
     public RequestSchedulerId request_scheduler_id;
     public RequestSchedulerOptions request_scheduler_options;

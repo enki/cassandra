@@ -36,11 +36,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.dht.BigIntegerToken;
-import org.apache.cassandra.dht.Bounds;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.dht.*;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
@@ -55,9 +51,19 @@ public class Util
         return StorageService.getPartitioner().decorateKey(key.getBytes(UTF_8));
     }
 
-    public static Column column(String name, String value, IClock clock)
+    public static Column column(String name, String value, long timestamp)
     {
-        return new Column(name.getBytes(), value.getBytes(), clock);
+        return new Column(name.getBytes(), value.getBytes(), timestamp);
+    }
+
+    public static Token token(String key)
+    {
+        return StorageService.getPartitioner().getToken(key.getBytes());
+    }
+
+    public static Range range(String left, String right)
+    {
+        return new Range(token(left), token(right));
     }
 
     public static Range range(IPartitioner p, String left, String right)
@@ -65,9 +71,14 @@ public class Util
         return new Range(p.getToken(left.getBytes()), p.getToken(right.getBytes()));
     }
 
-    public static void addMutation(RowMutation rm, String columnFamilyName, String superColumnName, long columnName, String value, IClock clock)
+    public static Bounds bounds(String left, String right)
     {
-        rm.add(new QueryPath(columnFamilyName, superColumnName.getBytes(), getBytes(columnName)), value.getBytes(), clock);
+        return new Bounds(token(left), token(right));
+    }
+
+    public static void addMutation(RowMutation rm, String columnFamilyName, String superColumnName, long columnName, String value, long timestamp)
+    {
+        rm.add(new QueryPath(columnFamilyName, superColumnName.getBytes(), getBytes(columnName)), value.getBytes(), timestamp);
     }
 
     public static byte[] getBytes(long v)

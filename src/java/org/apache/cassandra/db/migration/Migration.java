@@ -113,13 +113,13 @@ public abstract class Migration
             long now = System.currentTimeMillis();
             byte[] buf = serialize();
             RowMutation migration = new RowMutation(Table.SYSTEM_TABLE, MIGRATIONS_KEY);
-            migration.add(new QueryPath(MIGRATIONS_CF, null, UUIDGen.decompose(newVersion)), buf, new TimestampClock(now));
+            migration.add(new QueryPath(MIGRATIONS_CF, null, UUIDGen.decompose(newVersion)), buf, now);
             migration.apply();
             
             // note that we're storing this in the system table, which is not replicated
             logger.debug("Applying migration " + newVersion.toString());
             migration = new RowMutation(Table.SYSTEM_TABLE, LAST_MIGRATION_KEY);
-            migration.add(new QueryPath(SCHEMA_CF, null, LAST_MIGRATION_KEY), UUIDGen.decompose(newVersion), new TimestampClock(now));
+            migration.add(new QueryPath(SCHEMA_CF, null, LAST_MIGRATION_KEY), UUIDGen.decompose(newVersion), now);
             migration.apply();
 
             // if we fail here, there will be schema changes in the CL that will get replayed *AFTER* the schema is loaded.
@@ -215,7 +215,7 @@ public abstract class Migration
 
         // wrap in mutation
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, toUTF8Bytes(versionId));
-        TimestampClock now = new TimestampClock(System.currentTimeMillis());
+        long now = System.currentTimeMillis();
         // add a column for each keyspace
         for (KSMetaData ksm : ksms)
             rm.add(new QueryPath(SCHEMA_CF, null, ksm.name.getBytes(UTF_8)), SerDeUtils.serialize(ksm.deflate()), now);
@@ -223,7 +223,7 @@ public abstract class Migration
         rm.add(new QueryPath(SCHEMA_CF,
                              null,
                              DefsTable.DEFINITION_SCHEMA_COLUMN_NAME),
-                             org.apache.cassandra.config.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
+                             org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
                              now);
         return rm;
     }

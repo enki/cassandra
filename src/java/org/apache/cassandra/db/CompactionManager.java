@@ -149,18 +149,6 @@ public class CompactionManager implements CompactionManagerMBean
         executor.submit(runnable).get();
     }
 
-    public Future<List<SSTableReader>> submitAnticompaction(final ColumnFamilyStore cfStore, final Collection<Range> ranges, final InetAddress target)
-    {
-        Callable<List<SSTableReader>> callable = new Callable<List<SSTableReader>>()
-        {
-            public List<SSTableReader> call() throws IOException
-            {
-                return doAntiCompaction(cfStore, cfStore.getSSTables(), ranges, target);
-            }
-        };
-        return executor.submit(callable);
-    }
-
     public void performMajor(final ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
     {
         submitMajor(cfStore, 0, (int) (System.currentTimeMillis() / 1000) - cfStore.metadata.gcGraceSeconds).get();
@@ -283,9 +271,16 @@ public class CompactionManager implements CompactionManagerMBean
             while (nni.hasNext())
             {
                 AbstractCompactedRow row = nni.next();
-                long prevpos = writer.getFilePointer();
-
-                writer.append(row);
+                try
+                {
+                    writer.append(row);
+                }
+                catch (IOException ex)
+                {
+                    writer.abort();
+                    // rethrow the exception so that caller knows compaction failed.
+                    throw ex;
+                }
                 totalkeysWritten++;
             }
         }
@@ -417,8 +412,7 @@ public class CompactionManager implements CompactionManagerMBean
      */
     private void doValidationCompaction(ColumnFamilyStore cfs, AntiEntropyService.Validator validator) throws IOException
     {
-        Collection<SSTableReader> sstables = cfs.getSSTables();
-        CompactionIterator ci = new CompactionIterator(cfs, sstables, (int) (System.currentTimeMillis() / 1000) - cfs.metadata.gcGraceSeconds, true);
+        CompactionIterator ci = new ValidationCompactionIterator(cfs);
         executor.beginCompaction(cfs, ci);
         try
         {
@@ -530,6 +524,20 @@ public class CompactionManager implements CompactionManagerMBean
         return executor.submit(callable);
     }
 
+    private static class ValidationCompactionIterator extends CompactionIterator
+    {
+        public ValidationCompactionIterator(ColumnFamilyStore cfs) throws IOException
+        {
+            super(cfs, cfs.getSSTables(), (int) (System.currentTimeMillis() / 1000) - cfs.metadata.gcGraceSeconds, true);
+        }
+
+        @Override
+        public String getTaskType()
+        {
+            return "Validation";
+        }
+    }
+
     private static class AntiCompactionIterator extends CompactionIterator
     {
         private Set<SSTableScanner> scanners;
@@ -575,7 +583,7 @@ public class CompactionManager implements CompactionManagerMBean
 
         public String getTaskType()
         {
-            return "Anticompaction";
+            return "Cleanup";
         }
     }
 
@@ -642,6 +650,11 @@ public class CompactionManager implements CompactionManagerMBean
         {
             return ci == null ? null : ci.getBytesRead();
         }
+
+        public String getType()
+        {
+            return ci == null ? null : ci.getTaskType();
+        }
     }
 
     public String getColumnFamilyInProgress()
@@ -659,18 +672,21 @@ public class CompactionManager implements CompactionManagerMBean
         return executor.getBytesCompleted();
     }
 
+    public String getCompactionType()
+    {
+        return executor.getType();
+    }
+
     public int getPendingTasks()
     {
         int n = 0;
         for (Integer i : estimatedCompactions.values())
-        {
             n += i;
-        }
-        return n;
+        return (int) (executor.getTaskCount() - executor.getCompletedTaskCount()) + n;
     }
 
     public long getCompletedTasks()
     {
-        return executor.getTaskCount() - executor.getCompletedTaskCount();
+        return executor.getCompletedTaskCount();
     }
 }

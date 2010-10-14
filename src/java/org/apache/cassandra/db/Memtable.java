@@ -55,14 +55,12 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
     private final long creationTime;
     private final ConcurrentNavigableMap<DecoratedKey, ColumnFamily> columnFamilies = new ConcurrentSkipListMap<DecoratedKey, ColumnFamily>();
-    private final IPartitioner partitioner;
     public final ColumnFamilyStore cfs;
 
-    public Memtable(ColumnFamilyStore cfs, IPartitioner partitioner)
+    public Memtable(ColumnFamilyStore cfs)
     {
 
         this.cfs = cfs;
-        this.partitioner = partitioner;
         creationTime = System.currentTimeMillis();
     }
 
@@ -148,7 +146,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
     private SSTableReader writeSortedContents() throws IOException
     {
         logger.info("Writing " + this);
-        SSTableWriter writer = new SSTableWriter(cfs.getFlushPath(), columnFamilies.size(), cfs.metadata, partitioner);
+        SSTableWriter writer = new SSTableWriter(cfs.getFlushPath(), columnFamilies.size(), cfs.metadata, cfs.partitioner);
 
         for (Map.Entry<DecoratedKey, ColumnFamily> entry : columnFamilies.entrySet())
             writer.append(entry.getKey(), entry.getValue());
@@ -207,7 +205,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
         final Collection<IColumn> filteredColumns = filter.reversed ? cf.getReverseSortedColumns() : cf.getSortedColumns();
 
         // ok to not have subcolumnComparator since we won't be adding columns to this object
-        IColumn startColumn = isSuper ? new SuperColumn(filter.start, null, cf.getClockType(), cf.getReconciler()) :  new Column(filter.start);
+        IColumn startColumn = isSuper ? new SuperColumn(filter.start, null) :  new Column(filter.start);
         Comparator<IColumn> comparator = filter.getColumnComparator(typeComparator);
 
         final PeekingIterator<IColumn> filteredIter = Iterators.peekingIterator(filteredColumns.iterator());
