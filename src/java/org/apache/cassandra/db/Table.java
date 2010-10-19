@@ -270,6 +270,8 @@ public class Table
                 }
             }
         };
+        logger.debug("scheduleWithFixedDelay {} {}", runnable, minCheckMs);
+        
         flushTask = StorageService.scheduledTasks.scheduleWithFixedDelay(runnable, minCheckMs, minCheckMs, TimeUnit.MILLISECONDS);
     }
     
