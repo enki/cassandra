@@ -21,8 +21,10 @@ package org.apache.cassandra.locator;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
-import java.util.StringTokenizer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,26 +37,24 @@ import org.apache.cassandra.utils.WrappedRunnable;
 /**
  * Used to determine if two IP's are in the same datacenter or on the same rack.
  * <p/>
- * Based on a properties file configuration.
+ * Based on a properties file in the following format:
+ *
+ * 10.0.0.13=DC1:RAC2
+ * 10.21.119.14=DC3:RAC2
+ * 10.20.114.15=DC2:RAC2
+ * default=DC1:r1
  */
 public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
 {
-    /**
-     * A list of properties with keys being host:port and values being datacenter:rack
-     */
-    private volatile Properties hostProperties;
+    private static final Logger logger = LoggerFactory.getLogger(PropertyFileSnitch.class);
 
-    /**
-     * The default rack property file to be read.
-     */
-    private static String RACK_PROPERTY_FILENAME = "cassandra-rack.properties";
+    private static final String RACK_PROPERTY_FILENAME = "cassandra-topology.properties";
 
-    /**
-     * Reference to the logger.
-     */
-    private static Logger logger_ = LoggerFactory.getLogger(PropertyFileSnitch.class);
+    private static volatile Map<InetAddress, String[]> endpointMap;
+    private static volatile String[] defaultDCRack;
 
-    public PropertyFileSnitch() throws ConfigurationException {
+    public PropertyFileSnitch() throws ConfigurationException
+    {
         reloadConfiguration();
         Runnable runnable = new WrappedRunnable()
         {
@@ -68,69 +68,90 @@ public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
 
     /**
      * Get the raw information about an end point
-     * 
+     *
      * @param endpoint endpoint to process
-     * 
      * @return a array of string with the first index being the data center and the second being the rack
      */
-    public String[] getEndpointInfo(InetAddress endpoint) {
-        String key = endpoint.getHostAddress();
-        String value = hostProperties.getProperty(key);
+    public String[] getEndpointInfo(InetAddress endpoint)
+    {
+        String[] value = endpointMap.get(endpoint);
         if (value == null)
         {
-            logger_.error("Could not find end point information for {}, will use default.", key);
-            value = hostProperties.getProperty("default");
+            logger.debug("Could not find end point information for {}, will use default", endpoint);
+            return defaultDCRack;
         }
-        StringTokenizer st = new StringTokenizer(value, ":");
-        if (st.countTokens() < 2)
-        {
-            logger_.error("Value for " + key + " is invalid: " + value);
-            return new String [] {"default", "default"};
-        }
-        return new String[] {st.nextToken(), st.nextToken()};
+        return value;
     }
 
     /**
      * Return the data center for which an endpoint resides in
-     *  
+     *
      * @param endpoint the endpoint to process
      * @return string of data center
      */
-    public String getDatacenter(InetAddress endpoint) {
+    public String getDatacenter(InetAddress endpoint)
+    {
         return getEndpointInfo(endpoint)[0];
     }
 
     /**
      * Return the rack for which an endpoint resides in
-     *  
+     *
      * @param endpoint the endpoint to process
-     * 
      * @return string of rack
      */
-    public String getRack(InetAddress endpoint) {
+    public String getRack(InetAddress endpoint)
+    {
         return getEndpointInfo(endpoint)[1];
     }
 
     public void reloadConfiguration() throws ConfigurationException
     {
-        hostProperties = resourceToProperties(RACK_PROPERTY_FILENAME);
-        clearEndpointCache();
-    }
+        HashMap<InetAddress, String[]> reloadedMap = new HashMap<InetAddress, String[]>();
 
-    public static Properties resourceToProperties(String filename) throws ConfigurationException
-    {
-        String rackPropertyFilename = FBUtilities.resourceToFile(filename);
-
-        Properties localHostProperties;
+        String rackPropertyFilename = FBUtilities.resourceToFile(RACK_PROPERTY_FILENAME);
+        Properties properties = new Properties();
         try
         {
-            localHostProperties = new Properties();
-            localHostProperties.load(new FileReader(rackPropertyFilename));
+            properties.load(new FileReader(rackPropertyFilename));
         }
         catch (IOException e)
         {
-            throw new ConfigurationException("Unable to load " + rackPropertyFilename, e);
+            throw new ConfigurationException("Unable to read " + RACK_PROPERTY_FILENAME, e);
         }
-        return localHostProperties;
+
+        for (Map.Entry<Object, Object> entry : properties.entrySet())
+        {
+            String key = (String) entry.getKey();
+            String value = (String) entry.getValue();
+
+            if (key.equals("default"))
+            {
+                defaultDCRack = value.split(":");
+                if (defaultDCRack.length < 2)
+                    defaultDCRack = new String[] { "default", "default" };
+            }
+            else
+            {
+                InetAddress host;
+                String hostString = key.replace("/", "");
+                try
+                {
+                    host = InetAddress.getByName(hostString);
+                }
+                catch (UnknownHostException e)
+                {
+                    throw new ConfigurationException("Unknown host " + hostString, e);
+                }
+                String[] token = value.split(":");
+                if (token.length < 2)
+                    token = new String[] { "default", "default" };
+                reloadedMap.put(host, token);
+            }
+        }
+
+        logger.debug("loaded network topology {}", FBUtilities.toString(reloadedMap));
+        endpointMap = reloadedMap;
+        clearEndpointCache();
     }
 }

@@ -55,6 +55,7 @@ tokens {
     NODE_UPDATE_KEYSPACE;
     NODE_RENAME_COLUMN_FAMILY;
     NODE_UPDATE_COLUMN_FAMILY;
+    NODE_LIST;
 
     // Internal Nodes.
     NODE_COLUMN_ACCESS;
@@ -62,9 +63,14 @@ tokens {
     NODE_NEW_CF_ACCESS;
     NODE_NEW_KEYSPACE_ACCESS;
     
+    CONVERT_TO_TYPE;
+    FUNCTION_CALL;
     ARRAY;
     HASH;
     PAIR;
+
+    NODE_LIMIT;
+    NODE_KEY_RANGE_ACCESS;
 }
 
 @parser::header {
@@ -117,6 +123,7 @@ statement
     | helpStatement
     | setStatement
     | showStatement
+    | listStatement
     | -> ^(NODE_NO_OP)
     ;
 
@@ -170,6 +177,8 @@ helpStatement
         -> ^(NODE_HELP NODE_THRIFT_DEL)
     | K_HELP K_COUNT 
         -> ^(NODE_HELP NODE_THRIFT_COUNT)
+    | K_HELP K_LIST 
+        -> ^(NODE_HELP NODE_LIST)
     | K_HELP 
         -> ^(NODE_HELP)
     | '?'    
@@ -182,8 +191,12 @@ exitStatement
     ;
 
 getStatement
-    : K_GET columnFamilyExpr 
-        -> ^(NODE_THRIFT_GET columnFamilyExpr)
+    : K_GET columnFamilyExpr ('AS' typeIdentifier)?
+        -> ^(NODE_THRIFT_GET columnFamilyExpr ( ^(CONVERT_TO_TYPE typeIdentifier) )? )
+    ;
+
+typeIdentifier
+    : Identifier | StringLiteral | IntegerLiteral 
     ;
 
 setStatement
@@ -205,6 +218,15 @@ showStatement
     : showClusterName
     | showVersion
     | showTables
+    ;
+
+listStatement
+    : K_LIST keyRangeExpr limitClause?
+        -> ^(NODE_LIST keyRangeExpr limitClause?)
+    ;
+
+limitClause
+    : K_LIMIT^ IntegerLiteral
     ;
 
 showClusterName
@@ -315,6 +337,11 @@ columnFamilyExpr
       -> ^(NODE_COLUMN_ACCESS columnFamily rowKey ($a+)?)
     ;
 
+keyRangeExpr
+    :    columnFamily '[' startKey ':' endKey ']' ('[' columnOrSuperColumn ']')?
+      -> ^(NODE_KEY_RANGE_ACCESS columnFamily startKey endKey columnOrSuperColumn?)
+    ;
+
 table: Identifier;
 
 columnName: Identifier;
@@ -349,7 +376,20 @@ columnFamily: Identifier;
 
 rowKey:   (Identifier | StringLiteral);
 
-value: (Identifier | IntegerLiteral | StringLiteral);
+value: (Identifier | IntegerLiteral | StringLiteral | functionCall );
+
+functionCall 
+    : functionName=Identifier '(' functionArgument ')'
+        -> ^(FUNCTION_CALL $functionName functionArgument)
+    ;
+
+functionArgument 
+    : Identifier | StringLiteral | IntegerLiteral
+    ;
+
+startKey: (Identifier | StringLiteral);
+
+endKey: (Identifier | StringLiteral);
 
 columnOrSuperColumn: (Identifier | IntegerLiteral | StringLiteral);
 
@@ -395,6 +435,8 @@ K_FAMILY:     'FAMILY';
 K_WITH:       'WITH';
 K_AND:        'AND';
 K_UPDATE:     'UPDATE';
+K_LIST:       'LIST';
+K_LIMIT:      'LIMIT';
 
 // private syntactic rules
 fragment
@@ -415,21 +457,19 @@ Alnum
     ;
 
 // syntactic Elements
+IntegerLiteral
+   : Digit+
+   ;
+
 Identifier
-    : Letter ( Alnum | '_' | '-' )*
+    : (Letter | Alnum) (Alnum | '_' | '-' )*
     ;
 
 // literals
 StringLiteral
     :
-    '\'' (~'\'')* '\'' ( '\'' (~'\'')* '\'' )* 
+    '\'' (~'\'')* '\'' ( '\'' (~'\'')* '\'' )*
     ;
-
-
-IntegerLiteral
-   : Digit+
-   ;
-
 
 //
 // syntactic elements

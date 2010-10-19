@@ -21,7 +21,10 @@ import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
 import java.util.*;
 
+import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.utils.UUIDGen;
 import org.apache.commons.lang.ArrayUtils;
+import org.apache.commons.lang.StringUtils;
 
 import org.antlr.runtime.tree.CommonTree;
 import org.antlr.runtime.tree.Tree;
@@ -35,6 +38,47 @@ import org.apache.thrift.TException;
 public class CliClient 
 {
 
+    /**
+     * Available value conversion functions
+     * Used by convertValueByFunction(Tree functionCall) method
+     */
+    private enum Function
+    {
+        BYTES       (BytesType.instance),
+        INTEGER     (IntegerType.instance),
+        LONG        (LongType.instance),
+        LEXICALUUID (LexicalUUIDType.instance),
+        TIMEUUID    (TimeUUIDType.instance),
+        UTF8        (UTF8Type.instance),
+        ASCII       (AsciiType.instance);
+
+        private AbstractType validator;
+        
+        Function(AbstractType validator)
+        {
+            this.validator = validator;  
+        }
+
+        public AbstractType getValidator()
+        {
+            return this.validator;
+        }
+
+        public static String getFunctionNames()
+        {
+            Function[] functions = Function.values();
+            StringBuilder functionNames = new StringBuilder();
+
+            for (int i = 0; i < functions.length; i++)
+            {
+                StringBuilder currentName = new StringBuilder(functions[i].name().toLowerCase());
+                functionNames.append(currentName.append(((i != functions.length-1) ? ", " : ".")));
+            }
+
+            return functionNames.toString();
+        }
+    }
+    
     /*
      * the <i>add column family</i> command requires a list of arguments, 
      *  this enum defines which arguments are valid.
@@ -144,6 +188,9 @@ public class CliClient
                 	break;
                 case CliParser.NODE_CONNECT:
                     executeConnect(ast);
+                    break;
+                case CliParser.NODE_LIST:
+                	executeList(ast);
                     break;
                 case CliParser.NODE_NO_OP:
                     // comment lines come here; they are treated as no ops.
@@ -341,19 +388,27 @@ public class CliClient
                 
             case CliParser.NODE_THRIFT_GET :
                 css_.out.println("get <cf>['<key>']");
-                css_.out.println("get <cf>['<key>']['<col>'] ");
-                css_.out.println("get <cf>['<key>']['<super>'] ");
-                css_.out.println("get <cf>['<key>']['<super>']['<col>']\n");
-                css_.out.println("example:");
-                css_.out.println("get bar['testkey']");
+                css_.out.println("get <cf>['<key>']['<col>'] (as <type>)*");
+                css_.out.println("get <cf>['<key>']['<super>']");
+                css_.out.println("get <cf>['<key>']['<super>']['<col>'] (as <type>)*");
+                css_.out.print("Note: `as <type>` is optional, it dynamically converts column value to the specified type");
+                css_.out.println(", column value validator will be set to <type>.");
+                css_.out.println("Available types: IntegerType, LongType, UTF8Type, ASCIIType, TimeUUIDType, LexicalUUIDType.\n");
+                css_.out.println("examples:");
+                css_.out.println("get bar[testkey]");
+                css_.out.println("get bar[testkey][test_column] as IntegerType");
                 break;
                 
             case CliParser.NODE_THRIFT_SET:
-                css_.out.println("set <cf>['<key>']['<col>'] = '<value>' ");
-                css_.out.println("set <cf>['<key>']['<super>']['<col>'] = '<value>'\n");
-                css_.out.println("example:");
+                css_.out.println("set <cf>['<key>']['<col>'] = <value>");
+                css_.out.println("set <cf>['<key>']['<super>']['<col>'] = <value>");
+                css_.out.println("set <cf>['<key>']['<col>'] = <function>(<argument>)");
+                css_.out.println("set <cf>['<key>']['<super>']['<col>'] = <function>(<argument>)");
+                css_.out.println("Available functions: " + Function.getFunctionNames() + "\n");
+                css_.out.println("examples:");
                 css_.out.println("set bar['testkey']['my super']['test col']='this is a test'");
                 css_.out.println("set baz['testkey']['test col']='this is also a test'");
+                css_.out.println("set diz[testkey][testcol] = utf8('this is utf8 string.')");
                 break;
                 
             case CliParser.NODE_THRIFT_DEL:
@@ -375,6 +430,14 @@ public class CliClient
                 css_.out.println("example:");
                 css_.out.println("count bar['testkey']['my super']");
                 css_.out.println("count baz['testkey']");
+                break;
+
+            case CliParser.NODE_LIST:
+                css_.out.println("list <cf>['<startKey>':'<endKey']\n");
+                css_.out.println("list <cf>['<startKey>':'<endKey'] limit M\n");
+                css_.out.println("list <cf>['<startKey>':'<endKey']['<super>']\n");
+                css_.out.println("list <cf>['<startKey>':'<endKey']['<super>'] limit M\n");
+                css_.out.println("List a range of rows in the column or supercolumn family.\n");
                 break;
                 
             default:
@@ -410,15 +473,18 @@ public class CliClient
             css_.out.println("rename column family <cf> <new_name>                     Rename a column family.");
             css_.out.println("get <cf>['<key>']                                        Get a slice of columns.");
             css_.out.println("get <cf>['<key>']['<super>']                         Get a slice of sub columns.");
-            css_.out.println("get <cf>['<key>']['<col>']                                   Get a column value.");
-            css_.out.println("get <cf>['<key>']['<super>']['<col>']                    Get a sub column value.");
-            css_.out.println("set <cf>['<key>']['<col>'] = '<value>'                             Set a column.");
-            css_.out.println("set <cf>['<key>']['<super>']['<col>'] = '<value>'              Set a sub column.");
+            css_.out.println("get <cf>['<key>']['<col>'] (as <type>)*                      Get a column value.");
+            css_.out.println("get <cf>['<key>']['<super>']['<col>'] (as <type>)*       Get a sub column value.");
+            css_.out.println("set <cf>['<key>']['<col>'] = <value>                               Set a column.");
+            css_.out.println("set <cf>['<key>']['<super>']['<col>'] = <value>                Set a sub column.");
             css_.out.println("del <cf>['<key>']                                                 Delete record.");
             css_.out.println("del <cf>['<key>']['<col>']                                        Delete column.");
             css_.out.println("del <cf>['<key>']['<super>']['<col>']                         Delete sub column.");
             css_.out.println("count <cf>['<key>']                                     Count columns in record.");
             css_.out.println("count <cf>['<key>']['<super>']                  Count columns in a super column.");
+            css_.out.println("list <cf>['<startKey>':'<endKey']                List rows in the column family.");
+            css_.out.println("list <cf>['<startKey>':'<endKey']['<super>']  List the super column across rows.");
+            css_.out.println("list ... limit N                                    Limit the list results to N.");
         } 
     }
 
@@ -580,22 +646,26 @@ public class CliClient
 
     private AbstractType getFormatTypeForColumn(String compareWith)
     {
-        AbstractType type;
-        try {
-            // Get the singleton instance of the AbstractType subclass
-            Class c = Class.forName(compareWith);
+        Function function;
+        try
+        {
+            function = Function.valueOf(compareWith.toUpperCase());
+        }
+        catch (IllegalArgumentException e)
+        {
             try
             {
-                type = (AbstractType) c.getField("instance").get(c);
+                return FBUtilities.getComparator(compareWith);
             }
-            catch (Exception e)
+            catch (ConfigurationException e1)
             {
-                throw new RuntimeException(e.getMessage(), e);
+                StringBuilder errorMessage = new StringBuilder("Unknown comparator '" + compareWith + "'. ");
+                errorMessage.append("Available functions: ");
+                throw new RuntimeException(errorMessage.append(Function.getFunctionNames()).toString());
             }
-        } catch (ClassNotFoundException e) {
-            type = BytesType.instance;
         }
-        return type;
+
+        return function.validator;
     }
 
     // Execute GET statement
@@ -604,12 +674,8 @@ public class CliClient
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
 
-        // This will never happen unless the grammar is broken
-        assert ast.getChildCount() == 1 : "serious parsing error (this is a bug).";
-
-        CommonTree columnFamilySpec = (CommonTree)ast.getChild(0);
-        assert(columnFamilySpec.getType() == CliParser.NODE_COLUMN_ACCESS);
-
+        CommonTree columnFamilySpec = (CommonTree) ast.getChild(0);
+        
         String key = CliCompiler.getKey(columnFamilySpec);
         String columnFamily = CliCompiler.getColumnFamily(columnFamilySpec);
         int columnSpecCnt = CliCompiler.numColumnSpecifiers(columnFamilySpec);
@@ -618,7 +684,7 @@ public class CliClient
         
         byte[] superColumnName = null;
         String columnName;
-        
+
         // table.cf['key'] -- row slice
         if (columnSpecCnt == 0)
         {
@@ -661,7 +727,30 @@ public class CliClient
         Column column = thriftClient_.get(key.getBytes(), path, ConsistencyLevel.ONE).column;
 
         byte[] columnValue = column.getValue();
-        String valueAsString = (validator == null) ? new String(columnValue, "UTF-8") : validator.getString(columnValue);
+        
+        String valueAsString;
+        
+        // we have ^(CONVERT_TO_TYPE <type>) inside of GET statement
+        // which means that we should try to represent byte[] value according
+        // to specified type
+        if (ast.getChildCount() == 2)
+        {
+            // getting ^(CONVERT_TO_TYPE <type>) tree 
+            Tree typeTree = ast.getChild(1).getChild(0);
+            // .getText() will give us <type>
+            String typeName = CliUtils.unescapeSQLString(typeTree.getText());
+            // building AbstractType from <type>
+            AbstractType valueValidator = getFormatTypeForColumn(typeName);
+
+            // setting value for output
+            valueAsString = valueValidator.getString(columnValue);
+            // updating column value validator class
+            updateColumnMetaData(columnFamilyDef, columnNameInBytes, valueValidator.getClass().getName());
+        }
+        else
+        {
+            valueAsString = (validator == null) ? new String(columnValue, "UTF-8") : validator.getString(columnValue);
+        }
 
         // print results
         css_.out.printf("=> (column=%s, value=%s, timestamp=%d)\n",
@@ -674,17 +763,16 @@ public class CliClient
     {
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
-
-        assert (ast.getChildCount() == 2) : "serious parsing error (this is a bug).";
-
-        CommonTree columnFamilySpec = (CommonTree)ast.getChild(0);
-        assert(columnFamilySpec.getType() == CliParser.NODE_COLUMN_ACCESS);
-
+        
+        // ^(NODE_COLUMN_ACCESS <cf> <key> <column>)
+        CommonTree columnFamilySpec = (CommonTree) ast.getChild(0);
+        
         String key = CliCompiler.getKey(columnFamilySpec);
         String columnFamily = CliCompiler.getColumnFamily(columnFamilySpec);
         int columnSpecCnt = CliCompiler.numColumnSpecifiers(columnFamilySpec);
         String value = CliUtils.unescapeSQLString(ast.getChild(1).getText());
-
+        Tree valueTree = ast.getChild(1);
+        
         byte[] superColumnName = null;
         String columnName;
 
@@ -711,9 +799,18 @@ public class CliClient
         }
 
 
-        byte[] columnNameInBytes  = columnNameAsByteArray(columnName, columnFamily);
-        byte[] columnValueInBytes = columnValueAsByteArray(columnNameInBytes, columnFamily, value);
-        
+        byte[] columnNameInBytes = columnNameAsByteArray(columnName, columnFamily);
+        byte[] columnValueInBytes;
+
+        switch (valueTree.getType())
+        {
+        case CliParser.FUNCTION_CALL:
+            columnValueInBytes = convertValueByFunction(valueTree, getCfDef(columnFamily), columnNameInBytes);
+            break;
+        default:
+            columnValueInBytes = columnValueAsByteArray(columnNameInBytes, columnFamily, value);
+        }
+
         // do the insert
         thriftClient_.insert(key.getBytes(), new ColumnParent(columnFamily).setSuper_column(superColumnName),
                              new Column(columnNameInBytes, columnValueInBytes, FBUtilities.timestampMicros()), ConsistencyLevel.ONE);
@@ -1041,6 +1138,104 @@ public class CliClient
         css_.out.println(thriftClient_.system_rename_column_family(columnName, columnNewName));
     }
 
+    private void executeList(CommonTree ast)
+    throws TException, InvalidRequestException, NotFoundException, IllegalAccessException, InstantiationException, NoSuchFieldException, UnavailableException, TimedOutException, UnsupportedEncodingException
+    {
+        if (!CliMain.isConnected())
+            return;
+
+        // AST check
+        assert (ast.getChildCount() == 1 || ast.getChildCount() == 2) : "Incorrect AST Construct!";
+
+        CommonTree keyRangeSpec = (CommonTree) ast.getChild(0);
+        assert (keyRangeSpec.getType() == CliParser.NODE_KEY_RANGE_ACCESS);
+
+        // extract key range, column family, and super column name
+        String columnFamily = keyRangeSpec.getChild(0).getText();
+        String startKey = CliUtils.unescapeSQLString(keyRangeSpec.getChild(1).getText());
+        String endKey = CliUtils.unescapeSQLString(keyRangeSpec.getChild(2).getText());
+
+        String superColumnName = null;
+        if (keyRangeSpec.getChildCount() == 4)
+        {
+            superColumnName = CliUtils.unescapeSQLString(keyRangeSpec.getChild(3).getText());
+        }
+
+        // extract LIMIT clause
+        int limitCount = Integer.MAX_VALUE;
+        if (ast.getChildCount() == 2)
+        {
+            CommonTree limitSpec = (CommonTree) ast.getChild(1);
+            assert (limitSpec.getType() == CliParser.NODE_LIMIT);
+            limitCount = Integer.parseInt(limitSpec.getChild(0).getText());
+        }
+        assert (limitCount > 0) : "Limit count should be > 0!";
+
+        List<String> cfnames = new ArrayList<String>();
+        for (CfDef cfd : keyspacesMap.get(keySpace).cf_defs)
+        {
+            cfnames.add(cfd.name);
+        }
+
+        int idx = cfnames.indexOf(columnFamily);
+        if (idx == -1)
+        {
+            css_.out.println("No such column family: " + columnFamily);
+            return;
+        }
+
+        // read all columns and superColumns
+        SlicePredicate predicate = new SlicePredicate();
+        SliceRange sliceRange = new SliceRange();
+        sliceRange.setStart(new byte[0]).setFinish(new byte[0]);
+        predicate.setSlice_range(sliceRange);
+
+        // set the key range
+        KeyRange range = new KeyRange(10);
+        range.setStart_key(startKey.getBytes()).setEnd_key(endKey.getBytes());
+
+        ColumnParent columnParent = new ColumnParent(columnFamily);
+        if (StringUtils.isNotBlank(superColumnName))
+        {
+            columnParent.setSuper_column(superColumnName.getBytes());
+        }
+
+        List<KeySlice> keySlices = thriftClient_.get_range_slices(columnParent, predicate, range, ConsistencyLevel.ONE);
+        int toIndex = keySlices.size();
+        if (limitCount < keySlices.size()) // limitCount could be Integer.MAX_VALUE
+            toIndex = limitCount;
+        List<KeySlice> limitSlices = keySlices.subList(0, toIndex);
+
+        for (KeySlice ks : limitSlices)
+        {
+            css_.out.printf("-------------------\nRowKey: %s\n", new String(ks.key, "UTF-8"));
+            Iterator<ColumnOrSuperColumn> iterator = ks.getColumnsIterator();
+            while (iterator.hasNext())
+            {
+                ColumnOrSuperColumn columnOrSuperColumn = iterator.next();
+                if (columnOrSuperColumn.column != null)
+                {
+                    Column col = columnOrSuperColumn.column;
+                    css_.out.printf("=> (column=%s, value=%s, timestamp=%d)\n",
+                                    formatColumnName(keySpace, columnFamily, col), new String(col.value, "UTF-8"), col.timestamp);
+                }
+                else if (columnOrSuperColumn.super_column != null)
+                {
+                    SuperColumn superCol = columnOrSuperColumn.super_column;
+                    css_.out.printf("=> (super_column=%s,", formatSuperColumnName(keySpace, columnFamily, superCol));
+                    for (Column col : superCol.columns)
+                    {
+                        css_.out.printf("\n     (column=%s, value=%s, timestamp=%d)",
+                                        formatSubcolumnName(keySpace, columnFamily, col), new String(col.value, "UTF-8"), col.timestamp);
+                    }
+                    css_.out.println(")");
+                }
+            }
+        }
+
+        css_.out.printf("\n%d Row%s Returned.\n", limitSlices.size(), (limitSlices.size() > 1 ? "s" : ""));
+    }
+
     private void executeShowVersion() throws TException
     {
         if (!CliMain.isConnected())
@@ -1177,34 +1372,46 @@ public class CliClient
 
     private void describeTableInternal(String tableName, KsDef metadata) throws TException {
         // Describe and display
-        css_.out.println("Keyspace: " + tableName);
+        css_.out.println("Keyspace: " + tableName + ":");
         try
         {
             KsDef ks_def;
-            if (metadata != null) {
-                ks_def = metadata;
-            }
-            else {
-                ks_def = thriftClient_.describe_keyspace(tableName);
-            }
+            ks_def = metadata == null ? thriftClient_.describe_keyspace(tableName) : metadata;
             css_.out.println("  Replication Factor: " + ks_def.replication_factor);
             css_.out.println("  Column Families:");
 
             for (CfDef cf_def : ks_def.cf_defs)
             {
-                /**
-                String desc = columnMap.get("Desc");
-                String columnFamilyType = columnMap.get("Type");
-                String sort = columnMap.get("CompareWith");
-                String flushperiod = columnMap.get("FlushPeriodInMinutes");
-                css_.out.println(desc);
-                 */
-                //css_.out.println("description");
-                css_.out.println("    Column Family Name: " + cf_def.name + " {");
+                css_.out.println("    Column Family Name: " + cf_def.name);
                 css_.out.println("      Column Family Type: " + cf_def.column_type);
                 css_.out.println("      Column Sorted By: " + cf_def.comparator_type);
-                //css_.out.println("      flush period: " + flushperiod + " minutes");
-                css_.out.println("    }");
+
+                if (cf_def.getColumn_metadataSize() != 0)
+                {
+                    String leftSpace = "      ";
+                    String columnLeftSpace = leftSpace + "    ";
+
+                    AbstractType columnNameValidator = getFormatTypeForColumn(cf_def.comparator_type);
+
+                    css_.out.println(leftSpace + "Column Metadata:");
+                    for (ColumnDef columnDef : cf_def.getColumn_metadata())
+                    {
+                        String columnName = columnNameValidator.getString(columnDef.getName());
+
+                        css_.out.println(leftSpace + "  Column Name: " + columnName);
+                        css_.out.println(columnLeftSpace + "Validation Class: " + columnDef.getValidation_class());
+
+                        if (columnDef.isSetIndex_name())
+                        {
+                            css_.out.println(columnLeftSpace + "Index Name: " + columnDef.getIndex_name());
+                        }
+
+                        if (columnDef.isSetIndex_type())
+                        {
+                            css_.out.println(columnLeftSpace + "Index Type: " + columnDef.getIndex_type().name());
+                        }
+                    }
+                }
             }
         }
         catch (InvalidRequestException e)
@@ -1409,6 +1616,15 @@ public class CliClient
 
             return FBUtilities.toByteArray(longType);
         }
+        else if (comparator instanceof LexicalUUIDType || comparator instanceof TimeUUIDType)
+        {
+            UUID uuid = UUID.fromString(object);
+
+            if (comparator instanceof TimeUUIDType && uuid.version() != 1)
+                throw new IllegalArgumentException("TimeUUID supports only version 1 UUIDs");    
+
+            return UUIDGen.decompose(uuid);    
+        }
         else if (comparator instanceof IntegerType)
         {
             BigInteger integerType;
@@ -1545,4 +1761,125 @@ public class CliClient
         return strategyOptions;
     }
 
+    /**
+     * Used to check weather value validator is set for the specific column or not
+     * @param columnName - name of the column to search for value validator
+     * @param columnDefs - column definitions to search in
+     * @return boolean - true if found, false otherwise
+     */
+    private boolean hasValueValidator(byte[] columnName, List<ColumnDef> columnDefs)
+    {
+        for (ColumnDef columnDef : columnDefs)
+        {
+            byte[] currentColumnName = columnDef.getName();
+            
+            if (Arrays.equals(currentColumnName, columnName))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Used to convert value (function argument, string) into byte[]
+     * @param functionCall - tree representing function call ^(FUNCTION_CALL function_name value)
+     * @param columnFamily - column family definition (CfDef)
+     * @param columnName   - column name as byte[] (used to update CfDef)
+     * @return byte[] - string value as byte[]
+     */
+    private byte[] convertValueByFunction(Tree functionCall, CfDef columnFamily, byte[] columnName)
+    {
+        String functionName = functionCall.getChild(0).getText();
+        String functionArg  = CliUtils.unescapeSQLString(functionCall.getChild(1).getText());
+        Function function;
+
+        try
+        {
+            function = Function.valueOf(functionName.toUpperCase());
+        }
+        catch (IllegalArgumentException e)
+        {
+            StringBuilder errorMessage = new StringBuilder("Function '" + functionName + "' not found. ");
+            errorMessage.append("Available functions: ");
+            throw new RuntimeException(errorMessage.append(Function.getFunctionNames()).toString());  
+        }
+
+        try
+        {
+            AbstractType validator = function.getValidator();
+            byte[] value = getBytesAccordingToType(functionArg, validator);
+
+            // updating CfDef
+            updateColumnMetaData(columnFamily, columnName, validator.getClass().getName());
+
+            return value;
+        }
+        catch (InvalidRequestException e)
+        {
+            throw new RuntimeException(e.getWhy());
+        }
+        catch (TException e)
+        {
+            throw new RuntimeException(e);
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e.getMessage());
+        }
+    }
+
+    /**
+     * Used to update column family definition with new column metadata
+     * @param columnFamily    - CfDef record
+     * @param columnName      - column name represented as byte[]
+     * @param validationClass - value validation class
+     * @throws InvalidRequestException - thrown when invalid request
+     * @throws TException - thrown when transport to thrift failed
+     */
+    private void updateColumnMetaData(CfDef columnFamily, byte[] columnName, String validationClass)
+            throws InvalidRequestException, TException
+    {
+        List<ColumnDef> columnMetaData = columnFamily.getColumn_metadata();
+        ColumnDef column = getColumnDefByName(columnFamily, columnName);
+
+        if (column != null)
+        {
+            // if validation class is the same - no need to modify it
+            if (column.getValidation_class().equals(validationClass))
+                return;
+
+            // updating column definition with new validation_class
+            column.setValidation_class(validationClass);
+        }
+        else
+        {
+            columnMetaData.add(new ColumnDef(columnName, validationClass));
+        }
+        
+        // saving information
+        thriftClient_.system_update_column_family(columnFamily);
+    }
+
+    /**
+     * Get specific ColumnDef in column family meta data by column name
+     * @param columnFamily - CfDef record
+     * @param columnName   - column name represented as byte[]
+     * @return ColumnDef   - found column definition
+     */
+    private ColumnDef getColumnDefByName(CfDef columnFamily, byte[] columnName)
+    {
+        for (ColumnDef columnDef : columnFamily.getColumn_metadata())
+        {
+            byte[] currName = columnDef.getName();
+
+            if (Arrays.equals(currName, columnName))
+            {
+                return columnDef;
+            }
+        }
+
+        return null;
+    }
 }

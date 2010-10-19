@@ -20,6 +20,7 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
+import java.util.HashSet;
 import java.util.Set;
 
 import org.apache.cassandra.io.util.FileUtils;
@@ -55,7 +56,7 @@ public class SSTableWriter extends SSTable
 
     public SSTableWriter(String filename, long keyCount, CFMetaData metadata, IPartitioner partitioner) throws IOException
     {
-        super(Descriptor.fromFilename(filename), metadata, partitioner);
+        super(Descriptor.fromFilename(filename), new HashSet<Component>(), metadata, partitioner, SSTable.defaultRowHistogram(), SSTable.defaultColumnHistogram());
         iwriter = new IndexWriter(descriptor, partitioner, keyCount);
         dbuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
         dataFile = new BufferedRandomAccessFile(getFilename(), "rw", DatabaseDescriptor.getInMemoryCompactionLimit());
@@ -171,7 +172,7 @@ public class SSTableWriter extends SSTable
         dataFile.close(); // calls force
 
         // write sstable statistics
-        writeStatistics(descriptor);
+        writeStatistics(descriptor, estimatedRowSize, estimatedColumnCount);
 
         // remove the 'tmp' marker from all components
         final Descriptor newdesc = rename(descriptor, components);
@@ -186,12 +187,12 @@ public class SSTableWriter extends SSTable
         return sstable;
     }
 
-    private void writeStatistics(Descriptor desc) throws IOException
+    private static void writeStatistics(Descriptor desc, EstimatedHistogram rowSizes, EstimatedHistogram columnnCounts) throws IOException
     {
-        DataOutputStream dos = new DataOutputStream(new FileOutputStream(desc.filenameFor(SSTable.COMPONENT_STATS)));
-        EstimatedHistogram.serializer.serialize(estimatedRowSize, dos);
-        EstimatedHistogram.serializer.serialize(estimatedColumnCount, dos);
-        dos.close();
+        DataOutputStream out = new DataOutputStream(new FileOutputStream(desc.filenameFor(SSTable.COMPONENT_STATS)));
+        EstimatedHistogram.serializer.serialize(rowSizes, out);
+        EstimatedHistogram.serializer.serialize(rowSizes, out);
+        out.close();
     }
 
     static Descriptor rename(Descriptor tmpdesc, Set<Component> components)
@@ -257,6 +258,9 @@ public class SSTableWriter extends SSTable
             assert !ifile.exists();
             assert !ffile.exists();
 
+            EstimatedHistogram rowSizes = SSTable.defaultRowHistogram();
+            EstimatedHistogram columnCounts = SSTable.defaultColumnHistogram();
+
             IndexWriter iwriter;
             long estimatedRows;
             try
@@ -275,16 +279,26 @@ public class SSTableWriter extends SSTable
             try
             {
                 DecoratedKey key;
-                long dataPosition = 0;
-                while (dataPosition < dfile.length())
+                long rowPosition = 0;
+                while (rowPosition < dfile.length())
                 {
                     key = SSTableReader.decodeKey(StorageService.getPartitioner(), desc, FBUtilities.readShortByteArray(dfile));
+                    iwriter.afterAppend(key, rowPosition);
+
                     long dataSize = SSTableReader.readRowSize(dfile, desc);
-                    iwriter.afterAppend(key, dataPosition);
-                    dataPosition = dfile.getFilePointer() + dataSize;
-                    dfile.seek(dataPosition);
+                    rowPosition = dfile.getFilePointer() + dataSize; // next row
+
+                    IndexHelper.skipBloomFilter(dfile);
+                    IndexHelper.skipIndex(dfile);
+                    ColumnFamily.serializer().deserializeFromSSTableNoColumns(ColumnFamily.create(cfs.metadata), dfile);
+                    rowSizes.add(dataSize);
+                    columnCounts.add(dfile.readInt());
+
+                    dfile.seek(rowPosition);
                     rows++;
                 }
+
+                writeStatistics(desc, rowSizes, columnCounts);
             }
             finally
             {
