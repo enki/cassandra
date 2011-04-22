@@ -19,29 +19,23 @@
 
 package org.apache.cassandra.locator;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.InetAddress;
 import java.util.*;
 
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.service.*;
-import org.apache.commons.lang.ObjectUtils;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
+import org.apache.cassandra.gms.Gossiper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.FailureDetector;
-import org.apache.cassandra.service.StorageProxy;
+import org.apache.cassandra.service.*;
 import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.hadoop.util.StringUtils;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 /**
@@ -51,10 +45,11 @@ public abstract class AbstractReplicationStrategy
 {
     private static final Logger logger = LoggerFactory.getLogger(AbstractReplicationStrategy.class);
 
-    public String table;
-    private TokenMetadata tokenMetadata;
-    public final IEndpointSnitch snitch;
-    public Map<String, String> configOptions;
+    public final String table;
+    public final Map<String, String> configOptions;
+    private final TokenMetadata tokenMetadata;
+
+    public IEndpointSnitch snitch;
 
     AbstractReplicationStrategy(String table, TokenMetadata tokenMetadata, IEndpointSnitch snitch, Map<String, String> configOptions)
     {
@@ -68,6 +63,24 @@ public abstract class AbstractReplicationStrategy
         this.table = table;
     }
 
+    private final Map<Token, ArrayList<InetAddress>> cachedEndpoints = new NonBlockingHashMap<Token, ArrayList<InetAddress>>();
+
+    public ArrayList<InetAddress> getCachedEndpoints(Token t)
+    {
+        return cachedEndpoints.get(t);
+    }
+
+    public void cacheEndpoint(Token t, ArrayList<InetAddress> addr)
+    {
+        cachedEndpoints.put(t, addr);
+    }
+
+    public void clearEndpointCache()
+    {
+        logger.debug("clearing cached endpoints");
+        cachedEndpoints.clear();
+    }
+
     /**
      * get the (possibly cached) endpoints that should store the given Token
      * Note that while the endpoints are conceptually a Set (no duplicates will be included),
@@ -79,13 +92,13 @@ public abstract class AbstractReplicationStrategy
     public ArrayList<InetAddress> getNaturalEndpoints(Token searchToken) throws IllegalStateException
     {
         Token keyToken = TokenMetadata.firstToken(tokenMetadata.sortedTokens(), searchToken);
-        ArrayList<InetAddress> endpoints = snitch.getCachedEndpoints(keyToken);
+        ArrayList<InetAddress> endpoints = getCachedEndpoints(keyToken);
         if (endpoints == null)
         {
             TokenMetadata tokenMetadataClone = tokenMetadata.cloneOnlyTokenMap();
             keyToken = TokenMetadata.firstToken(tokenMetadataClone.sortedTokens(), searchToken);
             endpoints = new ArrayList<InetAddress>(calculateNaturalEndpoints(searchToken, tokenMetadataClone));
-            snitch.cacheEndpoint(keyToken, endpoints);
+            cacheEndpoint(keyToken, endpoints);
             // calculateNaturalEndpoints should have checked this already, this is a safety
             assert getReplicationFactor() <= endpoints.size() : String.format("endpoints %s generated for RF of %s",
                                                                               Arrays.toString(endpoints.toArray()),
@@ -108,16 +121,27 @@ public abstract class AbstractReplicationStrategy
 
     public IWriteResponseHandler getWriteResponseHandler(Collection<InetAddress> writeEndpoints,
                                                          Multimap<InetAddress, InetAddress> hintedEndpoints,
-                                                         ConsistencyLevel consistencyLevel)
+                                                         ConsistencyLevel consistency_level)
     {
-        return WriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistencyLevel, table);
+        if (consistency_level == ConsistencyLevel.LOCAL_QUORUM)
+        {
+            // block for in this context will be localnodes block.
+            return DatacenterWriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistency_level, table);
+        }
+        else if (consistency_level == ConsistencyLevel.EACH_QUORUM)
+        {
+            return DatacenterSyncWriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistency_level, table);
+        }
+        return WriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistency_level, table);
     }
 
-    // instance method so test subclasses can override it
-    int getReplicationFactor()
-    {
-       return DatabaseDescriptor.getReplicationFactor(table);
-    }
+    /**
+     * calculate the RF based on strategy_options. When overwriting, ensure that this get()
+     *  is FAST, as this is called often.
+     *
+     * @return the replication factor
+     */
+    public abstract int getReplicationFactor();
 
     /**
      * returns <tt>Multimap</tt> of {live destination: ultimate targets}, where if target is not the same
@@ -127,8 +151,6 @@ public abstract class AbstractReplicationStrategy
     public Multimap<InetAddress, InetAddress> getHintedEndpoints(Collection<InetAddress> targets)
     {
         Multimap<InetAddress, InetAddress> map = HashMultimap.create(targets.size(), 1);
-
-        IEndpointSnitch endpointSnitch = DatabaseDescriptor.getEndpointSnitch();
 
         // first, add the live endpoints
         for (InetAddress ep : targets)
@@ -153,10 +175,16 @@ public abstract class AbstractReplicationStrategy
         {
             if (map.containsKey(ep))
                 continue;
+            if (!StorageProxy.shouldHint(ep))
+            {
+                if (logger.isDebugEnabled())
+                    logger.debug("not hinting " + ep + " which has been down " + Gossiper.instance.getEndpointDowntime(ep) + "ms");
+                continue;
+            }
 
             InetAddress destination = map.isEmpty()
                                     ? localAddress
-                                    : endpointSnitch.getSortedListByProximity(localAddress, map.keySet()).get(0);
+                                    : snitch.getSortedListByProximity(localAddress, map.keySet()).get(0);
             map.put(destination, ep);
         }
 
@@ -213,15 +241,12 @@ public abstract class AbstractReplicationStrategy
         return getAddressRanges(temp).get(pendingAddress);
     }
 
-    public QuorumResponseHandler getQuorumResponseHandler(IResponseResolver responseResolver, ConsistencyLevel consistencyLevel)
-    {
-        return new QuorumResponseHandler(responseResolver, consistencyLevel, table);
-    }
-
     public void invalidateCachedTokenEndpointValues()
     {
-        snitch.clearEndpointCache();
+        clearEndpointCache();
     }
+
+    public abstract void validateOptions() throws ConfigurationException;
 
     public static AbstractReplicationStrategy createReplicationStrategy(String table,
                                                                         Class<? extends AbstractReplicationStrategy> strategyClass,
@@ -242,6 +267,9 @@ public abstract class AbstractReplicationStrategy
             throw new RuntimeException(e);
         }
 
+        // Throws Config Exception if strat_opts don't contain required info
+        strategy.validateOptions();
+
         return strategy;
     }
 
@@ -252,7 +280,13 @@ public abstract class AbstractReplicationStrategy
                                                                         Map<String, String> strategyOptions)
             throws ConfigurationException
     {
-        Class<AbstractReplicationStrategy> c = FBUtilities.<AbstractReplicationStrategy>classForName(strategyClassName, "replication-strategy");
+        Class<AbstractReplicationStrategy> c = getClass(strategyClassName);
         return createReplicationStrategy(table, c, tokenMetadata, snitch, strategyOptions);
+    }
+
+    public static Class<AbstractReplicationStrategy> getClass(String cls) throws ConfigurationException
+    {
+        String className = cls.contains(".") ? cls : "org.apache.cassandra.locator." + cls;
+        return FBUtilities.classForName(className, "replication strategy");
     }
 }

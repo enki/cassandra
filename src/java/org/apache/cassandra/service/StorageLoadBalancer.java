@@ -144,21 +144,6 @@ public class StorageLoadBalancer implements IEndpointStateChangeSubscriber
         */
     }
 
-    class MoveMessageVerbHandler implements IVerbHandler
-    {
-        public void doVerb(Message message)
-        {
-            Message reply = message.getReply(FBUtilities.getLocalAddress(), new byte[] {(byte)(isMoveable_.get() ? 1 : 0)});
-            MessagingService.instance.sendOneWay(reply, message.getFrom());
-            if ( isMoveable_.get() )
-            {
-                // MoveMessage moveMessage = (MoveMessage)message.getMessageBody()[0];
-                /* Start the leave operation and join the ring at the position specified */
-                isMoveable_.set(false);
-            }
-        }
-    }
-
     private static final int BROADCAST_INTERVAL = 60 * 1000;
 
     public static final StorageLoadBalancer instance = new StorageLoadBalancer();
@@ -184,7 +169,7 @@ public class StorageLoadBalancer implements IEndpointStateChangeSubscriber
     {
         if (state != ApplicationState.LOAD)
             return;
-        loadInfo_.put(endpoint, Double.parseDouble(value.value));
+        loadInfo_.put(endpoint, Double.valueOf(value.value));
 
         /*
         // clone load information to perform calculations
@@ -348,10 +333,10 @@ public class StorageLoadBalancer implements IEndpointStateChangeSubscriber
                 if (logger_.isDebugEnabled())
                     logger_.debug("Disseminating load info ...");
                 Gossiper.instance.addLocalApplicationState(ApplicationState.LOAD,
-                                                           StorageService.valueFactory.load(StorageService.instance.getLoad()));
+                                                           StorageService.instance.valueFactory.load(StorageService.instance.getLoad()));
             }
         };
-        StorageService.scheduledTasks.scheduleWithFixedDelay(runnable, 2 * Gossiper.intervalInMillis_, BROADCAST_INTERVAL, TimeUnit.MILLISECONDS);
+        StorageService.scheduledTasks.scheduleWithFixedDelay(runnable, 2 * Gossiper.intervalInMillis, BROADCAST_INTERVAL, TimeUnit.MILLISECONDS);
     }
 
     /**

@@ -20,16 +20,12 @@ package org.apache.cassandra.io.util;
 
 import java.io.*;
 import java.text.DecimalFormat;
-import java.util.*;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.sun.jna.Native;
-import org.apache.cassandra.utils.CLibrary;
-
-import com.sun.jna.Native;
-import org.apache.cassandra.utils.CLibrary;
 
 
 public class FileUtils
@@ -64,6 +60,60 @@ public class FileUtils
             logger_.debug((String.format("Renaming %s to %s", from.getPath(), to.getPath())));
         if (!from.renameTo(to))
             throw new IOException(String.format("Failed to rename %s to %s", from.getPath(), to.getPath()));
+    }
+
+    public static void truncate(String path, long size) throws IOException
+    {
+        RandomAccessFile file;
+        try
+        {
+            file = new RandomAccessFile(path, "rw");
+        }
+        catch (FileNotFoundException e)
+        {
+            throw new RuntimeException(e);
+        }
+        try
+        {
+            file.getChannel().truncate(size);
+        }
+        finally
+        {
+            file.close();
+        }
+    }
+
+    public static void closeQuietly(Closeable c)
+    {
+        try
+        {
+            if (c != null)
+                c.close();
+        }
+        catch (Exception e)
+        {
+            logger_.warn("Failed closing stream", e);
+        }
+    }
+
+    public static void close(Iterable<? extends Closeable> cs) throws IOException
+    {
+        IOException e = null;
+        for (Closeable c : cs)
+        {
+            try
+            {
+                if (c != null)
+                    c.close();
+            }
+            catch (IOException ex)
+            {
+                e = ex;
+                logger_.warn("Failed closing stream " + c, ex);
+            }
+        }
+        if (e != null)
+            throw e;
     }
 
     public static class FileComparator implements Comparator<File>
@@ -165,29 +215,6 @@ public class FileUtils
     }
     
     /**
-     * calculate the total space used by a file or directory
-     * 
-     * @param path the path
-     * @return total space used.
-     */
-    public static long getUsedDiskSpaceForPath(String path)
-    {
-        File file = new File(path);
-        
-        if (file.isFile()) 
-        {
-            return file.length();
-        }
-        
-        long diskSpace = 0;
-        for (File childFile: file.listFiles())
-        {
-            diskSpace += getUsedDiskSpaceForPath(childFile.getPath());
-        }
-        return diskSpace;
-    }
-
-    /**
      * Deletes all files and subdirectories under "dir".
      * @param dir Directory to be deleted
      * @throws IOException if any part of the tree cannot be deleted
@@ -198,76 +225,35 @@ public class FileUtils
         {
             String[] children = dir.list();
             for (String child : children)
-            {
                 deleteRecursive(new File(dir, child));
-            }
         }
 
         // The directory is now empty so now it can be smoked
         deleteWithConfirm(dir);
     }
 
-    /**
-     * Create a hard link for a given file.
-     * 
-     * @param sourceFile      The name of the source file.
-     * @param destinationFile The name of the destination file.
-     * 
-     * @throws IOException if an error has occurred while creating the link.
-     */
-    public static void createHardLink(File sourceFile, File destinationFile) throws IOException
+    public static void skipBytesFully(DataInput in, int bytes) throws IOException
     {
-        int errno = Integer.MIN_VALUE;
-        try
+        int n = 0;
+        while (n < bytes)
         {
-            int result = CLibrary.link(sourceFile.getAbsolutePath(), destinationFile.getAbsolutePath());
-            if (result != 0)
-                errno = Native.getLastError();
-        }
-        catch (UnsatisfiedLinkError e)
-        {
-            createHardLinkWithExec(sourceFile, destinationFile);
-            return;
-        }
-
-        if (errno != Integer.MIN_VALUE)
-        {
-            // there are 17 different error codes listed on the man page.  punt until/unless we find which
-            // ones actually turn up in practice.
-            throw new IOException(String.format("Unable to create hard link from %s to %s (errno %d)", 
-                                                sourceFile, destinationFile, errno));
+            int skipped = in.skipBytes(bytes - n);
+            if (skipped == 0)
+                throw new EOFException("EOF after " + n + " bytes out of " + bytes);
+            n += skipped;
         }
     }
 
-    private static void createHardLinkWithExec(File sourceFile, File destinationFile) throws IOException
+    public static void skipBytesFully(DataInput in, long bytes) throws IOException
     {
-        String osname = System.getProperty("os.name");
-        ProcessBuilder pb;
-        if (osname.startsWith("Windows"))
+        long n = 0;
+        while (n < bytes)
         {
-            float osversion = Float.parseFloat(System.getProperty("os.version"));
-            if (osversion >= 6.0f)
-            {
-                pb = new ProcessBuilder("cmd", "/c", "mklink", "/H", destinationFile.getAbsolutePath(), sourceFile.getAbsolutePath());
-            }
-            else
-            {
-                pb = new ProcessBuilder("fsutil", "hardlink", "create", destinationFile.getAbsolutePath(), sourceFile.getAbsolutePath());
-            }
-        }
-        else
-        {
-            pb = new ProcessBuilder("ln", sourceFile.getAbsolutePath(), destinationFile.getAbsolutePath());
-            pb.redirectErrorStream(true);
-        }
-        Process p = pb.start();
-        try
-        {
-            p.waitFor();
-        }
-        catch (InterruptedException e)
-        {
-            throw new RuntimeException(e);
+            int m = (int) Math.min(Integer.MAX_VALUE, bytes - n);
+            int skipped = in.skipBytes(m);
+            if (skipped == 0)
+                throw new EOFException("EOF after " + n + " bytes out of " + bytes);
+            n += skipped;
         }
     }
 }

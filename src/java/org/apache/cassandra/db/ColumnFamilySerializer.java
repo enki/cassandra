@@ -21,16 +21,22 @@ package org.apache.cassandra.db;
  */
 
 
+import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.io.DataInput;
 import java.util.Collection;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.io.ICompactSerializer2;
+import org.apache.cassandra.io.ICompactSerializer3;
 
-public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
+public class ColumnFamilySerializer implements ICompactSerializer3<ColumnFamily>
 {
+    private static final Logger logger = LoggerFactory.getLogger(ColumnFamilySerializer.class);
+
     /*
      * Serialized ColumnFamily format:
      *
@@ -103,6 +109,11 @@ public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
 
     public ColumnFamily deserialize(DataInput dis) throws IOException
     {
+        return deserialize(dis, false, false);
+    }
+
+    public ColumnFamily deserialize(DataInput dis, boolean intern, boolean fromRemote) throws IOException
+    {
         if (!dis.readBoolean())
             return null;
 
@@ -112,23 +123,29 @@ public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
             throw new UnserializableColumnFamilyException("Couldn't find cfId=" + cfId, cfId);
         ColumnFamily cf = ColumnFamily.create(cfId);
         deserializeFromSSTableNoColumns(cf, dis);
-        deserializeColumns(dis, cf);
+        deserializeColumns(dis, cf, intern, fromRemote);
         return cf;
     }
 
-    public void deserializeColumns(DataInput dis, ColumnFamily cf) throws IOException
+    public void deserializeColumns(DataInput dis, ColumnFamily cf, boolean intern, boolean fromRemote) throws IOException
     {
         int size = dis.readInt();
+        ColumnFamilyStore interner = intern ? Table.open(CFMetaData.getCF(cf.id()).left).getColumnFamilyStore(cf.id()) : null;
         for (int i = 0; i < size; ++i)
         {
-            IColumn column = cf.getColumnSerializer().deserialize(dis);
+            IColumn column = cf.getColumnSerializer().deserialize(dis, interner, fromRemote, (int) (System.currentTimeMillis() / 1000));
             cf.addColumn(column);
         }
     }
 
     public ColumnFamily deserializeFromSSTableNoColumns(ColumnFamily cf, DataInput input) throws IOException
-    {        
+    {
         cf.delete(input.readInt(), input.readLong());
         return cf;
+    }
+
+    public long serializedSize(ColumnFamily cf)
+    {
+        return cf.serializedSize();
     }
 }

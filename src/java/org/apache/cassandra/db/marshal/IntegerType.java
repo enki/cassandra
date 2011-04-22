@@ -19,20 +19,26 @@
 
 package org.apache.cassandra.db.marshal;
 
-public final class IntegerType extends AbstractType
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
+
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.thrift.TBaseHelper;
+
+public final class IntegerType extends AbstractType<BigInteger>
 {
     public static final IntegerType instance = new IntegerType();
 
-    private static int findMostSignificantByte(byte[] bytes)
+    private static int findMostSignificantByte(ByteBuffer bytes)
     {
-        int len = bytes.length - 1;
+        int len = bytes.remaining() - 1;
         int i = 0;
         for (; i < len; i++)
         {
-            byte b0 = bytes[i];
+            byte b0 = bytes.get(bytes.position() + i);
             if (b0 != 0 && b0 != -1)
                 break;
-            byte b1 = bytes[i + 1];
+            byte b1 = bytes.get(bytes.position() + i + 1);
             if (b0 == 0 && b1 != 0)
             {
                 if (b1 > 0)
@@ -51,10 +57,20 @@ public final class IntegerType extends AbstractType
 
     IntegerType() {/* singleton */}
 
-    public int compare(byte[] lhs, byte[] rhs)
+    public BigInteger compose(ByteBuffer bytes)
     {
-        int lhsLen = lhs.length;
-        int rhsLen = rhs.length;
+        return new BigInteger(ByteBufferUtil.getArray(bytes));
+    }
+
+    public ByteBuffer decompose(BigInteger value)
+    {
+        return ByteBuffer.wrap(value.toByteArray());
+    }
+
+    public int compare(ByteBuffer lhs, ByteBuffer rhs)
+    {
+        int lhsLen = lhs.remaining();
+        int rhsLen = rhs.remaining();
 
         if (lhsLen == 0)
             return rhsLen == 0 ? 0 : -1;
@@ -68,8 +84,8 @@ public final class IntegerType extends AbstractType
         int lhsLenDiff = lhsLen - lhsMsbIdx;
         int rhsLenDiff = rhsLen - rhsMsbIdx;
 
-        byte lhsMsb = lhs[lhsMsbIdx];
-        byte rhsMsb = rhs[rhsMsbIdx];
+        byte lhsMsb = lhs.get(lhs.position() + lhsMsbIdx);
+        byte rhsMsb = rhs.get(rhs.position() + rhsMsbIdx);
 
         /*         +    -
          *      -----------
@@ -99,8 +115,9 @@ public final class IntegerType extends AbstractType
         // remaining bytes are compared unsigned
         while (lhsMsbIdx < lhsLen)
         {
-            lhsMsb = lhs[lhsMsbIdx++];
-            rhsMsb = rhs[rhsMsbIdx++];
+            lhsMsb = lhs.get(lhs.position() + lhsMsbIdx++);
+            rhsMsb = rhs.get(rhs.position() + rhsMsbIdx++);
+
             if (lhsMsb != rhsMsb)
                 return (lhsMsb & 0xFF) - (rhsMsb & 0xFF);
         }
@@ -108,14 +125,48 @@ public final class IntegerType extends AbstractType
         return 0;
     }
 
-    @Override
-    public String getString(byte[] bytes)
+    public String getString(ByteBuffer bytes)
     {
         if (bytes == null)
             return "null";
-        if (bytes.length == 0)
+        if (bytes.remaining() == 0)
             return "empty";
 
-        return new java.math.BigInteger(bytes).toString(10);
+        return new java.math.BigInteger(TBaseHelper.byteBufferToByteArray(bytes)).toString(10);
+    }
+    
+    public String toString(BigInteger bi)
+    {
+        return bi.toString();
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+        
+        BigInteger integerType;
+
+        try
+        {
+            integerType = new BigInteger(source);
+        }
+        catch (Exception e)
+        {
+            throw new MarshalException(String.format("unable to make int from '%s'", source), e);
+        }
+
+        return decompose(integerType);
+    }
+
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        // no invalid integers.
+    }
+
+    public Class<BigInteger> getType()
+    {
+        return BigInteger.class;
     }
 }

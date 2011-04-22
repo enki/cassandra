@@ -19,48 +19,27 @@
 
 package org.apache.cassandra.locator;
 
-import org.apache.cassandra.dht.Token;
-import org.cliffc.high_scale_lib.NonBlockingHashMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.net.InetAddress;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public abstract class AbstractEndpointSnitch implements IEndpointSnitch
 {
     private static final Logger logger = LoggerFactory.getLogger(AbstractEndpointSnitch.class);
     
-    /* list of subscribers that are notified when cached values from this snitch are invalidated */
-    protected List<AbstractReplicationStrategy> subscribers = new CopyOnWriteArrayList<AbstractReplicationStrategy>();
-    
-    private final Map<Token, ArrayList<InetAddress>> cachedEndpoints = new NonBlockingHashMap<Token, ArrayList<InetAddress>>();
-    
-    public ArrayList<InetAddress> getCachedEndpoints(Token t)
-    {
-        return cachedEndpoints.get(t);
-    }
-
-    public void cacheEndpoint(Token t, ArrayList<InetAddress> addr)
-    {
-        cachedEndpoints.put(t, addr);
-    }
-
-    public void clearEndpointCache()
-    {
-        logger.debug("clearing cached endpoints");
-        cachedEndpoints.clear();
-    }
-
     public abstract List<InetAddress> getSortedListByProximity(InetAddress address, Collection<InetAddress> unsortedAddress);
     public abstract void sortByProximity(InetAddress address, List<InetAddress> addresses);
 
     public int compareEndpoints(InetAddress target, InetAddress a1, InetAddress a2)
     {
         return a1.getHostAddress().compareTo(a2.getHostAddress());
+    }
+
+    public void gossiperStarting()
+    {
+        //noop by default
     }
 }

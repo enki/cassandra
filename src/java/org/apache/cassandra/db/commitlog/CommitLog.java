@@ -18,24 +18,6 @@
 
 package org.apache.cassandra.db.commitlog;
 
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.Config;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.UnserializableColumnFamilyException;
-import org.apache.cassandra.io.DeletionService;
-import org.apache.cassandra.io.util.BufferedRandomAccessFile;
-import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.WrappedRunnable;
-import org.apache.commons.lang.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -44,6 +26,27 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
+
+import org.apache.cassandra.net.MessagingService;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.RowMutation;
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.UnserializableColumnFamilyException;
+import org.apache.cassandra.io.DeletionService;
+import org.apache.cassandra.io.util.BufferedRandomAccessFile;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.WrappedRunnable;
 
 /*
  * Commit Log tracks every write operation into the system. The aim
@@ -76,33 +79,16 @@ import java.util.zip.Checksum;
 public class CommitLog
 {
     private static final int MAX_OUTSTANDING_REPLAY_COUNT = 1024;
-    private static volatile int SEGMENT_SIZE = 128*1024*1024; // roll after log gets this big
-
+    
     static final Logger logger = LoggerFactory.getLogger(CommitLog.class);
 
-    public static CommitLog instance()
-    {
-        return CLHandle.instance;
-    }
-
-    private static class CLHandle
-    {
-        public static final CommitLog instance = new CommitLog();
-    }
+    public static final CommitLog instance = new CommitLog();
 
     private final Deque<CommitLogSegment> segments = new ArrayDeque<CommitLogSegment>();
 
-    public static void setSegmentSize(int size)
-    {
-        SEGMENT_SIZE = size;
-    }
-
-    public int getSegmentCount()
-    {
-        return segments.size();
-    }
-
     private final ICommitLogExecutorService executor;
+    
+    private volatile int segmentSize = 128*1024*1024; // roll after log gets this big
 
     /**
      * param @ table - name of table for which we are maintaining
@@ -112,49 +98,39 @@ public class CommitLog
     */
     private CommitLog()
     {
+        try
+        {
+            DatabaseDescriptor.createAllDirectories();
+            segmentSize = DatabaseDescriptor.getCommitLogSegmentSize();
+        }
+        catch (IOException e)
+        {
+            throw new IOError(e);
+        }
+
         // all old segments are recovered and deleted before CommitLog is instantiated.
         // All we need to do is create a new one.
         segments.add(new CommitLogSegment());
-        
-        if (DatabaseDescriptor.getCommitLogSync() == Config.CommitLogSync.periodic)
-        {
-            executor = new PeriodicCommitLogExecutorService();
-            final Callable syncer = new Callable()
-            {
-                public Object call() throws Exception
-                {
-                    sync();
-                    return null;
-                }
-            };
 
-            new Thread(new Runnable()
-            {
-                public void run()
-                {
-                    while (true)
-                    {
-                        try
-                        {
-                            executor.submit(syncer).get();
-                            Thread.sleep(DatabaseDescriptor.getCommitLogSyncPeriod());
-                        }
-                        catch (InterruptedException e)
-                        {
-                            throw new AssertionError(e);
-                        }
-                        catch (ExecutionException e)
-                        {
-                            throw new RuntimeException(e);
-                        }
-                    }
-                }
-            }, "PERIODIC-COMMIT-LOG-SYNCER").start();
-        }
-        else
+        executor = DatabaseDescriptor.getCommitLogSync() == Config.CommitLogSync.batch
+                 ? new BatchCommitLogExecutorService()
+                 : new PeriodicCommitLogExecutorService(this);
+    }
+
+    public void resetUnsafe()
+    {
+        segments.clear();
+        segments.add(new CommitLogSegment());
+    }
+
+    private boolean manages(String name)
+    {
+        for (CommitLogSegment segment : segments)
         {
-            executor = new BatchCommitLogExecutorService();
+            if (segment.getPath().endsWith(name))
+                return true;
         }
+        return false;
     }
 
     public static void recover() throws IOException
@@ -164,11 +140,17 @@ public class CommitLog
         {
             public boolean accept(File dir, String name)
             {
-                return CommitLogSegment.possibleCommitLogFile(name);
+                // we used to try to avoid instantiating commitlog (thus creating an empty segment ready for writes)
+                // until after recover was finished.  this turns out to be fragile; it is less error-prone to go
+                // ahead and allow writes before recover(), and just skip active segments when we do.
+                return CommitLogSegment.possibleCommitLogFile(name) && !instance.manages(name);
             }
         });
         if (files.length == 0)
+        {
+            logger.info("No commitlog files found; skipping replay");
             return;
+        }
 
         Arrays.sort(files, new FileUtils.FileComparator());
         logger.info("Replaying " + StringUtils.join(files, ", "));
@@ -191,8 +173,8 @@ public class CommitLog
 
         for (File file : clogs)
         {
-            int bufferSize = (int)Math.min(file.length(), 32 * 1024 * 1024);
-            BufferedRandomAccessFile reader = new BufferedRandomAccessFile(file.getAbsolutePath(), "r", bufferSize);
+            int bufferSize = (int) Math.min(Math.max(file.length(), 1), 32 * 1024 * 1024);
+            BufferedRandomAccessFile reader = new BufferedRandomAccessFile(new File(file.getAbsolutePath()), "r", bufferSize, true);
 
             try
             {
@@ -209,11 +191,14 @@ public class CommitLog
                     logger.info(headerPath + " incomplete, missing or corrupt.  Everything is ok, don't panic.  CommitLog will be replayed from the beginning");
                     logger.debug("exception was", ioe);
                 }
-                if (replayPosition < 0)
+                if (replayPosition < 0 || replayPosition > reader.length())
                 {
+                    // replayPosition > reader.length() can happen if some data gets flushed before it is written to the commitlog
+                    // (see https://issues.apache.org/jira/browse/CASSANDRA-2285)
                     logger.debug("skipping replay of fully-flushed {}", file);
                     continue;
                 }
+
                 reader.seek(replayPosition);
 
                 if (logger.isDebugEnabled())
@@ -226,16 +211,21 @@ public class CommitLog
                         logger.debug("Reading mutation at " + reader.getFilePointer());
 
                     long claimedCRC32;
-
                     Checksum checksum = new CRC32();
                     int serializedSize;
                     try
                     {
                         // any of the reads may hit EOF
                         serializedSize = reader.readInt();
+                        // RowMutation must be at LEAST 10 bytes:
+                        // 3 each for a non-empty Table and Key (including the 2-byte length from
+                        // writeUTF/writeWithShortLength) and 4 bytes for column count.
+                        // This prevents CRC by being fooled by special-case garbage in the file; see CASSANDRA-2128
+                        if (serializedSize < 10)
+                            break;
                         long claimedSizeChecksum = reader.readLong();
                         checksum.update(serializedSize);
-                        if (checksum.getValue() != claimedSizeChecksum || serializedSize <= 0)
+                        if (checksum.getValue() != claimedSizeChecksum)
                             break; // entry wasn't synced correctly/fully.  that's ok.
 
                         if (serializedSize > bytes.length)
@@ -261,7 +251,9 @@ public class CommitLog
                     RowMutation rm = null;
                     try
                     {
-                        rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn));
+                        // assuming version here. We've gone to lengths to make sure what gets written to the CL is in
+                        // the current version.  so do make sure the CL is drained prior to upgrading a node.
+                        rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn), MessagingService.version_);
                     }
                     catch (UnserializableColumnFamilyException ex)
                     {
@@ -279,7 +271,7 @@ public class CommitLog
                     if (logger.isDebugEnabled())
                         logger.debug(String.format("replaying mutation for %s.%s: %s",
                                                     rm.getTable(),
-                                                    rm.key(),
+                                                    ByteBufferUtil.bytesToHex(rm.key()),
                                                     "{" + StringUtils.join(rm.getColumnFamilies(), ", ") + "}"));
                     final Table table = Table.open(rm.getTable());
                     tablesRecovered.add(table);
@@ -307,7 +299,7 @@ public class CommitLog
                             }
                             if (!newRm.isEmpty())
                             {
-                                Table.open(newRm.getTable()).apply(newRm, null, false);
+                                Table.open(newRm.getTable()).apply(newRm, false);
                             }
                         }
                     };
@@ -321,7 +313,7 @@ public class CommitLog
             }
             finally
             {
-                reader.close();
+                FileUtils.closeQuietly(reader);
                 logger.info("Finished reading " + file);
             }
         }
@@ -374,9 +366,9 @@ public class CommitLog
      * of any problems. This way we can assume that the subsequent commit log
      * entry will override the garbage left over by the previous write.
     */
-    public void add(RowMutation rowMutation, Object serializedRow) throws IOException
+    public void add(RowMutation rowMutation) throws IOException
     {
-        executor.add(new LogRecordAdder(rowMutation, serializedRow));
+        executor.add(new LogRecordAdder(rowMutation));
     }
 
     /*
@@ -446,12 +438,12 @@ public class CommitLog
             }
 
             header.turnOff(id);
-            if (header.isSafeToDelete())
+            if (header.isSafeToDelete() && iter.hasNext())
             {
                 logger.info("Discarding obsolete commit log:" + segment);
                 segment.close();
-                DeletionService.submitDelete(segment.getHeaderPath());
-                DeletionService.submitDelete(segment.getPath());
+                DeletionService.executeDelete(segment.getHeaderPath());
+                DeletionService.executeDelete(segment.getPath());
                 // usually this will be the first (remaining) segment, but not always, if segment A contains
                 // writes to a CF that is unflushed but is followed by segment B whose CFs are all flushed.
                 iter.remove();
@@ -475,21 +467,19 @@ public class CommitLog
     class LogRecordAdder implements Callable, Runnable
     {
         final RowMutation rowMutation;
-        final Object serializedRow;
 
-        LogRecordAdder(RowMutation rm, Object serializedRow)
+        LogRecordAdder(RowMutation rm)
         {
             this.rowMutation = rm;
-            this.serializedRow = serializedRow;
         }
 
         public void run()
         {
             try
             {
-                currentSegment().write(rowMutation, serializedRow);
+                currentSegment().write(rowMutation);
                 // roll log if necessary
-                if (currentSegment().length() >= SEGMENT_SIZE)
+                if (currentSegment().length() >= segmentSize)
                 {
                     sync();
                     segments.add(new CommitLogSegment());
@@ -506,5 +496,11 @@ public class CommitLog
             run();
             return null;
         }
+    }
+
+    public void shutdownBlocking() throws InterruptedException
+    {
+        executor.shutdown();
+        executor.awaitTermination();
     }
 }

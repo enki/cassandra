@@ -23,56 +23,64 @@ package org.apache.cassandra.io;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.List;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
+import org.apache.commons.collections.iterators.CollatingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.commons.collections.iterators.CollatingIterator;
 
-import org.apache.cassandra.utils.ReducingIterator;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.CompactionManager;
+import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableScanner;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ReducingIterator;
 
 public class CompactionIterator extends ReducingIterator<SSTableIdentityIterator, AbstractCompactedRow>
-implements Closeable, ICompactionInfo
+implements Closeable, CompactionInfo.Holder
 {
     private static Logger logger = LoggerFactory.getLogger(CompactionIterator.class);
 
-    protected static final int FILE_BUFFER_SIZE = 1024 * 1024;
+    public static final int FILE_BUFFER_SIZE = 1024 * 1024;
 
     protected final List<SSTableIdentityIterator> rows = new ArrayList<SSTableIdentityIterator>();
-    private final ColumnFamilyStore cfs;
-    private final int gcBefore;
-    private final boolean major;
+    protected final CompactionType type;
+    protected final CompactionController controller;
 
     private long totalBytes;
     private long bytesRead;
     private long row;
 
-    public CompactionIterator(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables, int gcBefore, boolean major) throws IOException
+    // the bytes that had been compacted the last time we delayed to throttle,
+    // and the time in milliseconds when we last throttled
+    private long bytesAtLastDelay;
+    private long timeAtLastDelay;
+
+    // current target bytes to compact per millisecond
+    private int targetBytesPerMS = -1;
+
+    public CompactionIterator(CompactionType type, Iterable<SSTableReader> sstables, CompactionController controller) throws IOException
     {
-        this(cfs, getCollatingIterator(sstables), gcBefore, major);
+        this(type, getCollatingIterator(sstables), controller);
     }
 
     @SuppressWarnings("unchecked")
-    protected CompactionIterator(ColumnFamilyStore cfs, Iterator iter, int gcBefore, boolean major)
+    protected CompactionIterator(CompactionType type, Iterator iter, CompactionController controller)
     {
         super(iter);
+        this.type = type;
+        this.controller = controller;
         row = 0;
         totalBytes = bytesRead = 0;
         for (SSTableScanner scanner : getScanners())
         {
             totalBytes += scanner.getFileLength();
         }
-        this.cfs = cfs;
-        this.gcBefore = gcBefore;
-        this.major = major;
     }
 
     @SuppressWarnings("unchecked")
@@ -82,9 +90,18 @@ implements Closeable, ICompactionInfo
         CollatingIterator iter = FBUtilities.getCollatingIterator();
         for (SSTableReader sstable : sstables)
         {
-            iter.addIterator(sstable.getScanner(FILE_BUFFER_SIZE));
+            iter.addIterator(sstable.getDirectScanner(FILE_BUFFER_SIZE));
         }
         return iter;
+    }
+
+    public CompactionInfo getCompactionInfo()
+    {
+        return new CompactionInfo(controller.getKeyspace(),
+                                  controller.getColumnFamily(),
+                                  type,
+                                  bytesRead,
+                                  totalBytes);
     }
 
     @Override
@@ -105,7 +122,18 @@ implements Closeable, ICompactionInfo
         try
         {
             AbstractCompactedRow compactedRow = getCompactedRow();
-            return compactedRow.isEmpty() ? null : compactedRow;
+            if (compactedRow.isEmpty())
+            {
+                controller.invalidateCachedRow(compactedRow.key);
+                return null;
+            }
+
+            // If the raw is cached, we call removeDeleted on it to have/ coherent query returns. However it would look
+            // like some deleted columns lived longer than gc_grace + compaction. This can also free up big amount of
+            // memory on long running instances
+            controller.removeDeletedInCache(compactedRow.key);
+
+            return compactedRow;
         }
         finally
         {
@@ -117,6 +145,7 @@ implements Closeable, ICompactionInfo
                 {
                     bytesRead += scanner.getFilePointer();
                 }
+                throttle();
             }
         }
     }
@@ -132,18 +161,51 @@ implements Closeable, ICompactionInfo
         if (rowSize > DatabaseDescriptor.getInMemoryCompactionLimit())
         {
             logger.info(String.format("Compacting large row %s (%d bytes) incrementally",
-                                      FBUtilities.bytesToHex(rows.get(0).getKey().key), rowSize));
-            return new LazilyCompactedRow(cfs, rows, major, gcBefore);
+                                      ByteBufferUtil.bytesToHex(rows.get(0).getKey().key), rowSize));
+            return new LazilyCompactedRow(controller, rows);
         }
-        return new PrecompactedRow(cfs, rows, major, gcBefore);
+        return new PrecompactedRow(controller, rows);
+    }
+
+    private void throttle()
+    {
+        if (DatabaseDescriptor.getCompactionThroughputMbPerSec() < 1)
+            // throttling disabled
+            return;
+        int totalBytesPerMS = DatabaseDescriptor.getCompactionThroughputMbPerSec() * 1024 * 1024 / 1000;
+
+        // bytes compacted and time passed since last delay
+        long bytesSinceLast = bytesRead - bytesAtLastDelay;
+        long msSinceLast = System.currentTimeMillis() - timeAtLastDelay;
+
+        // determine the current target
+        int newTarget = totalBytesPerMS /
+            Math.max(1, CompactionManager.instance.getActiveCompactions());
+        if (newTarget != targetBytesPerMS)
+            logger.info(String.format("%s now compacting at %d bytes/ms.",
+                                      this,
+                                      newTarget));
+        targetBytesPerMS = newTarget;
+
+        // the excess bytes that were compacted in this period
+        long excessBytes = bytesSinceLast - msSinceLast * targetBytesPerMS;
+
+        // the time to delay to recap the deficit
+        long timeToDelay = excessBytes / Math.max(1, targetBytesPerMS);
+        if (timeToDelay > 0)
+        {
+            if (logger.isTraceEnabled())
+                logger.trace(String.format("Compacted %d bytes in %d ms: throttling for %d ms",
+                                           bytesSinceLast, msSinceLast, timeToDelay));
+            try { Thread.sleep(timeToDelay); } catch (InterruptedException e) { throw new AssertionError(e); }
+        }
+        bytesAtLastDelay = bytesRead;
+        timeAtLastDelay = System.currentTimeMillis();
     }
 
     public void close() throws IOException
     {
-        for (SSTableScanner scanner : getScanners())
-        {
-            scanner.close();
-        }
+        FileUtils.close(getScanners());
     }
 
     protected Iterable<SSTableScanner> getScanners()
@@ -151,18 +213,8 @@ implements Closeable, ICompactionInfo
         return ((CollatingIterator)source).getIterators();
     }
 
-    public long getTotalBytes()
+    public String toString()
     {
-        return totalBytes;
-    }
-
-    public long getBytesRead()
-    {
-        return bytesRead;
-    }
-
-    public String getTaskType()
-    {
-        return major ? "Major" : "Minor";
+        return this.getCompactionInfo().toString();
     }
 }

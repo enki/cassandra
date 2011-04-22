@@ -96,6 +96,9 @@ public class StorageProxyTest extends CleanupHelper
         // full wraps
         testGRR(range("0", "0"), range("0", "1"), range("1", "6"), range("6", ""), range("", "0"));
         testGRR(range("", ""), range("", "1"), range("1", "6"), range("6", ""));
+        // wrap on member tokens
+        testGRR(range("6", "6"), range("6", ""), range("", "1"), range("1", "6"));
+        testGRR(range("6", "1"), range("6", ""), range("", "1"));
         // end wrapped
         testGRR(range("5", ""), range("5", "6"), range("6", ""));
     }
@@ -105,5 +108,7 @@ public class StorageProxyTest extends CleanupHelper
     {
         // equal tokens are special cased as non-wrapping for bounds
         testGRR(bounds("0", "0"), bounds("0", "0"));
+        // completely empty bounds match everything
+        testGRR(bounds("", ""), bounds("", "1"), range("1", "6"), range("6", ""));
     }
 }

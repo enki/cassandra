@@ -20,26 +20,27 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.*;
 
 import org.junit.Test;
 
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class SSTableTest extends CleanupHelper
 {
     @Test
     public void testSingleWrite() throws IOException {
         // write test data
-        byte[] key = Integer.toString(1).getBytes();
-        byte[] bytes = new byte[1024];
-        new Random().nextBytes(bytes);
+        ByteBuffer key = ByteBufferUtil.bytes(Integer.toString(1));
+        ByteBuffer bytes = ByteBuffer.wrap(new byte[1024]);
+        new Random().nextBytes(bytes.array());
 
-        Map<byte[], byte[]> map = new HashMap<byte[],byte[]>();
+        Map<ByteBuffer, ByteBuffer> map = new HashMap<ByteBuffer,ByteBuffer>();
         map.put(key, bytes);
-        SSTableReader ssTable = SSTableUtils.writeRawSSTable("Keyspace1", "Standard1", map);
+        SSTableReader ssTable = SSTableUtils.prepare().cf("Standard1").writeRaw(map);
 
         // verify
         verifySingle(ssTable, bytes, key);
@@ -47,27 +48,27 @@ public class SSTableTest extends CleanupHelper
         verifySingle(ssTable, bytes, key);
     }
 
-    private void verifySingle(SSTableReader sstable, byte[] bytes, byte[] key) throws IOException
+    private void verifySingle(SSTableReader sstable, ByteBuffer bytes, ByteBuffer key) throws IOException
     {
         BufferedRandomAccessFile file = new BufferedRandomAccessFile(sstable.getFilename(), "r");
         file.seek(sstable.getPosition(sstable.partitioner.decorateKey(key), SSTableReader.Operator.EQ));
-        assert Arrays.equals(key, FBUtilities.readShortByteArray(file));
+        assert key.equals(ByteBufferUtil.readWithShortLength(file));
         int size = (int)SSTableReader.readRowSize(file, sstable.descriptor);
         byte[] bytes2 = new byte[size];
         file.readFully(bytes2);
-        assert Arrays.equals(bytes2, bytes);
+        assert ByteBuffer.wrap(bytes2).equals(bytes);
     }
 
     @Test
     public void testManyWrites() throws IOException {
-        Map<byte[], byte[]> map = new HashMap<byte[],byte[]>();
+        Map<ByteBuffer, ByteBuffer> map = new HashMap<ByteBuffer,ByteBuffer>();
         for (int i = 100; i < 1000; ++i)
         {
-            map.put(Integer.toString(i).getBytes(), ("Avinash Lakshman is a good man: " + i).getBytes());
+            map.put(ByteBufferUtil.bytes(Integer.toString(i)), ByteBufferUtil.bytes(("Avinash Lakshman is a good man: " + i)));
         }
 
         // write
-        SSTableReader ssTable = SSTableUtils.writeRawSSTable("Keyspace1", "Standard2", map);
+        SSTableReader ssTable = SSTableUtils.prepare().cf("Standard2").writeRaw(map);
 
         // verify
         verifyMany(ssTable, map);
@@ -75,19 +76,19 @@ public class SSTableTest extends CleanupHelper
         verifyMany(ssTable, map);
     }
 
-    private void verifyMany(SSTableReader sstable, Map<byte[], byte[]> map) throws IOException
+    private void verifyMany(SSTableReader sstable, Map<ByteBuffer, ByteBuffer> map) throws IOException
     {
-        List<byte[]> keys = new ArrayList<byte[]>(map.keySet());
+        List<ByteBuffer> keys = new ArrayList<ByteBuffer>(map.keySet());
         Collections.shuffle(keys);
         BufferedRandomAccessFile file = new BufferedRandomAccessFile(sstable.getFilename(), "r");
-        for (byte[] key : keys)
+        for (ByteBuffer key : keys)
         {
             file.seek(sstable.getPosition(sstable.partitioner.decorateKey(key), SSTableReader.Operator.EQ));
-            assert Arrays.equals(key, FBUtilities.readShortByteArray(file));
+            assert key.equals( ByteBufferUtil.readWithShortLength(file));
             int size = (int)SSTableReader.readRowSize(file, sstable.descriptor);
             byte[] bytes2 = new byte[size];
             file.readFully(bytes2);
-            assert Arrays.equals(bytes2, map.get(key));
+            assert Arrays.equals(bytes2, map.get(key).array());
         }
     }
 }

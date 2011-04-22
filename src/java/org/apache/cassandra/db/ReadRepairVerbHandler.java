@@ -18,28 +18,25 @@
 
 package org.apache.cassandra.db;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.IOError;
+import java.io.IOException;
 
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 public class ReadRepairVerbHandler implements IVerbHandler
-{
-    private static Logger logger_ = LoggerFactory.getLogger(ReadRepairVerbHandler.class);    
-    
-    public void doVerb(Message message)
+{    
+    public void doVerb(Message message, String id)
     {          
         byte[] body = message.getMessageBody();
         ByteArrayInputStream buffer = new ByteArrayInputStream(body);
         
         try
         {
-            RowMutationMessage rmMsg = RowMutationMessage.serializer().deserialize(new DataInputStream(buffer));
-            RowMutation rm = rmMsg.getRowMutation();
-            rm.apply();                                   
+            RowMutation rm = RowMutation.serializer().deserialize(new DataInputStream(buffer), message.getVersion());
+            rm.apply();
         }
         catch (IOException e)
         {

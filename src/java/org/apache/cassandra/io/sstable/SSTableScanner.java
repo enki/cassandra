@@ -20,40 +20,41 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.Closeable;
-import java.io.IOException;
+import java.io.File;
 import java.io.IOError;
-import java.util.Iterator;
+import java.io.IOException;
 import java.util.Arrays;
+import java.util.Iterator;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
-import org.apache.cassandra.utils.FBUtilities;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 
 public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
 {
     private static Logger logger = LoggerFactory.getLogger(SSTableScanner.class);
 
-    private final BufferedRandomAccessFile file;
-    private final SSTableReader sstable;
+    protected final BufferedRandomAccessFile file;
+    public final SSTableReader sstable;
     private IColumnIterator row;
-    private boolean exhausted = false;
-    private Iterator<IColumnIterator> iterator;
+    protected boolean exhausted = false;
+    protected Iterator<IColumnIterator> iterator;
     private QueryFilter filter;
 
     /**
      * @param sstable SSTable to scan.
      */
-    SSTableScanner(SSTableReader sstable, int bufferSize)
+    SSTableScanner(SSTableReader sstable, int bufferSize, boolean skipCache)
     {
         try
         {
-            this.file = new BufferedRandomAccessFile(sstable.getFilename(), "r", bufferSize);
+            this.file = new BufferedRandomAccessFile(new File(sstable.getFilename()), "r", bufferSize, skipCache);
         }
         catch (IOException e)
         {
@@ -140,10 +141,9 @@ public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
         throw new UnsupportedOperationException();
     }
 
-    private class KeyScanningIterator implements Iterator<IColumnIterator>
+    protected class KeyScanningIterator implements Iterator<IColumnIterator>
     {
-        private long dataStart;
-        private long finishedAt;
+        protected long finishedAt;
 
         public boolean hasNext()
         {
@@ -169,9 +169,9 @@ public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
 
                 DecoratedKey key = SSTableReader.decodeKey(sstable.partitioner,
                                                            sstable.descriptor,
-                                                           FBUtilities.readShortByteArray(file));
+                                                           ByteBufferUtil.readWithShortLength(file));
                 long dataSize = SSTableReader.readRowSize(file, sstable.descriptor);
-                dataStart = file.getFilePointer();
+                long dataStart = file.getFilePointer();
                 finishedAt = dataStart + dataSize;
 
                 if (filter == null)
@@ -186,7 +186,7 @@ public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
             }
             catch (IOException e)
             {
-                throw new RuntimeException(e);
+                throw new RuntimeException(SSTableScanner.this + " failed to provide next columns from " + this, e);
             }
         }
 
@@ -194,5 +194,21 @@ public class SSTableScanner implements Iterator<IColumnIterator>, Closeable
         {
             throw new UnsupportedOperationException();
         }
+
+        @Override
+        public String toString() {
+            return getClass().getSimpleName() + "(" +
+                   "finishedAt:" + finishedAt +
+                   ")";
+    }
+}
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(" +
+               "file=" + file +
+               " sstable=" + sstable +
+               " exhausted=" + exhausted +
+               ")";
     }
 }

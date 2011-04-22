@@ -21,9 +21,10 @@ package org.apache.cassandra.io.util;
  */
 
 
+import java.io.Closeable;
 import java.io.DataInput;
 import java.io.IOException;
-import java.io.Closeable;
+import java.nio.ByteBuffer;
 
 public interface FileDataInput extends DataInput, Closeable
 {
@@ -37,5 +38,13 @@ public interface FileDataInput extends DataInput, Closeable
 
     public void reset(FileMark mark) throws IOException;
 
-    public int bytesPastMark(FileMark mark);
+    public long bytesPastMark(FileMark mark);
+
+    /**
+     * Read length bytes from current file position
+     * @param length length of the bytes to read
+     * @return buffer with bytes read
+     * @throws IOException if any I/O operation failed
+     */
+    public ByteBuffer readBytes(int length) throws IOException;
 }

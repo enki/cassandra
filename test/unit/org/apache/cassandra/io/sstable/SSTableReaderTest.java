@@ -22,6 +22,7 @@ package org.apache.cassandra.io.sstable;
 
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutionException;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +38,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.MmappedSegmentedFile;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
 import org.apache.cassandra.Util;
@@ -48,7 +49,7 @@ public class SSTableReaderTest extends CleanupHelper
 {
     static Token t(int i)
     {
-        return StorageService.getPartitioner().getToken(String.valueOf(i).getBytes());
+        return StorageService.getPartitioner().getToken(ByteBufferUtil.bytes(String.valueOf(i)));
     }
 
     @Test
@@ -61,9 +62,9 @@ public class SSTableReaderTest extends CleanupHelper
         CompactionManager.instance.disableAutoCompaction();
         for (int j = 0; j < 10; j++)
         {
-            byte[] key = String.valueOf(j).getBytes();
+            ByteBuffer key = ByteBufferUtil.bytes(String.valueOf(j));
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard2", null, "0".getBytes()), new byte[0], j);
+            rm.add(new QueryPath("Standard2", null, ByteBufferUtil.bytes("0")), ByteBufferUtil.EMPTY_BYTE_BUFFER, j);
             rm.apply();
         }
         store.forceBlockingFlush();
@@ -102,9 +103,9 @@ public class SSTableReaderTest extends CleanupHelper
         CompactionManager.instance.disableAutoCompaction();
         for (int j = 0; j < 100; j += 2)
         {
-            byte[] key = String.valueOf(j).getBytes();
+            ByteBuffer key = ByteBufferUtil.bytes(String.valueOf(j));
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], j);
+            rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("0")), ByteBufferUtil.EMPTY_BYTE_BUFFER, j);
             rm.apply();
         }
         store.forceBlockingFlush();
@@ -118,7 +119,7 @@ public class SSTableReaderTest extends CleanupHelper
             FileDataInput file = sstable.getFileDataInput(dk, DatabaseDescriptor.getIndexedReadBufferSizeInKB() * 1024);
             DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
                                                              sstable.descriptor,
-                                                             FBUtilities.readShortByteArray(file));
+                                                             ByteBufferUtil.readWithShortLength(file));
             assert keyInDisk.equals(dk) : String.format("%s != %s in %s", keyInDisk, dk, file.getPath());
         }
 
@@ -139,9 +140,9 @@ public class SSTableReaderTest extends CleanupHelper
 
         for (int j = 0; j < 100; j += 2)
         {
-            byte[] key = String.valueOf(j).getBytes();
+            ByteBuffer key = ByteBufferUtil.bytes(String.valueOf(j));
             RowMutation rm = new RowMutation("Keyspace1", key);
-            rm.add(new QueryPath("Standard1", null, "0".getBytes()), new byte[0], j);
+            rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("0")), ByteBufferUtil.EMPTY_BYTE_BUFFER, j);
             rm.apply();
         }
         store.forceBlockingFlush();

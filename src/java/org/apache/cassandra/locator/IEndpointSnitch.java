@@ -18,10 +18,7 @@
 
 package org.apache.cassandra.locator;
 
-import org.apache.cassandra.dht.Token;
-
 import java.net.InetAddress;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
@@ -59,17 +56,7 @@ public interface IEndpointSnitch
     public int compareEndpoints(InetAddress target, InetAddress a1, InetAddress a2);
 
     /**
-     * returns a list of cached endpoints for a given token.
+     * called after Gossiper instance exists immediately before it starts gossiping
      */
-    public ArrayList<InetAddress> getCachedEndpoints(Token t);
-
-    /**
-     * puts an address in the cache for a given token.
-     */
-    public void cacheEndpoint(Token t, ArrayList<InetAddress> addr);
-
-    /**
-     * clears all cache values.
-     */
-    public void clearEndpointCache();
+    public void gossiperStarting();
 }

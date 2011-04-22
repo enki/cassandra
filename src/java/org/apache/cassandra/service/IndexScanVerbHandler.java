@@ -20,19 +20,20 @@ package org.apache.cassandra.service;
 
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class IndexScanVerbHandler implements IVerbHandler
 {
     private static final Logger logger = LoggerFactory.getLogger(IndexScanVerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         try
         {
@@ -42,8 +43,8 @@ public class IndexScanVerbHandler implements IVerbHandler
             RangeSliceReply reply = new RangeSliceReply(rows);
             Message response = reply.getReply(message);
             if (logger.isDebugEnabled())
-                logger.debug("Sending " + reply+ " to " + message.getMessageId() + "@" + message.getFrom());
-            MessagingService.instance.sendOneWay(response, message.getFrom());
+                logger.debug("Sending " + reply+ " to " + id + "@" + message.getFrom());
+            MessagingService.instance().sendReply(response, id, message.getFrom());
         }
         catch (Exception ex)
         {

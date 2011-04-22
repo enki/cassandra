@@ -1,66 +1,63 @@
 /**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+* Licensed to the Apache Software Foundation (ASF) under one
+* or more contributor license agreements.  See the NOTICE file
+* distributed with this work for additional information
+* regarding copyright ownership.  The ASF licenses this file
+* to you under the Apache License, Version 2.0 (the
+* "License"); you may not use this file except in compliance
+* with the License.  You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 package org.apache.cassandra.db;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
+import java.io.*;
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 
-import org.apache.commons.lang.ArrayUtils;
+import org.apache.cassandra.net.MessageProducer;
 import org.apache.commons.lang.StringUtils;
 
-import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.Message;
-import org.apache.cassandra.service.*;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.ColumnOrSuperColumn;
 import org.apache.cassandra.thrift.Deletion;
 import org.apache.cassandra.thrift.Mutation;
+import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.DatabaseDescriptor;
 
-public class RowMutation
+public class RowMutation implements IMutation, MessageProducer
 {
-    private static ICompactSerializer<RowMutation> serializer_;
+    private static RowMutationSerializer serializer_ = new RowMutationSerializer();
     public static final String HINT = "HINT";
+    public static final String FORWARD_HEADER = "FORWARD";
 
-    static
-    {
-        serializer_ = new RowMutationSerializer();
-    }   
-
-    public static ICompactSerializer<RowMutation> serializer()
+    public static RowMutationSerializer serializer()
     {
         return serializer_;
     }
 
     private String table_;
-    private byte[] key_;
+    private ByteBuffer key_;
     // map of column family id to mutations for that column family.
     protected Map<Integer, ColumnFamily> modifications_ = new HashMap<Integer, ColumnFamily>();
 
-    public RowMutation(String table, byte[] key)
+    private Map<Integer, byte[]> preserializedBuffers = new HashMap<Integer, byte[]>();
+
+    public RowMutation(String table, ByteBuffer key)
     {
         table_ = table;
         key_ = key;
@@ -73,7 +70,7 @@ public class RowMutation
         add(row.cf);
     }
 
-    protected RowMutation(String table, byte[] key, Map<Integer, ColumnFamily> modifications)
+    protected RowMutation(String table, ByteBuffer key, Map<Integer, ColumnFamily> modifications)
     {
         table_ = table;
         key_ = key;
@@ -85,7 +82,7 @@ public class RowMutation
         return table_;
     }
 
-    public byte[] key()
+    public ByteBuffer key()
     {
         return key_;
     }
@@ -99,9 +96,9 @@ public class RowMutation
     {
         for (ColumnFamily cf : rm.getColumnFamilies())
         {
-            byte[] combined = HintedHandOffManager.makeCombinedName(rm.getTable(), cf.metadata().cfName);
+            ByteBuffer combined = HintedHandOffManager.makeCombinedName(rm.getTable(), cf.metadata().cfName);
             QueryPath path = new QueryPath(HintedHandOffManager.HINTS_CF, rm.key(), combined);
-            add(path, ArrayUtils.EMPTY_BYTE_ARRAY, System.currentTimeMillis(), cf.metadata().gcGraceSeconds);
+            add(path, ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis(), cf.metadata().getGcGraceSeconds());
         }
     }
 
@@ -110,7 +107,7 @@ public class RowMutation
      * family object.
      * param @ cf - column family name
      * param @ columnFamily - the column family.
-    */
+     */
     public void add(ColumnFamily columnFamily)
     {
         assert columnFamily != null;
@@ -137,8 +134,8 @@ public class RowMutation
      * param @ value - value associated with the column
      * param @ timestamp - timestamp associated with this data.
      * param @ timeToLive - ttl for the column, 0 for standard (non expiring) columns
-    */
-    public void add(QueryPath path, byte[] value, long timestamp, int timeToLive)
+     */
+    public void add(QueryPath path, ByteBuffer value, long timestamp, int timeToLive)
     {
         Integer id = CFMetaData.getId(table_, path.columnFamilyName);
         ColumnFamily columnFamily = modifications_.get(id);
@@ -150,7 +147,19 @@ public class RowMutation
         columnFamily.addColumn(path, value, timestamp, timeToLive);
     }
 
-    public void add(QueryPath path, byte[] value, long timestamp)
+    public void addCounter(QueryPath path, long value)
+    {
+        Integer id = CFMetaData.getId(table_, path.columnFamilyName);
+        ColumnFamily columnFamily = modifications_.get(id);
+        if (columnFamily == null)
+        {
+            columnFamily = ColumnFamily.create(table_, path.columnFamilyName);
+            modifications_.put(id, columnFamily);
+        }
+        columnFamily.addCounter(path, value);
+    }
+
+    public void add(QueryPath path, ByteBuffer value, long timestamp)
     {
         add(path, value, timestamp, 0);
     }
@@ -187,86 +196,49 @@ public class RowMutation
     /*
      * This is equivalent to calling commit. Applies the changes to
      * to the table that is obtained by calling Table.open().
-    */
+     */
     public void apply() throws IOException
     {
-        Table.open(table_).apply(this, getSerializedBuffer(), true);
+        Table.open(table_).apply(this, true);
+    }
+
+    public void applyUnsafe() throws IOException
+    {
+        Table.open(table_).apply(this, false);
     }
 
     /*
      * This is equivalent to calling commit. Applies the changes to
      * to the table that is obtained by calling Table.open().
-    */
+     */
     void applyBinary() throws IOException, ExecutionException, InterruptedException
     {
         Table.open(table_).load(this);
     }
 
-    public Message makeRowMutationMessage() throws IOException
+    public Message getMessage(Integer version) throws IOException
     {
-        return makeRowMutationMessage(StorageService.Verb.MUTATION);
+        return makeRowMutationMessage(StorageService.Verb.MUTATION, version);
     }
 
-    public Message makeRowMutationMessage(StorageService.Verb verb) throws IOException
+    public Message makeRowMutationMessage(StorageService.Verb verb, int version) throws IOException
     {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        DataOutputStream dos = new DataOutputStream(bos);
-        serializer().serialize(this, dos);
-        return new Message(FBUtilities.getLocalAddress(), verb, bos.toByteArray());
+        return new Message(FBUtilities.getLocalAddress(), verb, getSerializedBuffer(version), version);
     }
 
-    public static RowMutation getRowMutationFromMutations(String keyspace, byte[] key, Map<String, List<Mutation>> cfmap)
+    public synchronized byte[] getSerializedBuffer(int version) throws IOException
     {
-        RowMutation rm = new RowMutation(keyspace, key);
-        for (Map.Entry<String, List<Mutation>> entry : cfmap.entrySet())
+        byte[] preserializedBuffer = preserializedBuffers.get(version);
+        if (preserializedBuffer == null)
         {
-            String cfName = entry.getKey();
-            for (Mutation mutation : entry.getValue())
-            {
-                if (mutation.deletion != null)
-                {
-                    deleteColumnOrSuperColumnToRowMutation(rm, cfName, mutation.deletion);
-                }
-                else
-                {
-                    addColumnOrSuperColumnToRowMutation(rm, cfName, mutation.column_or_supercolumn);
-                }
-            }
+            ByteArrayOutputStream bout = new ByteArrayOutputStream();
+            DataOutputStream dout = new DataOutputStream(bout);
+            RowMutation.serializer().serialize(this, dout, version);
+            dout.close();
+            preserializedBuffer = bout.toByteArray();
+            preserializedBuffers.put(version, preserializedBuffer);
         }
-        return rm;
-    }
-    
-    public static RowMutation getRowMutation(String table, byte[] key, Map<String, List<ColumnOrSuperColumn>> cfmap)
-    {
-        RowMutation rm = new RowMutation(table, key);
-        for (Map.Entry<String, List<ColumnOrSuperColumn>> entry : cfmap.entrySet())
-        {
-            String cfName = entry.getKey();
-            for (ColumnOrSuperColumn cosc : entry.getValue())
-            {
-                if (cosc.column == null)
-                {
-                    assert cosc.super_column != null;
-                    for (org.apache.cassandra.thrift.Column column : cosc.super_column.columns)
-                    {
-                        rm.add(new QueryPath(cfName, cosc.super_column.name, column.name), column.value, column.timestamp, column.ttl);
-                    }
-                }
-                else
-                {
-                    assert cosc.super_column == null;
-                    rm.add(new QueryPath(cfName, null, cosc.column.name), cosc.column.value, cosc.column.timestamp, cosc.column.ttl);
-                }
-            }
-        }
-        return rm;
-    }
-    
-    public DataOutputBuffer getSerializedBuffer() throws IOException
-    {
-        DataOutputBuffer buffer = new DataOutputBuffer();
-        RowMutation.serializer().serialize(this, buffer);
-        return buffer;
+        return preserializedBuffer;
     }
 
     public String toString()
@@ -278,7 +250,7 @@ public class RowMutation
     {
         StringBuilder buff = new StringBuilder("RowMutation(");
         buff.append("keyspace='").append(table_).append('\'');
-        buff.append(", key='").append(FBUtilities.bytesToHex(key_)).append('\'');
+        buff.append(", key='").append(ByteBufferUtil.bytesToHex(key_)).append('\'');
         buff.append(", modifications=[");
         if (shallow)
         {
@@ -295,83 +267,108 @@ public class RowMutation
         return buff.append("])").toString();
     }
 
-    private static void addColumnOrSuperColumnToRowMutation(RowMutation rm, String cfName, ColumnOrSuperColumn cosc)
+    public void addColumnOrSuperColumn(String cfName, ColumnOrSuperColumn cosc)
     {
-        if (cosc.column == null)
+        if (cosc.super_column != null)
         {
             for (org.apache.cassandra.thrift.Column column : cosc.super_column.columns)
             {
-                rm.add(new QueryPath(cfName, cosc.super_column.name, column.name), column.value, column.timestamp, column.ttl);
+                add(new QueryPath(cfName, cosc.super_column.name, column.name), column.value, column.timestamp, column.ttl);
             }
         }
-        else
+        else if (cosc.column != null)
         {
-            rm.add(new QueryPath(cfName, null, cosc.column.name), cosc.column.value, cosc.column.timestamp, cosc.column.ttl);
+            add(new QueryPath(cfName, null, cosc.column.name), cosc.column.value, cosc.column.timestamp, cosc.column.ttl);
+        }
+        else if (cosc.counter_super_column != null)
+        {
+            for (org.apache.cassandra.thrift.CounterColumn column : cosc.counter_super_column.columns)
+            {
+                addCounter(new QueryPath(cfName, cosc.counter_super_column.name, column.name), column.value);
+            }
+        }
+        else // cosc.counter_column != null
+        {
+            addCounter(new QueryPath(cfName, null, cosc.counter_column.name), cosc.counter_column.value);
         }
     }
 
-    private static void deleteColumnOrSuperColumnToRowMutation(RowMutation rm, String cfName, Deletion del)
+    public void deleteColumnOrSuperColumn(String cfName, Deletion del)
     {
         if (del.predicate != null && del.predicate.column_names != null)
         {
-            for(byte[] c : del.predicate.column_names)
+            for(ByteBuffer c : del.predicate.column_names)
             {
-                if (del.super_column == null && DatabaseDescriptor.getColumnFamilyType(rm.table_, cfName) == ColumnFamilyType.Super)
-                    rm.delete(new QueryPath(cfName, c), del.timestamp);
+                if (del.super_column == null && DatabaseDescriptor.getColumnFamilyType(table_, cfName) == ColumnFamilyType.Super)
+                    delete(new QueryPath(cfName, c), del.timestamp);
                 else
-                    rm.delete(new QueryPath(cfName, del.super_column, c), del.timestamp);
+                    delete(new QueryPath(cfName, del.super_column, c), del.timestamp);
             }
         }
         else
         {
-            rm.delete(new QueryPath(cfName, del.super_column), del.timestamp);
+            delete(new QueryPath(cfName, del.super_column), del.timestamp);
         }
     }
-}
 
-class RowMutationSerializer implements ICompactSerializer<RowMutation>
-{
-    private void freezeTheMaps(Map<Integer, ColumnFamily> map, DataOutputStream dos) throws IOException
+    static RowMutation fromBytes(byte[] raw, int version) throws IOException
     {
-        int size = map.size();
-        dos.writeInt(size);
-        if (size > 0)
+        RowMutation rm = serializer_.deserialize(new DataInputStream(new ByteArrayInputStream(raw)), version);
+        rm.preserializedBuffers.put(version, raw);
+        return rm;
+    }
+
+    public RowMutation localCopy()
+    {
+        RowMutation rm = new RowMutation(table_, ByteBufferUtil.clone(key_));
+
+        Table table = Table.open(table_);
+        for (Map.Entry<Integer, ColumnFamily> entry : modifications_.entrySet())
         {
-            for (Map.Entry<Integer,ColumnFamily> entry : map.entrySet())
+            ColumnFamily cf = entry.getValue().cloneMeShallow();
+            ColumnFamilyStore cfs = table.getColumnFamilyStore(cf.id());
+            for (Map.Entry<ByteBuffer, IColumn> ce : entry.getValue().getColumnsMap().entrySet())
+                cf.addColumn(ce.getValue().localCopy(cfs));
+            rm.modifications_.put(entry.getKey(), cf);
+        }
+
+        return rm;
+    }
+
+    public static class RowMutationSerializer implements ICompactSerializer<RowMutation>
+    {
+        public void serialize(RowMutation rm, DataOutputStream dos, int version) throws IOException
+        {
+            dos.writeUTF(rm.getTable());
+            ByteBufferUtil.writeWithShortLength(rm.key(), dos);
+
+            /* serialize the modifications_ in the mutation */
+            int size = rm.modifications_.size();
+            dos.writeInt(size);
+            if (size > 0)
             {
-                dos.writeInt(entry.getKey());
-                ColumnFamily.serializer().serialize(entry.getValue(), dos);
+                for (Map.Entry<Integer,ColumnFamily> entry : rm.modifications_.entrySet())
+                {
+                    dos.writeInt(entry.getKey());
+                    ColumnFamily.serializer().serialize(entry.getValue(), dos);
+                }
             }
         }
-    }
 
-    public void serialize(RowMutation rm, DataOutputStream dos) throws IOException
-    {
-        dos.writeUTF(rm.getTable());
-        FBUtilities.writeShortByteArray(rm.key(), dos);
-
-        /* serialize the modifications_ in the mutation */
-        freezeTheMaps(rm.modifications_, dos);
-    }
-
-    private Map<Integer, ColumnFamily> defreezeTheMaps(DataInputStream dis) throws IOException
-    {
-        Map<Integer, ColumnFamily> map = new HashMap<Integer, ColumnFamily>();
-        int size = dis.readInt();
-        for (int i = 0; i < size; ++i)
+        public RowMutation deserialize(DataInputStream dis, int version) throws IOException
         {
-            Integer cfid = Integer.valueOf(dis.readInt());
-            ColumnFamily cf = ColumnFamily.serializer().deserialize(dis);
-            map.put(cfid, cf);
+            String table = dis.readUTF();
+            ByteBuffer key = ByteBufferUtil.readWithShortLength(dis);
+            Map<Integer, ColumnFamily> modifications = new HashMap<Integer, ColumnFamily>();
+            int size = dis.readInt();
+            for (int i = 0; i < size; ++i)
+            {
+                Integer cfid = Integer.valueOf(dis.readInt());
+                // This is coming from a remote host
+                ColumnFamily cf = ColumnFamily.serializer().deserialize(dis, true, true);
+                modifications.put(cfid, cf);
+            }
+            return new RowMutation(table, key, modifications);
         }
-        return map;
-    }
-
-    public RowMutation deserialize(DataInputStream dis) throws IOException
-    {
-        String table = dis.readUTF();
-        byte[] key = FBUtilities.readShortByteArray(dis);
-        Map<Integer, ColumnFamily> modifications = defreezeTheMaps(dis);
-        return new RowMutation(table, key, modifications);
     }
 }

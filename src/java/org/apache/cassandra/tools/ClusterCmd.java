@@ -20,15 +20,8 @@ package org.apache.cassandra.tools;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.List;
-import java.util.Set;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
+import org.apache.commons.cli.*;
 
 /**
  * JMX cluster wide operations for Cassandra.
@@ -38,12 +31,10 @@ public class ClusterCmd {
     private static final String HOST_OPT_SHORT = "h";
     private static final String PORT_OPT_LONG = "port";
     private static final String PORT_OPT_SHORT = "p";
-    private static final int defaultPort = 8080;
+    private static final int defaultPort = 7199;
     private static Options options = null;
     private CommandLine cmd = null;
     private NodeProbe probe;
-    private String host;
-    private int port;
 
     static
     {
@@ -64,14 +55,15 @@ public class ClusterCmd {
     private ClusterCmd(String[] cmdArgs) throws ParseException, IOException, InterruptedException
     {
         parseArgs(cmdArgs);
-        this.host = cmd.getOptionValue(HOST_OPT_SHORT);
+        String host = cmd.getOptionValue(HOST_OPT_SHORT);
 
         String portNum = cmd.getOptionValue(PORT_OPT_SHORT);
+        int port;
         if (portNum != null)
         {
             try
             {
-                this.port = Integer.parseInt(portNum);
+                port = Integer.parseInt(portNum);
             }
             catch (NumberFormatException e)
             {
@@ -80,7 +72,7 @@ public class ClusterCmd {
         }
         else
         {
-            this.port = defaultPort;
+            port = defaultPort;
         }
 
         probe = new NodeProbe(host, port);
@@ -95,8 +87,6 @@ public class ClusterCmd {
      */
     public ClusterCmd(String host, int port) throws IOException, InterruptedException
     {
-        this.host = host;
-        this.port = port;
         probe = new NodeProbe(host, port);
     }
 
@@ -146,6 +136,11 @@ public class ClusterCmd {
         hf.printHelp(usage, "", options, header);
     }
     
+    public void close() throws IOException
+    {
+        probe.close(); 
+    }
+
     public void printEndpoints(String keyspace, String key)
     {
         List<InetAddress> endpoints = probe.getEndpoints(keyspace, key);
@@ -160,30 +155,18 @@ public class ClusterCmd {
      */
     public void takeGlobalSnapshot(String snapshotName) throws IOException, InterruptedException
     {
-        Set<String> liveNodes = probe.getLiveNodes();
-        try
-        {
-            probe.takeSnapshot(snapshotName);
-            System.out.println(host + " snapshot taken");
-        }
-        catch (IOException e)
-        {
-            System.out.println(host + " snapshot FAILED: " + e.getMessage());
-        }
 
-        liveNodes.remove(this.host);
-        for (String liveNode : liveNodes)
+        for (String liveNode : probe.getLiveNodes())
         {
             try
             {
-                this.host = liveNode;
-                probe = new NodeProbe(host, port);
-                probe.takeSnapshot(snapshotName);
-                System.out.println(host + " snapshot taken");
+                NodeProbe hostProbe = new NodeProbe(liveNode, probe.port);
+                hostProbe.takeSnapshot(snapshotName);
+                System.out.println(liveNode + " snapshot taken in directory: " + snapshotName);
             }
             catch (IOException e)
             {
-                System.out.println(host + " snapshot FAILED: " + e.getMessage());
+                System.out.println(liveNode + " snapshot FAILED: " + e.getMessage());
             }
         }
     }
@@ -191,32 +174,19 @@ public class ClusterCmd {
     /**
      * Remove all the existing snapshots from all (live) nodes in the cluster
      */
-    public void clearGlobalSnapshot() throws IOException, InterruptedException
+    public void clearGlobalSnapshot(String tag) throws IOException, InterruptedException
     {
-        Set<String> liveNodes = probe.getLiveNodes();
-        try
-        {
-            probe.clearSnapshot();
-            System.out.println(host + " snapshot cleared");
-        }
-        catch (IOException e)
-        {
-            System.out.println(host + " snapshot clear FAILED: " + e.getMessage());
-        }
-
-        liveNodes.remove(this.host);
-        for (String liveNode : liveNodes)
+        for (String liveNode : probe.getLiveNodes())
         {
             try
             {
-                this.host = liveNode;
-                probe = new NodeProbe(host, port);
-                probe.clearSnapshot();
-                System.out.println(host + " snapshot cleared");
+                NodeProbe hostProbe = new NodeProbe(liveNode, probe.port);
+                hostProbe.clearSnapshot(tag);
+                System.out.println(liveNode + " snapshot cleared");
             }
             catch (IOException e)
             {
-                System.out.println(host + " snapshot clear FAILED: " + e.getMessage());
+                System.out.println(liveNode + " snapshot clear FAILED: " + e.getMessage());
             }
         }
     }
@@ -271,16 +241,13 @@ public class ClusterCmd {
         }
         else if (cmdName.equals("global_snapshot"))
         {
-            String snapshotName = "";
-            if (arguments.length > 1)
-            {
-                snapshotName = arguments[1];
-            }
+            String snapshotName = arguments.length > 1 ? arguments[1] : new Long(System.currentTimeMillis()).toString();
             clusterCmd.takeGlobalSnapshot(snapshotName);
         }
         else if (cmdName.equals("clear_global_snapshot"))
         {
-            clusterCmd.clearGlobalSnapshot();
+            String snapshotName = arguments.length > 1 ? arguments[1] : "";
+            clusterCmd.clearGlobalSnapshot(snapshotName);
         }
         else if (cmdName.equals("truncate"))
         {

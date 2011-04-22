@@ -19,10 +19,12 @@
 
 package org.apache.cassandra.streaming;
 
-import java.net.InetAddress;
-import java.util.*;
-import java.io.IOException;
 import java.io.IOError;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
@@ -30,8 +32,8 @@ import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.db.Table;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -65,7 +67,7 @@ public class StreamOut
     /**
      * Split out files for all tables on disk locally for each range and then stream them to the target endpoint.
     */
-    public static void transferRanges(InetAddress target, String tableName, Collection<Range> ranges, Runnable callback)
+    public static void transferRanges(InetAddress target, String tableName, Collection<Range> ranges, Runnable callback, OperationType type)
     {
         assert ranges.size() > 0;
         
@@ -79,7 +81,7 @@ public class StreamOut
         {
             Table table = flushSSTable(tableName);
             // send the matching portion of every sstable in the keyspace
-            transferSSTables(session, table.getAllSSTables(), ranges);
+            transferSSTables(session, table.getAllSSTables(), ranges, type);
         }
         catch (IOException e)
         {
@@ -96,7 +98,7 @@ public class StreamOut
     {
         Table table = Table.open(tableName);
         logger.info("Flushing memtables for {}...", tableName);
-        for (Future f : table.flush())
+        for (Future<?> f : table.flush())
         {
             try
             {
@@ -117,7 +119,7 @@ public class StreamOut
     /**
      * Split out files for all tables on disk locally for each range and then stream them to the target endpoint.
     */
-    public static void transferRangesForRequest(StreamOutSession session, Collection<Range> ranges)
+    public static void transferRangesForRequest(StreamOutSession session, Collection<Range> ranges, OperationType type)
     {
         assert ranges.size() > 0;
 
@@ -128,7 +130,7 @@ public class StreamOut
         {
             Table table = flushSSTable(session.table);
             // send the matching portion of every sstable in the keyspace
-            List<PendingFile> pending = createPendingFiles(table.getAllSSTables(), ranges);
+            List<PendingFile> pending = createPendingFiles(table.getAllSSTables(), ranges, type);
             session.addFilesToStream(pending);
             session.begin();
         }
@@ -141,9 +143,9 @@ public class StreamOut
     /**
      * Transfers matching portions of a group of sstables from a single table to the target endpoint.
      */
-    public static void transferSSTables(StreamOutSession session, Collection<SSTableReader> sstables, Collection<Range> ranges) throws IOException
+    public static void transferSSTables(StreamOutSession session, Collection<SSTableReader> sstables, Collection<Range> ranges, OperationType type) throws IOException
     {
-        List<PendingFile> pending = createPendingFiles(sstables, ranges);
+        List<PendingFile> pending = createPendingFiles(sstables, ranges, type);
 
         if (pending.size() > 0)
         {
@@ -157,7 +159,7 @@ public class StreamOut
     }
 
     // called prior to sending anything.
-    private static List<PendingFile> createPendingFiles(Collection<SSTableReader> sstables, Collection<Range> ranges)
+    private static List<PendingFile> createPendingFiles(Collection<SSTableReader> sstables, Collection<Range> ranges, OperationType type)
     {
         List<PendingFile> pending = new ArrayList<PendingFile>();
         for (SSTableReader sstable : sstables)
@@ -166,7 +168,7 @@ public class StreamOut
             List<Pair<Long,Long>> sections = sstable.getPositionsForRanges(ranges);
             if (sections.isEmpty())
                 continue;
-            pending.add(new PendingFile(desc, SSTable.COMPONENT_DATA, sections));
+            pending.add(new PendingFile(sstable, desc, SSTable.COMPONENT_DATA, sections, type));
         }
         logger.info("Stream context metadata {}, {} sstables.", pending, sstables.size());
         return pending;

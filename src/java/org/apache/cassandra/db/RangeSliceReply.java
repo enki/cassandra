@@ -18,15 +18,18 @@
 
 package org.apache.cassandra.db;
 
-import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.commons.lang.StringUtils;
-
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import org.apache.commons.lang.StringUtils;
+
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class RangeSliceReply
 {
@@ -43,10 +46,10 @@ public class RangeSliceReply
         dob.writeInt(rows.size());
         for (Row row : rows)
         {
-            Row.serializer().serialize(row, dob);
+            Row.serializer().serialize(row, dob, originalMessage.getVersion());
         }
         byte[] data = Arrays.copyOf(dob.getData(), dob.getLength());
-        return originalMessage.getReply(FBUtilities.getLocalAddress(), data);
+        return originalMessage.getReply(FBUtilities.getLocalAddress(), data, originalMessage.getVersion());
     }
 
     @Override
@@ -57,7 +60,7 @@ public class RangeSliceReply
                '}';
     }
 
-    public static RangeSliceReply read(byte[] body) throws IOException
+    public static RangeSliceReply read(byte[] body, int version) throws IOException
     {
         ByteArrayInputStream bufIn = new ByteArrayInputStream(body);
         DataInputStream dis = new DataInputStream(bufIn);
@@ -65,7 +68,7 @@ public class RangeSliceReply
         List<Row> rows = new ArrayList<Row>(rowCount);
         for (int i = 0; i < rowCount; i++)
         {
-            rows.add(Row.serializer().deserialize(dis));
+            rows.add(Row.serializer().deserialize(dis, version));
         }
         return new RangeSliceReply(rows);
     }

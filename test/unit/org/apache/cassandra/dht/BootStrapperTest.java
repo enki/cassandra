@@ -33,6 +33,7 @@ import org.junit.Test;
 
 import com.google.common.collect.Multimap;
 
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.IFailureDetectionEventListener;
 import org.apache.cassandra.gms.IFailureDetector;
@@ -84,7 +85,7 @@ public class BootStrapperTest extends CleanupHelper
             Range range = ss.getPrimaryRangeForEndpoint(bootstrapSource);
             Token token = StorageService.getPartitioner().midpoint(range.left, range.right);
             assert range.contains(token);
-            ss.onChange(bootstrapAddrs[i], ApplicationState.STATUS, StorageService.valueFactory.bootstrapping(token));
+            ss.onChange(bootstrapAddrs[i], ApplicationState.STATUS, StorageService.instance.valueFactory.bootstrapping(token));
         }
         
         // any further attempt to bootsrtap should fail since every node in the cluster is splitting.
@@ -101,7 +102,7 @@ public class BootStrapperTest extends CleanupHelper
         // indicate that one of the nodes is done. see if the node it was bootstrapping from is still available.
         Range range = ss.getPrimaryRangeForEndpoint(addrs[2]);
         Token token = StorageService.getPartitioner().midpoint(range.left, range.right);
-        ss.onChange(bootstrapAddrs[2], ApplicationState.STATUS, StorageService.valueFactory.normal(token));
+        ss.onChange(bootstrapAddrs[2], ApplicationState.STATUS, StorageService.instance.valueFactory.normal(token));
         load.put(bootstrapAddrs[2], 0d);
         InetAddress addr = BootStrapper.getBootstrapSource(ss.getTokenMetadata(), load);
         assert addr != null && addr.equals(addrs[2]);
@@ -133,7 +134,7 @@ public class BootStrapperTest extends CleanupHelper
         Range range5 = ss.getPrimaryRangeForEndpoint(five);
         Token fakeToken = StorageService.getPartitioner().midpoint(range5.left, range5.right);
         assert range5.contains(fakeToken);
-        ss.onChange(myEndpoint, ApplicationState.STATUS, StorageService.valueFactory.bootstrapping(fakeToken));
+        ss.onChange(myEndpoint, ApplicationState.STATUS, StorageService.instance.valueFactory.bootstrapping(fakeToken));
         tmd = ss.getTokenMetadata();
 
         InetAddress source4 = BootStrapper.getBootstrapSource(tmd, load);
@@ -146,7 +147,7 @@ public class BootStrapperTest extends CleanupHelper
         final int[] clusterSizes = new int[] { 1, 3, 5, 10, 100};
         for (String table : DatabaseDescriptor.getNonSystemTables())
         {
-            int replicationFactor = DatabaseDescriptor.getReplicationFactor(table);
+            int replicationFactor = Table.open(table).getReplicationStrategy().getReplicationFactor();
             for (int clusterSize : clusterSizes)
                 if (clusterSize >= replicationFactor)
                     testSourceTargetComputation(table, clusterSize, replicationFactor);

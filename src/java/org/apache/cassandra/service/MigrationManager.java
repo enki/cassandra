@@ -18,6 +18,19 @@
 
 package org.apache.cassandra.service;
 
+import java.io.*;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+
+import org.apache.cassandra.net.CachingMessageProducer;
+import org.apache.cassandra.net.MessageProducer;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.ConfigurationException;
@@ -25,31 +38,10 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.migration.Migration;
-import org.apache.cassandra.gms.ApplicationState;
-import org.apache.cassandra.gms.VersionedValue;
-import org.apache.cassandra.gms.EndpointState;
-import org.apache.cassandra.gms.IEndpointStateChangeSubscriber;
+import org.apache.cassandra.gms.*;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOError;
-import java.io.IOException;
-import java.net.InetAddress;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 
 public class MigrationManager implements IEndpointStateChangeSubscriber
 {
@@ -81,7 +73,10 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
 
     public void onRemove(InetAddress endpoint) { }
     
-    /** will either push or pull an updating depending on who is behind. */
+    /** 
+     * will either push or pull an updating depending on who is behind.
+     * fat clients should never push their schemas (since they have no local storage).
+     */
     public static void rectify(UUID theirVersion, InetAddress endpoint)
     {
         UUID myVersion = DatabaseDescriptor.getDefsVersion();
@@ -92,19 +87,43 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
             logger.debug("My data definitions are old. Asking for updates since {}", myVersion.toString());
             announce(myVersion, Collections.singleton(endpoint));
         }
-        else
+        else if (!StorageService.instance.isClientMode())
         {
             logger.debug("Their data definitions are old. Sending updates since {}", theirVersion.toString());
             pushMigrations(theirVersion, myVersion, endpoint);
         }
     }
 
-    /** announce my version to a set of hosts.  They may culminate with them sending me migrations. */
-    public static void announce(UUID version, Set<InetAddress> hosts)
+    /** actively announce my version to a set of hosts via rpc.  They may culminate with them sending me migrations. */
+    public static void announce(final UUID version, Set<InetAddress> hosts)
     {
-        Message msg = makeVersionMessage(version);
+        MessageProducer prod = new CachingMessageProducer(new MessageProducer() {
+            public Message getMessage(Integer protocolVersion) throws IOException
+            {
+                return makeVersionMessage(version, protocolVersion);
+            }
+        });
         for (InetAddress host : hosts)
-            MessagingService.instance.sendOneWay(msg, host);
+        {
+            try 
+            {
+                MessagingService.instance().sendOneWay(prod.getMessage(Gossiper.instance.getVersion(host)), host);
+            }
+            catch (IOException ex)
+            {
+                // happened during message serialization.
+                throw new IOError(ex);
+            }
+        }
+        passiveAnnounce(version);
+    }
+
+    /** announce my version passively over gossip **/
+    public static void passiveAnnounce(UUID version)
+    {
+        // this is for notifying nodes as they arrive in the cluster.
+        Gossiper.instance.addLocalApplicationState(ApplicationState.SCHEMA, StorageService.instance.valueFactory.migration(version));
+        logger.debug("Announcing my schema is " + version);
     }
 
     /**
@@ -120,7 +139,9 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         Collection<IColumn> migrations = Migration.getLocalMigrations(from, to);
         for (IColumn col : migrations)
         {
-            final Migration migration = Migration.deserialize(col.value());
+            // assuming MessagingService.version_ is a bit of a risk, but you're playing with fire if you purposefully
+            // take down a node to upgrade it during the middle of a schema update.
+            final Migration migration = Migration.deserialize(col.value(), MessagingService.version_);
             Future update = StageManager.getStage(Stage.MIGRATION).submit(new Runnable()
             {
                 public void run()
@@ -159,6 +180,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
                 throw new IOException(e);
             }
         }
+        passiveAnnounce(to); // we don't need to send rpcs, but we need to update gossip
     }
     
     /** pushes migrations from this host to another host */
@@ -168,8 +190,8 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         Collection<IColumn> migrations = Migration.getLocalMigrations(from, to);
         try
         {
-            Message msg = makeMigrationMessage(migrations);
-            MessagingService.instance.sendOneWay(msg, host);
+            Message msg = makeMigrationMessage(migrations, Gossiper.instance.getVersion(host));
+            MessagingService.instance().sendOneWay(msg, host);
         }
         catch (IOException ex)
         {
@@ -177,29 +199,33 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         }
     }
     
-    private static Message makeVersionMessage(UUID version)
+    private static Message makeVersionMessage(UUID version, int protocolVersion)
     {
         byte[] body = version.toString().getBytes();
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_ANNOUNCE, body);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_ANNOUNCE, body, protocolVersion);
     }
     
     // other half of transformation is in DefinitionsUpdateResponseVerbHandler.
-    private static Message makeMigrationMessage(Collection<IColumn> migrations) throws IOException
+    private static Message makeMigrationMessage(Collection<IColumn> migrations, int version) throws IOException
     {
         ByteArrayOutputStream bout = new ByteArrayOutputStream();
         DataOutputStream dout = new DataOutputStream(bout);
         dout.writeInt(migrations.size());
+        // riddle me this: how do we know that these binary values (which contained serialized row mutations) are compatible
+        // with the destination?  Further, since these migrations may be old, how do we know if they are compatible with
+        // the current version?  The bottom line is that we don't.  For this reason, running migrations from a new node
+        // to an old node will be a crap shoot.  Pushing migrations from an old node to a new node should work, so long
+        // as the oldest migrations are only one version old.  We need a way of flattening schemas so that this isn't a
+        // problem during upgrades.
         for (IColumn col : migrations)
         {
             assert col instanceof Column;
-            dout.writeInt(col.name().length);
-            dout.write(col.name());
-            dout.writeInt(col.value().length);
-            dout.write(col.value());
+            ByteBufferUtil.writeWithLength(col.name(), dout);
+            ByteBufferUtil.writeWithLength(col.value(), dout);
         }
         dout.close();
         byte[] body = bout.toByteArray();
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_UPDATE_RESPONSE, body);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.DEFINITIONS_UPDATE_RESPONSE, body, version);
     }
     
     // other half of this transformation is in MigrationManager.
@@ -214,7 +240,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
             in.readFully(name);
             byte[] value = new byte[in.readInt()];
             in.readFully(value);
-            cols.add(new Column(name, value));
+            cols.add(new Column(ByteBuffer.wrap(name), ByteBuffer.wrap(value)));
         }
         in.close();
         return cols;

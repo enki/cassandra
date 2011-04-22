@@ -18,6 +18,12 @@
 
 package org.apache.cassandra.cli;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.*;
+
 import jline.ConsoleReader;
 import jline.History;
 import org.apache.cassandra.auth.SimpleAuthenticator;
@@ -28,14 +34,6 @@ import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-
 /**
  * Cassandra Command Line Interface (CLI) Main
  */
@@ -43,11 +41,12 @@ public class CliMain
 {
     public final static String HISTORYFILE = ".cassandra.history";
 
-    private static TTransport transport_ = null;
-    private static Cassandra.Client thriftClient_ = null;
-    private static CliSessionState css_ = new CliSessionState();
-    private static CliClient cliClient_;
-    private static CliCompleter completer_ = new CliCompleter();
+    private static TTransport transport = null;
+    private static Cassandra.Client thriftClient = null;
+    public  static CliSessionState sessionState = new CliSessionState();
+    private static CliClient cliClient;
+    private static CliCompleter completer = new CliCompleter();
+    private static int lineNumber = 1;
 
     /**
      * Establish a thrift connection to cassandra instance
@@ -60,119 +59,114 @@ public class CliMain
 
         TSocket socket = new TSocket(server, port);
 
-        if (transport_ != null)
-            transport_.close();
+        if (transport != null)
+            transport.close();
 
-        if (css_.framed)
+        if (sessionState.framed)
         {
-            transport_ = new TFramedTransport(socket);
+            transport = new TFramedTransport(socket);
         }
         else 
         {
-            transport_ = socket;
+            transport = socket;
         }
 
-        TBinaryProtocol binaryProtocol = new TBinaryProtocol(transport_, true, true);
+        TBinaryProtocol binaryProtocol = new TBinaryProtocol(transport, true, true);
         Cassandra.Client cassandraClient = new Cassandra.Client(binaryProtocol);
 
         try
         {
-            transport_.open();
+            transport.open();
         }
         catch (Exception e)
         {
-            // Should move this to Log4J as well probably...
-            css_.err.format("Exception connecting to %s/%d - %s\n", server, port, e.getMessage());
-
-            if (css_.debug)
+            if (sessionState.debug)
                 e.printStackTrace();
 
-            return;
+            String error = (e.getCause() == null) ? e.getMessage() : e.getCause().getMessage();
+            throw new RuntimeException("Exception connecting to " + server + "/" + port + ". Reason: " + error + ".");
         }
 
-        thriftClient_ = cassandraClient;
-        cliClient_ = new CliClient(css_, thriftClient_);
+        thriftClient = cassandraClient;
+        cliClient = new CliClient(sessionState, thriftClient);
         
-        if (css_.keyspace != null)
+        if ((sessionState.username != null) && (sessionState.password != null))
         {
-            try {
-                thriftClient_.set_keyspace(css_.keyspace);
-                cliClient_.setKeyspace(css_.keyspace);
-
-                Set<String> cfnames = new HashSet<String>();
-                KsDef ksd = cliClient_.getKSMetaData(css_.keyspace);
-                for (CfDef cfd : ksd.cf_defs) {
-                    cfnames.add(cfd.name);
-                }
-                updateCompletor(cfnames);
-                
-            }
-            catch (InvalidRequestException e)
+            // Authenticate
+            Map<String, String> credentials = new HashMap<String, String>();
+            credentials.put(SimpleAuthenticator.USERNAME_KEY, sessionState.username);
+            credentials.put(SimpleAuthenticator.PASSWORD_KEY, sessionState.password);
+            AuthenticationRequest authRequest = new AuthenticationRequest(credentials);
+            try
             {
-                css_.err.println("Keyspace " + css_.keyspace + " not found");
+                thriftClient.login(authRequest);
+                cliClient.setUsername(sessionState.username);
+            }
+            catch (AuthenticationException e)
+            {
+                thriftClient = null;
+                sessionState.err.println("Exception during authentication to the cassandra node, " +
+                		"Verify the keyspace exists, and that you are using the correct credentials.");
+                return;
+            }
+            catch (AuthorizationException e)
+            {
+                thriftClient = null;
+                sessionState.err.println("You are not authorized to use keyspace: " + sessionState.keyspace);
                 return;
             }
             catch (TException e)
             {
-                css_.err.println("Did you specify 'keyspace'?");
+                thriftClient = null;
+                sessionState.err.println("Login failure. Did you specify 'keyspace', 'username' and 'password'?");
+                return;
+            }
+        }
+        
+        if (sessionState.keyspace != null)
+        {
+            try
+            {
+                sessionState.keyspace = CliCompiler.getKeySpace(sessionState.keyspace, thriftClient.describe_keyspaces());;
+                thriftClient.set_keyspace(sessionState.keyspace);
+                cliClient.setKeySpace(sessionState.keyspace);
+                updateCompletor(CliUtils.getCfNamesByKeySpace(cliClient.getKSMetaData(sessionState.keyspace)));
+            }
+            catch (InvalidRequestException e)
+            {
+                sessionState.err.println("Keyspace " + sessionState.keyspace + " not found");
+                return;
+            }
+            catch (TException e)
+            {
+                sessionState.err.println("Did you specify 'keyspace'?");
                 return;
             }
             catch (NotFoundException e)
             {
-                css_.err.println("Keyspace " + css_.keyspace + " not found");
+                sessionState.err.println("Keyspace " + sessionState.keyspace + " not found");
                 return;
             }
         }
-        
-        if ((css_.username != null) && (css_.password != null))
-        {
-            // Authenticate 
-            Map<String, String> credentials = new HashMap<String, String>();
-            credentials.put(SimpleAuthenticator.USERNAME_KEY, css_.username);
-            credentials.put(SimpleAuthenticator.PASSWORD_KEY, css_.password);
-            AuthenticationRequest authRequest = new AuthenticationRequest(credentials);
-            try 
-            {
-                thriftClient_.login(authRequest);
-                cliClient_.setUsername(css_.username);
-            } 
-            catch (AuthenticationException e) 
-            {
-                css_.err.println("Exception during authentication to the cassandra node, " +
-                		"Verify the keyspace exists, and that you are using the correct credentials.");
-                return;
-            } 
-            catch (AuthorizationException e) 
-            {
-                css_.err.println("You are not authorized to use keyspace: " + css_.keyspace);
-                return;
-            }
-            catch (TException e) 
-            {
-                css_.err.println("Login failure. Did you specify 'keyspace', 'username' and 'password'?");
-                return;
-            } 
-        }
-        
+
         // Lookup the cluster name, this is to make it clear which cluster the user is connected to
         String clusterName;
 
         try
         {
-            clusterName = thriftClient_.describe_cluster_name();
+            clusterName = thriftClient.describe_cluster_name();
         }
         catch (Exception e)
         {
+            sessionState.err.println("Exception retrieving information about the cassandra node, check you have connected to the thrift port.");
 
-            css_.err.println("Exception retrieving information about the cassandra node, check you have connected to the thrift port.");
-
-            if (css_.debug)
+            if (sessionState.debug)
                 e.printStackTrace();
 
             return;
         }
 
-        css_.out.printf("Connected to: \"%s\" on %s/%d%n", clusterName, server, port);
+        sessionState.out.printf("Connected to: \"%s\" on %s/%d%n", clusterName, server, port);
     }
 
     /**
@@ -180,27 +174,22 @@ public class CliMain
      */
     public static void disconnect()
     {
-        if (transport_ != null)
+        if (transport != null)
         {
-            transport_.close();
-            transport_ = null;
+            transport.close();
+            transport = null;
         }
-    }
-
-    private static void printBanner()
-    {
-        css_.out.println("Welcome to cassandra CLI.\n");
-        css_.out.println("Type 'help' or '?' for help. Type 'quit' or 'exit' to quit.");
     }
 
     /**
      * Checks whether the thrift client is connected.
+     * @return boolean - true when connected, false otherwise
      */
     public static boolean isConnected()
     {
-        if (thriftClient_ == null)
+        if (thriftClient == null)
         {
-            css_.out.println("Not connected to a cassandra instance.");
+            sessionState.out.println("Not connected to a cassandra instance.");
             return false;
         }
         return true;
@@ -211,68 +200,96 @@ public class CliMain
         Set<String> actions = new HashSet<String>();
         for (String cf : candidates)
         {
-            for (String cmd : completer_.getKeyspaceCommands())
+            for (String cmd : completer.getKeyspaceCommands())
                 actions.add(String.format("%s %s", cmd, cf));
         }
         
         String[] strs = Arrays.copyOf(actions.toArray(), actions.toArray().length, String[].class);
         
-        completer_.setCandidateStrings(strs);
+        completer.setCandidateStrings(strs);
     }
 
-    private static void processCLIStmt(String query)
+    public static void processStatement(String query)
     {
+
         try
         {
-            cliClient_.executeCLIStmt(query);
+            cliClient.executeCLIStatement(query);
         }
-        catch (InvalidRequestException ire)
+        catch (Exception e)
         {
-            css_.err.println(ire.why);
-            if (css_.debug)
-                ire.printStackTrace(css_.err);
-            
-            // Abort a batch run when errors are encountered
-            if (css_.batch)
+            String errorTemplate = sessionState.inFileMode() ? "Line " + lineNumber + " => " : "";
+
+            String message = (e.getCause() == null) ? e.getMessage() : e.getCause().getMessage();
+            sessionState.err.println(errorTemplate + message);
+
+            if (sessionState.debug)
+            {
+                e.printStackTrace(sessionState.err);
+            }
+
+            if (sessionState.batch || sessionState.inFileMode())
+            {
                 System.exit(4);
+            }
         }
-        catch (Throwable e)
+        finally
         {
-            css_.err.println((e.getCause() == null) ? e.getMessage() : e.getCause().getMessage());
-            
-            if (css_.debug)
-                e.printStackTrace(css_.err);
-            
-            // Abort a batch run when errors are encountered
-            if (css_.batch)
-                System.exit(8);
+            lineNumber++;
         }
     }
 
     public static void main(String args[]) throws IOException
     {
-        // process command line args
+        // process command line arguments
         CliOptions cliOptions = new CliOptions();
-        cliOptions.processArgs(css_, args);
+        cliOptions.processArgs(sessionState, args);
 
         // connect to cassandra server if host argument specified.
-        if (css_.hostName != null)
+        if (sessionState.hostName != null)
         {
-            connect(css_.hostName, css_.thriftPort);
+            try
+            {
+                connect(sessionState.hostName, sessionState.thriftPort);   
+            }
+            catch (RuntimeException e)
+            {
+                sessionState.err.println(e.getMessage());
+                System.exit(-1);
+            }
         }
         
-        if ( cliClient_ == null )
+        if ( cliClient == null )
         {
             // Connection parameter was either invalid or not present.
             // User must connect explicitly using the "connect" CLI statement.
-            cliClient_ = new CliClient(css_, null);
+            cliClient = new CliClient(sessionState, null);
+        }
+
+        // load statements from file and process them
+        if (sessionState.inFileMode())
+        {
+            FileReader fileReader;
+
+            try
+            {
+                fileReader = new FileReader(sessionState.filename);
+            }
+            catch (IOException e)
+            {
+                sessionState.err.println(e.getMessage());
+                return;
+            }
+
+            evaluateFileStatements(new BufferedReader(fileReader));
+            return;
         }
 
         ConsoleReader reader = new ConsoleReader();
         
-        if (!css_.batch)
+        if (!sessionState.batch)
         {
-            reader.addCompletor(completer_);
+            reader.addCompletor(completer);
             reader.setBellEnabled(false);
             
             String historyFile = System.getProperty("user.home") + File.separator + HISTORYFILE;
@@ -284,20 +301,94 @@ public class CliMain
             }
             catch (IOException exp)
             {
-                css_.err.printf("Unable to open %s for writing %n", historyFile);
+                sessionState.err.printf("Unable to open %s for writing %n", historyFile);
             }
         }
-        else
+        else if (!sessionState.verbose) // if in batch mode but no verbose flag
         {
-            css_.out.close();
+            sessionState.out.close();
         }
 
-        printBanner();
+        cliClient.printBanner();
 
-        String line;
-        while ((line = reader.readLine("[" + cliClient_.getUsername() + "@" + cliClient_.getKeySpace() + "] ")) != null)
+        String prompt;
+        String line = "";
+        String currentStatement = "";
+        boolean inCompoundStatement = false;
+
+        while (line != null)
         {
-            processCLIStmt(line);
+            prompt = (inCompoundStatement) ? "...\t" : getPrompt(cliClient);
+
+            try
+            {
+                line = reader.readLine(prompt);
+            }
+            catch (IOException e)
+            {
+                // retry on I/O Exception
+            }
+
+            if (line == null)
+                return;
+
+            line = line.trim();
+
+            // skipping empty and comment lines
+            if (line.isEmpty() || line.startsWith("--"))
+                continue;
+
+            currentStatement += line;
+
+            if (line.endsWith(";") || line.equals("?"))
+            {
+                processStatement(currentStatement);
+                currentStatement = "";
+                inCompoundStatement = false;
+            }
+            else
+            {
+                currentStatement += " "; // ready for new line
+                inCompoundStatement = true;
+            }
         }
     }
+
+    private static void evaluateFileStatements(BufferedReader reader) throws IOException
+    {
+        String line = "";
+        String currentStatement = "";
+
+        while ((line = reader.readLine()) != null)
+        {
+            line = line.trim();
+
+            // skipping empty and comment lines
+            if (line.isEmpty() || line.startsWith("--"))
+                continue;
+
+            currentStatement += line;
+
+            if (line.endsWith(";"))
+            {
+                processStatement(currentStatement);
+                currentStatement = "";
+            }
+            else
+            {
+                currentStatement += " "; // ready for new line
+            }
+        }
+    }
+
+    /**
+     * Returns prompt for current connection
+     * @param client - currently connected client
+     * @return String - prompt with username and keyspace (if any)
+     */
+    private static String getPrompt(CliClient client)
+    {
+        return "[" + client.getUsername() + "@" + client.getKeySpace() + "] ";
+    }
+
 }

@@ -22,7 +22,6 @@ package org.apache.cassandra.utils;
 
 
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicLongArray;
 
 public class LatencyTracker
 {
@@ -77,11 +76,11 @@ public class LatencyTracker
 
     public long[] getTotalLatencyHistogramMicros()
     {
-        return totalHistogram.get(false);
+        return totalHistogram.getBuckets(false);
     }
 
     public long[] getRecentLatencyHistogramMicros()
     {
-        return recentHistogram.get(true);
+        return recentHistogram.getBuckets(true);
     }
 }

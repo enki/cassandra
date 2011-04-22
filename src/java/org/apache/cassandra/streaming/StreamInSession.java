@@ -25,16 +25,17 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
+import org.apache.cassandra.gms.Gossiper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CompactionManager;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.net.MessagingService;
-import org.cliffc.high_scale_lib.NonBlockingHashMap;
 import org.apache.cassandra.utils.Pair;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 /** each context gets its own StreamInSession. So there may be >1 Session per host */
 public class StreamInSession
@@ -48,7 +49,6 @@ public class StreamInSession
     private final Runnable callback;
     private String table;
     private final List<Future<SSTableReader>> buildFutures = new ArrayList<Future<SSTableReader>>();
-    private ColumnFamilyStore cfs;
     private PendingFile current;
 
     private StreamInSession(Pair<InetAddress, Long> context, Runnable callback)
@@ -92,13 +92,11 @@ public class StreamInSession
 
     public void addFiles(Collection<PendingFile> files)
     {
-        for(PendingFile file : files)
+        for (PendingFile file : files)
         {
             if(logger.isDebugEnabled())
                 logger.debug("Adding file {} to Stream Request queue", file.getFilename());
             this.files.add(file);
-            if (cfs == null)
-                cfs = Table.open(file.desc.ksname).getColumnFamilyStore(file.desc.cfname);
         }
     }
 
@@ -107,7 +105,7 @@ public class StreamInSession
         if (logger.isDebugEnabled())
             logger.debug("Finished {}. Sending ack to {}", remoteFile, this);
 
-        Future future = CompactionManager.instance.submitSSTableBuild(localFile.desc);
+        Future<SSTableReader> future = CompactionManager.instance.submitSSTableBuild(localFile.desc, remoteFile.type);
         buildFutures.add(future);
 
         files.remove(remoteFile);
@@ -115,14 +113,14 @@ public class StreamInSession
             current = null;
         StreamReply reply = new StreamReply(remoteFile.getFilename(), getSessionId(), StreamReply.Status.FILE_FINISHED);
         // send a StreamStatus message telling the source node it can delete this file
-        MessagingService.instance.sendOneWay(reply.createMessage(), getHost());
+        MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
     }
 
     public void retry(PendingFile remoteFile) throws IOException
     {
         StreamReply reply = new StreamReply(remoteFile.getFilename(), getSessionId(), StreamReply.Status.FILE_RETRY);
         logger.info("Streaming of file {} from {} failed: requesting a retry.", remoteFile, this);
-        MessagingService.instance.sendOneWay(reply.createMessage(), getHost());
+        MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
     }
 
     public void closeIfFinished() throws IOException
@@ -130,14 +128,20 @@ public class StreamInSession
         if (files.isEmpty())
         {
             // wait for bloom filters and row indexes to finish building
-            List<SSTableReader> sstables = new ArrayList<SSTableReader>(buildFutures.size());
+            HashMap <ColumnFamilyStore, List<SSTableReader>> cfstores = new HashMap<ColumnFamilyStore, List<SSTableReader>>();
             for (Future<SSTableReader> future : buildFutures)
             {
                 try
                 {
                     SSTableReader sstable = future.get();
+                    assert sstable.getTableName().equals(table);
+                    if (sstable == null)
+                        continue;
+                    ColumnFamilyStore cfs = Table.open(sstable.getTableName()).getColumnFamilyStore(sstable.getColumnFamilyName());
                     cfs.addSSTable(sstable);
-                    sstables.add(sstable);
+                    if (!cfstores.containsKey(cfs))
+                        cfstores.put(cfs, new ArrayList<SSTableReader>());
+                    cfstores.get(cfs).add(sstable);
                 }
                 catch (InterruptedException e)
                 {
@@ -150,13 +154,16 @@ public class StreamInSession
             }
 
             // build secondary indexes
-            if (cfs != null && !cfs.getIndexedColumns().isEmpty())
-                cfs.buildSecondaryIndexes(sstables, cfs.getIndexedColumns());
+            for (Map.Entry<ColumnFamilyStore, List<SSTableReader>> entry : cfstores.entrySet())
+            {
+                if (entry.getKey() != null && !entry.getKey().getIndexedColumns().isEmpty())
+                    entry.getKey().buildSecondaryIndexes(entry.getValue(), entry.getKey().getIndexedColumns());
+            }
 
             // send reply to source that we're done
             StreamReply reply = new StreamReply("", getSessionId(), StreamReply.Status.SESSION_FINISHED);
             logger.info("Finished streaming session {} from {}", getSessionId(), getHost());
-            MessagingService.instance.sendOneWay(reply.createMessage(), getHost());
+            MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
 
             if (callback != null)
                 callback.run();

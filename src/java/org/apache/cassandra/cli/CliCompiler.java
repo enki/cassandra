@@ -18,8 +18,14 @@
 
 package org.apache.cassandra.cli;
 
-import org.antlr.runtime.*;
-import org.antlr.runtime.tree.*;
+import java.util.List;
+
+import org.antlr.runtime.ANTLRStringStream;
+import org.antlr.runtime.CharStream;
+import org.antlr.runtime.CommonTokenStream;
+import org.antlr.runtime.tree.Tree;
+import org.apache.cassandra.thrift.CfDef;
+import org.apache.cassandra.thrift.KsDef;
 
 
 public class CliCompiler
@@ -56,9 +62,9 @@ public class CliCompiler
         }
     }
 
-    public static CommonTree compileQuery(String query)
+    public static Tree compileQuery(String query)
     {
-        CommonTree queryTree;
+        Tree queryTree;
         
         try
         {
@@ -70,7 +76,7 @@ public class CliCompiler
             CliParser parser = new CliParser(tokens);
 
             // start parsing...
-            queryTree = (CommonTree)(parser.root().getTree());
+            queryTree = (Tree)(parser.root().getTree());
 
             // semantic analysis if any...
             //  [tbd]
@@ -88,24 +94,77 @@ public class CliCompiler
      * NODE_COLUMN_ACCESS related functions.
      */
 
-    public static String getColumnFamily(CommonTree astNode)
+    public static String getColumnFamily(Tree astNode, List<CfDef> cfDefs)
     {
-        return astNode.getChild(0).getText();
+        return getColumnFamily(astNode.getChild(0).getText(), cfDefs);
     }
 
-    public static String getKey(CommonTree astNode)
+    public static String getColumnFamily(String cfName, List<CfDef> cfDefs)
+    {
+        int matches = 0;
+        String lastMatchedName = "";
+
+        for (CfDef cfDef : cfDefs)
+        {
+            if (cfDef.name.equals(cfName))
+            {
+                return cfName;
+            }
+            else if (cfDef.name.toUpperCase().equals(cfName.toUpperCase()))
+            {
+                lastMatchedName = cfDef.name;
+                matches++;
+            }
+        }
+
+        if (matches > 1 || matches == 0)
+            throw new RuntimeException(cfName + " not found in current keyspace.");
+
+        return lastMatchedName;
+    }
+
+    public static String getKeySpace(Tree statement, List<KsDef> keyspaces)
+    {
+        return getKeySpace(statement.getChild(0).getText(), keyspaces);
+    }
+
+    public static String getKeySpace(String ksName, List<KsDef> keyspaces)
+    {
+        int matches = 0;
+        String lastMatchedName = "";
+
+        for (KsDef ksDef : keyspaces)
+        {
+            if (ksDef.name.equals(ksName))
+            {
+                return ksName;
+            }
+            else if (ksDef.name.toUpperCase().equals(ksName.toUpperCase()))
+            {
+                lastMatchedName = ksDef.name;
+                matches++;
+            }
+        }
+
+        if (matches > 1 || matches == 0)
+            throw new RuntimeException("Keyspace '" + ksName + "' not found.");
+
+        return lastMatchedName;
+    }
+
+    public static String getKey(Tree astNode)
     {
         return CliUtils.unescapeSQLString(astNode.getChild(1).getText());
     }
 
-    public static int numColumnSpecifiers(CommonTree astNode)
+    public static int numColumnSpecifiers(Tree astNode)
     {
         // Skip over table, column family and rowKey
         return astNode.getChildCount() - 2;
     }
 
     // Returns the pos'th (0-based index) column specifier in the astNode
-    public static String getColumn(CommonTree astNode, int pos)
+    public static String getColumn(Tree astNode, int pos)
     {
         // Skip over table, column family and rowKey
         return CliUtils.unescapeSQLString(astNode.getChild(pos + 2).getText()); 

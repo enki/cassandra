@@ -18,22 +18,21 @@
 
 package org.apache.cassandra.gms;
 
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.IOError;
+import java.io.*;
 import java.lang.management.ManagementFactory;
+import java.net.InetAddress;
 import java.util.*;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import org.apache.commons.lang.StringUtils;
-
-import java.net.InetAddress;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.BoundedStatsDeque;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.BoundedStatsDeque;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * This FailureDetector is an implementation of the paper titled
@@ -46,18 +45,13 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     private static Logger logger_ = LoggerFactory.getLogger(FailureDetector.class);
     private static final int sampleSize_ = 1000;
     private static int phiConvictThreshold_;
-    /* The Failure Detector has to have been up for at least 1 min. */
-    private static final long uptimeThreshold_ = 60000;
-    /* The time when the module was instantiated. */
-    private static long creationTime_;
-    
+
     private Map<InetAddress, ArrivalWindow> arrivalSamples_ = new Hashtable<InetAddress, ArrivalWindow>();
     private List<IFailureDetectionEventListener> fdEvntListeners_ = new ArrayList<IFailureDetectionEventListener>();
     
     public FailureDetector()
     {
         phiConvictThreshold_ = DatabaseDescriptor.getPhiConvictThreshold();
-        creationTime_ = System.currentTimeMillis();
         // Register this instance with JMX
         try
         {
@@ -73,10 +67,10 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     public String getAllEndpointStates()
     {
         StringBuilder sb = new StringBuilder();
-        for (Map.Entry<InetAddress, EndpointState> entry : Gossiper.instance.endpointStateMap_.entrySet())
+        for (Map.Entry<InetAddress, EndpointState> entry : Gossiper.instance.endpointStateMap.entrySet())
         {
             sb.append(entry.getKey()).append("\n");
-            for (Map.Entry<ApplicationState, VersionedValue> state : entry.getValue().applicationState_.entrySet())
+            for (Map.Entry<ApplicationState, VersionedValue> state : entry.getValue().applicationState.entrySet())
                 sb.append("  ").append(state.getKey()).append(":").append(state.getValue().value).append("\n");
         }
         return sb.toString();
@@ -87,43 +81,23 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
      */
     public void dumpInterArrivalTimes()
     {
+        OutputStream os = null;
         try
         {
-            FileOutputStream fos = new FileOutputStream("/var/tmp/output-" + System.currentTimeMillis() + ".dat", true);
-            fos.write(toString().getBytes());
-            fos.close();
+            File file = File.createTempFile("failuredetector-", ".dat");
+            os = new BufferedOutputStream(new FileOutputStream(file, true));
+            os.write(toString().getBytes());
         }
         catch (IOException e)
         {
             throw new IOError(e);
+        }
+        finally
+        {
+            FileUtils.closeQuietly(os);
         }
     }
     
-    /**
-     * We dump the arrival window for any endpoint only if the 
-     * local Failure Detector module has been up for more than a 
-     * minute.
-     * 
-     * @param ep for which the arrival window needs to be dumped.
-     */
-    private void dumpInterArrivalTimes(InetAddress ep)
-    {
-        long now = System.currentTimeMillis();
-        if ( (now - FailureDetector.creationTime_) <= FailureDetector.uptimeThreshold_ )
-            return;
-        try
-        {
-            FileOutputStream fos = new FileOutputStream("/var/tmp/output-" + System.currentTimeMillis() + "-" + ep + ".dat", true);
-            ArrivalWindow hWnd = arrivalSamples_.get(ep);
-            fos.write(hWnd.toString().getBytes());
-            fos.close();
-        }
-        catch (IOException e)
-        {
-            throw new IOError(e);
-        }
-    }
-
     public void setPhiConvictThreshold(int phi)
     {
         phiConvictThreshold_ = phi;
@@ -240,7 +214,7 @@ class ArrivalWindow
         }
         else
         {
-            interArrivalTime = Gossiper.intervalInMillis_ / 2;
+            interArrivalTime = Gossiper.intervalInMillis / 2;
         }
         tLast_ = value;            
         arrivalIntervals_.add(interArrivalTime);        

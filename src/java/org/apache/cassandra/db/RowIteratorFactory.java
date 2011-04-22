@@ -18,13 +18,15 @@
 package org.apache.cassandra.db;
 
 import java.io.Closeable;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.io.IOError;
+import java.io.IOException;
+import java.util.*;
 import java.util.Map.Entry;
+
+import com.google.common.base.Function;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterators;
+import org.apache.commons.collections.IteratorUtils;
 
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
@@ -32,11 +34,6 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableScanner;
 import org.apache.cassandra.utils.ReducingIterator;
-import org.apache.commons.collections.IteratorUtils;
-
-import com.google.common.base.Function;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterators;
 
 public class RowIteratorFactory
 {
@@ -102,19 +99,26 @@ public class RowIteratorFactory
         }
 
         Iterator<IColumnIterator> collated = IteratorUtils.collatedIterator(COMPARE_BY_KEY, iterators);
-        final Memtable firstMemtable = memtables.iterator().next();
 
         // reduce rows from all sources into a single row
         ReducingIterator<IColumnIterator, Row> reduced = new ReducingIterator<IColumnIterator, Row>(collated)
         {
-            private final int gcBefore = (int) (System.currentTimeMillis() / 1000) - cfs.metadata.gcGraceSeconds;
+            private final int gcBefore = (int) (System.currentTimeMillis() / 1000) - cfs.metadata.getGcGraceSeconds();
             private final List<IColumnIterator> colIters = new ArrayList<IColumnIterator>();
             private DecoratedKey key;
+            private ColumnFamily returnCF;
+
+            @Override
+            protected void onKeyChange()
+            {
+                this.returnCF = ColumnFamily.create(cfs.metadata);
+            }
 
             public void reduce(IColumnIterator current)
             {
                 this.colIters.add(current);
                 this.key = current.getKey();
+                this.returnCF.delete(current.getColumnFamily());
             }
 
             @Override
@@ -128,32 +132,16 @@ public class RowIteratorFactory
                 Comparator<IColumn> colComparator = filter.filter.getColumnComparator(comparator);
                 Iterator<IColumn> colCollated = IteratorUtils.collatedIterator(colComparator, colIters);
 
-                ColumnFamily returnCF = null;
-                
                 // First check if this row is in the rowCache. If it is we can skip the rest
                 ColumnFamily cached = cfs.getRawCachedRow(key);
                 if (cached != null)
                 {
                     QueryFilter keyFilter = new QueryFilter(key, filter.path, filter.filter);
-                    returnCF = cfs.filterColumnFamily(cached, keyFilter, cfs.metadata.gcGraceSeconds);
+                    returnCF = cfs.filterColumnFamily(cached, keyFilter, gcBefore);
                 }
-                else
+                else if (colCollated.hasNext())
                 {
-                    returnCF = firstMemtable.getColumnFamily(key);            
-                    // TODO this is a little subtle: the Memtable ColumnIterator has to be a shallow clone of the source CF,
-                    // with deletion times set correctly, so we can use it as the "base" CF to add query results to.
-                    // (for sstable ColumnIterators we do not care if it is a shallow clone or not.)
-                    returnCF = returnCF == null ? ColumnFamily.create(firstMemtable.getTableName(), filter.getColumnFamilyName())
-                            : returnCF.cloneMeShallow();
-
-                    if (colCollated.hasNext())
-                    {
-                        filter.collectCollatedColumns(returnCF, colCollated, gcBefore);
-                    }
-                    else
-                    {
-                        returnCF = null;
-                    }
+                    filter.collectCollatedColumns(returnCF, colCollated, gcBefore);
                 }
 
                 Row rv = new Row(key, returnCF);
@@ -164,25 +152,6 @@ public class RowIteratorFactory
         };
 
         return new RowIterator(reduced, iterators);
-    }
-
-    /** 
-     * Used when locks are required before getting the entry iterator.
-     * @param memtable Memtable to get iterator from
-     * @param startWith Start at this key position
-     * @return entry iterator for the current memtable
-     */
-    private static Iterator<Map.Entry<DecoratedKey, ColumnFamily>> memtableEntryIterator(Memtable memtable, DecoratedKey startWith)
-    {
-        Table.flusherLock.readLock().lock();
-        try
-        {
-            return memtable.getEntryIterator(startWith);
-        }
-        finally
-        {
-            Table.flusherLock.readLock().unlock();
-        }
     }
 
     /**

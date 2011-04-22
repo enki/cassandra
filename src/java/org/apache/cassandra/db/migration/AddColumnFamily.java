@@ -1,20 +1,15 @@
 package org.apache.cassandra.db.migration;
 
-import org.apache.avro.Schema;
-
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.io.SerDeUtils;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.UUIDGen;
-
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.cassandra.config.*;
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -46,15 +41,23 @@ public class AddColumnFamily extends Migration
     {
         super(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress()), DatabaseDescriptor.getDefsVersion());
         this.cfm = cfm;
-        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cfm.tableName);
+        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cfm.ksName);
         
         if (ksm == null)
-            throw new ConfigurationException("Keyspace does not already exist.");
+            throw new ConfigurationException("No such keyspace: " + cfm.ksName);
         else if (ksm.cfMetaData().containsKey(cfm.cfName))
-            throw new ConfigurationException("CF is already defined in that keyspace.");
+            throw new ConfigurationException(String.format("%s already exists in keyspace %s",
+                                                           cfm.cfName,
+                                                           cfm.ksName));
         else if (!Migration.isLegalName(cfm.cfName))
             throw new ConfigurationException("Invalid column family name: " + cfm.cfName);
-        
+        for (Map.Entry<ByteBuffer, ColumnDefinition> entry : cfm.getColumn_metadata().entrySet())
+        {
+            String indexName = entry.getValue().getIndexName();
+            if (indexName != null && !Migration.isLegalName(indexName))
+                throw new ConfigurationException("Invalid index name: " + indexName);
+        }
+
         // clone ksm but include the new cf def.
         KSMetaData newKsm = makeNewKeyspaceDefinition(ksm);
         
@@ -65,13 +68,13 @@ public class AddColumnFamily extends Migration
     {
         List<CFMetaData> newCfs = new ArrayList<CFMetaData>(ksm.cfMetaData().values());
         newCfs.add(cfm);
-        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
+        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, newCfs.toArray(new CFMetaData[newCfs.size()]));
     }
     
     public void applyModels() throws IOException
     {
         // reinitialize the table.
-        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cfm.tableName);
+        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cfm.ksName);
         ksm = makeNewKeyspaceDefinition(ksm);
         try
         {
@@ -81,7 +84,7 @@ public class AddColumnFamily extends Migration
         {
             throw new IOException(ex);
         }
-        Table.open(cfm.tableName); // make sure it's init-ed w/ the old definitions first, since we're going to call initCf on the new one manually
+        Table.open(cfm.ksName); // make sure it's init-ed w/ the old definitions first, since we're going to call initCf on the new one manually
         DatabaseDescriptor.setTableDefinition(ksm, newVersion);
         // these definitions could have come from somewhere else.
         CFMetaData.fixMaxId();
@@ -100,5 +103,11 @@ public class AddColumnFamily extends Migration
     {
         org.apache.cassandra.db.migration.avro.AddColumnFamily acf = (org.apache.cassandra.db.migration.avro.AddColumnFamily)mi.migration;
         cfm = CFMetaData.inflate(acf.cf);
+    }
+
+    @Override
+    public String toString()
+    {
+        return "Add column family: " + cfm.toString();
     }
 }

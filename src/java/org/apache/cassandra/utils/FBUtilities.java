@@ -19,7 +19,6 @@
 package org.apache.cassandra.utils;
 
 import java.io.*;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigInteger;
@@ -27,20 +26,20 @@ import java.net.InetAddress;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.base.Charsets;
+import com.google.common.base.Joiner;
 import org.apache.commons.collections.iterators.CollatingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.sun.jna.Native;
+import org.apache.cassandra.cache.IRowCacheProvider;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
@@ -62,15 +61,41 @@ public class FBUtilities
 
     private static volatile InetAddress localInetAddress_;
 
-    public static final int MAX_UNSIGNED_SHORT = 0xFFFF;
-
-    public static final Comparator<byte[]> byteArrayComparator = new Comparator<byte[]>()
+    private static final ThreadLocal<MessageDigest> localMD5Digest = new ThreadLocal<MessageDigest>()
     {
-        public int compare(byte[] o1, byte[] o2)
+        @Override
+        protected MessageDigest initialValue()
         {
-            return compareByteArrays(o1, o2);
+            return newMessageDigest("MD5");
+        }
+
+        @Override
+        public MessageDigest get()
+        {
+            MessageDigest digest = super.get();
+            digest.reset();
+            return digest;
         }
     };
+
+    public static final int MAX_UNSIGNED_SHORT = 0xFFFF;
+
+    public static MessageDigest threadLocalMD5Digest()
+    {
+        return localMD5Digest.get();
+    }
+
+    public static MessageDigest newMessageDigest(String algorithm)
+    {
+        try
+        {
+            return MessageDigest.getInstance(algorithm);
+        }
+        catch (NoSuchAlgorithmException nsae)
+        {
+            throw new RuntimeException("the requested digest algorithm (" + algorithm + ") is not available", nsae);
+        }
+    }
 
     /**
      * Parses a string representing either a fraction, absolute value or percentage.
@@ -79,11 +104,11 @@ public class FBUtilities
     {
         if (value.endsWith("%"))
         {
-            return Double.valueOf(value.substring(0, value.length() - 1)) / 100;
+            return Double.parseDouble(value.substring(0, value.length() - 1)) / 100;
         }
         else
         {
-            return Double.valueOf(value);
+            return Double.parseDouble(value);
         }
     }
 
@@ -152,58 +177,83 @@ public class FBUtilities
             remainder = distance.testBit(0);
             midpoint = distance.shiftRight(1).add(left).mod(max);
         }
-        return new Pair(midpoint, remainder);
+        return new Pair<BigInteger, Boolean>(midpoint, remainder);
     }
 
+    /**
+     * Copy bytes from int into bytes starting from offset.
+     * @param bytes Target array
+     * @param offset Offset into the array
+     * @param i Value to write
+     */
+    public static void copyIntoBytes(byte[] bytes, int offset, int i)
+    {
+        bytes[offset]   = (byte)( ( i >>> 24 ) & 0xFF );
+        bytes[offset+1] = (byte)( ( i >>> 16 ) & 0xFF );
+        bytes[offset+2] = (byte)( ( i >>> 8  ) & 0xFF );
+        bytes[offset+3] = (byte)(   i          & 0xFF );
+    }
+
+    /**
+     * @param i Write this int to an array
+     * @return 4-byte array containing the int
+     */
     public static byte[] toByteArray(int i)
     {
         byte[] bytes = new byte[4];
-        bytes[0] = (byte)( ( i >>> 24 ) & 0xFF);
-        bytes[1] = (byte)( ( i >>> 16 ) & 0xFF);
-        bytes[2] = (byte)( ( i >>> 8 ) & 0xFF);
-        bytes[3] = (byte)( i & 0xFF );
+        copyIntoBytes(bytes, 0, i);
         return bytes;
     }
 
-    public static int byteArrayToInt(byte[] bytes)
+    /**
+     * Copy bytes from long into bytes starting from offset.
+     * @param bytes Target array
+     * @param offset Offset into the array
+     * @param l Value to write
+     */
+    public static void copyIntoBytes(byte[] bytes, int offset, long l)
     {
-    	return byteArrayToInt(bytes, 0);
+        bytes[offset]   = (byte)( ( l >>> 56 ) & 0xFF );
+        bytes[offset+1] = (byte)( ( l >>> 48 ) & 0xFF );
+        bytes[offset+2] = (byte)( ( l >>> 40 ) & 0xFF );
+        bytes[offset+3] = (byte)( ( l >>> 32 ) & 0xFF );
+        bytes[offset+4] = (byte)( ( l >>> 24 ) & 0xFF );
+        bytes[offset+5] = (byte)( ( l >>> 16 ) & 0xFF );
+        bytes[offset+6] = (byte)( ( l >>> 8  ) & 0xFF );
+        bytes[offset+7] = (byte)(   l          & 0xFF );
     }
 
-    public static int byteArrayToInt(byte[] bytes, int offset)
+    /**
+     * @param l Write this long to an array
+     * @return 8-byte array containing the long
+     */
+    public static byte[] toByteArray(long l)
     {
-        if ( bytes.length - offset < 4 )
-        {
-            throw new IllegalArgumentException("An integer must be 4 bytes in size.");
-        }
-        int n = 0;
-        for ( int i = 0; i < 4; ++i )
-        {
-            n <<= 8;
-            n |= bytes[offset + i] & 0xFF;
-        }
-        return n;
+        byte[] bytes = new byte[8];
+        copyIntoBytes(bytes, 0, l);
+        return bytes;
     }
 
-    public static int compareByteArrays(byte[] bytes1, byte[] bytes2){
-        if(null == bytes1){
-            if(null == bytes2) return 0;
-            else return -1;
-        }
-        if(null == bytes2) return 1;
-
-        int minLength = Math.min(bytes1.length, bytes2.length);
-        for(int i = 0; i < minLength; i++)
+    public static int compareUnsigned(byte[] bytes1, byte[] bytes2, int offset1, int offset2, int len1, int len2)
+    {
+        if (bytes1 == null)
         {
-            if(bytes1[i] == bytes2[i])
+            return bytes2 == null ? 0 : -1;
+        }
+        if (bytes2 == null) return 1;
+
+        int minLength = Math.min(len1 - offset1, len2 - offset2);
+        for (int x = 0, i = offset1, j = offset2; x < minLength; x++, i++, j++)
+        {
+            if (bytes1[i] == bytes2[j])
                 continue;
             // compare non-equal bytes as unsigned
-            return (bytes1[i] & 0xFF) < (bytes2[i] & 0xFF) ? -1 : 1;
+            return (bytes1[i] & 0xFF) < (bytes2[j] & 0xFF) ? -1 : 1;
         }
-        if(bytes1.length == bytes2.length) return 0;
-        else return (bytes1.length < bytes2.length)? -1 : 1;
+        if ((len1 - offset1) == (len2 - offset2)) return 0;
+        else return ((len1 - offset1) < (len2 - offset2)) ? -1 : 1;
     }
-
+  
     /**
      * @return The bitwise XOR of the inputs. The output will be the same length as the
      * longer input, but if either input is null, the output will be null.
@@ -228,92 +278,22 @@ public class FBUtilities
         return out;
     }
 
-    public static BigInteger md5hash(byte[] data)
+    public static BigInteger hashToBigInteger(ByteBuffer data)
     {
-        byte[] result = hash("MD5", data);
+        byte[] result = hash(data);
         BigInteger hash = new BigInteger(result);
         return hash.abs();        
     }
 
-    public static byte[] hash(String type, byte[]... data)
+    public static byte[] hash(ByteBuffer... data)
     {
-    	byte[] result;
-    	try
+        MessageDigest messageDigest = localMD5Digest.get();
+        for(ByteBuffer block : data)
         {
-            MessageDigest messageDigest = MessageDigest.getInstance(type);
-            for(byte[] block : data)
-                messageDigest.update(block);
-            result = messageDigest.digest();
-    	}
-    	catch (Exception e)
-        {
-            throw new RuntimeException(e);
-    	}
-    	return result;
-	}
-
-    public static void writeByteArray(byte[] bytes, DataOutput out) throws IOException
-    {
-        out.writeInt(bytes.length);
-        out.write(bytes);
-    }
-
-    public static byte[] readByteArray(DataInput in) throws IOException
-    {
-        int length = in.readInt();
-        if (length < 0)
-        {
-            throw new IOException("Corrupt (negative) value length encountered");
+            messageDigest.update(block.duplicate());
         }
-        byte[] value = new byte[length];
-        if (length > 0)
-        {
-            in.readFully(value);
-        }
-        return value;
-    }
 
-    public static void writeShortByteArray(byte[] name, DataOutput out)
-    {
-        int length = name.length;
-        assert 0 <= length && length <= MAX_UNSIGNED_SHORT;
-        try
-        {
-            out.writeByte((length >> 8) & 0xFF);
-            out.writeByte(length & 0xFF);
-            out.write(name);
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-    }
-
-    /** @return An unsigned short in an integer. */
-    private static int readShortLength(DataInput in) throws IOException
-    {
-        int length = (in.readByte() & 0xFF) << 8;
-        return length | (in.readByte() & 0xFF);
-    }
-
-    public static byte[] readShortByteArray(DataInput in) throws IOException
-    {
-        byte[] bytes = new byte[readShortLength(in)];
-        in.readFully(bytes);
-        return bytes;
-    }
-
-    /** @return null */
-    public static byte[] skipShortByteArray(DataInput in) throws IOException
-    {
-        int skip = readShortLength(in);
-        while (skip > 0)
-        {
-            int skipped = in.skipBytes(skip);
-            if (skipped == 0) throw new EOFException();
-            skip -= skipped;
-        }
-        return null;
+        return messageDigest.digest();
     }
 
     public static byte[] hexToBytes(String str)
@@ -478,18 +458,6 @@ public class FBUtilities
         return utflen;
     }
 
-    public static String decodeToUTF8(byte[] bytes) throws CharacterCodingException
-    {
-        return Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
-    }
-
-    public static byte[] toByteArray(long n)
-    {
-        byte[] bytes = new byte[8];
-        ByteBuffer.wrap(bytes).putLong(n);
-        return bytes;
-    }
-
     public static String resourceToFile(String filename) throws ConfigurationException
     {
         ClassLoader loader = PropertyFileSnitch.class.getClassLoader();
@@ -504,7 +472,11 @@ public class FBUtilities
     {
         try
         {
-            InputStream in = ClassLoader.getSystemClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
+            InputStream in = FBUtilities.class.getClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
+            if (in == null)
+            {
+                return "Unknown";
+            }
             Properties props = new Properties();
             props.load(in);
             return props.getProperty("CassandraVersion");
@@ -546,7 +518,7 @@ public class FBUtilities
     {
         if (!partitionerClassName.contains("."))
             partitionerClassName = "org.apache.cassandra.dht." + partitionerClassName;
-        return FBUtilities.<IPartitioner>construct(partitionerClassName, "partitioner");
+        return FBUtilities.construct(partitionerClassName, "partitioner");
     }
 
     public static AbstractType getComparator(String compareWith) throws ConfigurationException
@@ -560,13 +532,13 @@ public class FBUtilities
         }
         catch (NoSuchFieldException e)
         {
-            ConfigurationException ex = new ConfigurationException("Invalid comparator: must define a public static instance field.");
+            ConfigurationException ex = new ConfigurationException("Invalid comparator " + compareWith + " : must define a public static instance field.");
             ex.initCause(e);
             throw ex;
         }
         catch (IllegalAccessException e)
         {
-            ConfigurationException ex = new ConfigurationException("Invalid comparator: must define a public static instance field.");
+            ConfigurationException ex = new ConfigurationException("Invalid comparator " + compareWith + " : must define a public static instance field.");
             ex.initCause(e);
             throw ex;
         }
@@ -586,24 +558,22 @@ public class FBUtilities
         }
         catch (ClassNotFoundException e)
         {
-            throw new ConfigurationException(String.format("Unable to find %s class '%s': is the CLASSPATH set correctly?", readable, classname));
+            throw new ConfigurationException(String.format("Unable to find %s class '%s'", readable, classname));
         }
     }
 
     /**
      * Constructs an instance of the given class, which must have a no-arg constructor.
-     * TODO: Similar method for our 'instance member' singleton pattern would be nice.
      * @param classname Fully qualified classname.
      * @param readable Descriptive noun for the role the class plays.
      * @throws ConfigurationException If the class cannot be found.
      */
     public static <T> T construct(String classname, String readable) throws ConfigurationException
     {
-        Class<T> cls = FBUtilities.<T>classForName(classname, readable);
+        Class<T> cls = FBUtilities.classForName(classname, readable);
         try
         {
-            Constructor ctor = cls.getConstructor();
-            return (T)ctor.newInstance();
+            return cls.getConstructor().newInstance();
         }
         catch (NoSuchMethodException e)
         {
@@ -625,66 +595,45 @@ public class FBUtilities
         }
     }
 
-    public static void tryMlockall()
+    public static <T extends Comparable> SortedSet<T> singleton(T column)
     {
-        int errno = Integer.MIN_VALUE;
-        try
-        {
-            int result = CLibrary.mlockall(CLibrary.MCL_CURRENT);
-            if (result != 0)
-                errno = Native.getLastError();
-        }
-        catch (UnsatisfiedLinkError e)
-        {
-            // this will have already been logged by CLibrary, no need to repeat it
-            return;
-        }
-
-        if (errno != Integer.MIN_VALUE)
-        {
-            if (errno == CLibrary.ENOMEM && System.getProperty("os.name").toLowerCase().contains("linux"))
-            {
-                logger_.warn("Unable to lock JVM memory (ENOMEM)."
-                             + " This can result in part of the JVM being swapped out, especially with mmapped I/O enabled."
-                             + " Increase RLIMIT_MEMLOCK or run Cassandra as root.");
-            }
-            else if (!System.getProperty("os.name").toLowerCase().contains("mac"))
-            {
-                // OS X allows mlockall to be called, but always returns an error
-                logger_.warn("Unknown mlockall error " + errno);
-            }
-        }
-    }
-
-    public static TreeSet<byte[]> getSingleColumnSet(byte[] column)
-    {
-        Comparator<byte[]> singleColumnComparator = new Comparator<byte[]>()
-        {
-            public int compare(byte[] o1, byte[] o2)
-            {
-                return Arrays.equals(o1, o2) ? 0 : -1;
-            }
-        };
-        TreeSet<byte[]> set = new TreeSet<byte[]>(singleColumnComparator);
-        set.add(column);
-        return set;
+        return new TreeSet<T>(Arrays.asList(column));
     }
 
     public static String toString(Map<?,?> map)
     {
-        // wtf, why isn't something like this in guava or commons collections?
-        StringBuilder sb = new StringBuilder("{");
-        for (Map.Entry<?,?> entry : map.entrySet())
-        {
-            sb.append(toString(entry.getKey())).append(": ").append(toString(entry.getValue())).append(", ");
-        }
-        sb.append("}");
-        return sb.toString();
+        Joiner.MapJoiner joiner = Joiner.on(", ").withKeyValueSeparator(":");
+        return joiner.join(map);
     }
 
-    /** slow! */
-    private static Object toString(Object o)
+    /**
+     * Used to get access to protected/private field of the specified class
+     * @param klass - name of the class
+     * @param fieldName - name of the field
+     * @return Field or null on error
+     */
+    public static Field getProtectedField(Class klass, String fieldName)
     {
-        return o.getClass().isArray() ? Arrays.toString((Object[]) o) : o.toString();
+        Field field;
+
+        try
+        {
+            field = klass.getDeclaredField(fieldName);
+            field.setAccessible(true);
+        }
+        catch (Exception e)
+        {
+            throw new AssertionError(e);
+        }
+
+        return field;
     }
+
+    public static IRowCacheProvider newCacheProvider(String cache_provider) throws ConfigurationException
+    {
+        if (!cache_provider.contains("."))
+            cache_provider = "org.apache.cassandra.cache." + cache_provider;
+        return FBUtilities.construct(cache_provider, "row cache provider");
+    }
+
 }

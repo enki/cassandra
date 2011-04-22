@@ -21,10 +21,10 @@ package org.apache.cassandra.gms;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.CompactEndpointSerializationHelper;
-import java.net.InetAddress;
 
 /**
  * Contains information about a specified list of Endpoints and the largest version 
@@ -33,76 +33,76 @@ import java.net.InetAddress;
 
 public class GossipDigest implements Comparable<GossipDigest>
 {
-    private static ICompactSerializer<GossipDigest> serializer_;
+    private static ICompactSerializer<GossipDigest> serializer;
     static
     {
-        serializer_ = new GossipDigestSerializer();
+        serializer = new GossipDigestSerializer();
     }
     
-    InetAddress endpoint_;
-    int generation_;
-    int maxVersion_;
+    InetAddress endpoint;
+    int generation;
+    int maxVersion;
 
     public static ICompactSerializer<GossipDigest> serializer()
     {
-        return serializer_;
+        return serializer;
     }
     
-    GossipDigest(InetAddress endpoint, int generation, int maxVersion)
+    GossipDigest(InetAddress ep, int gen, int version)
     {
-        endpoint_ = endpoint;
-        generation_ = generation; 
-        maxVersion_ = maxVersion;
+        endpoint = ep;
+        generation = gen;
+        maxVersion = version;
     }
     
     InetAddress getEndpoint()
     {
-        return endpoint_;
+        return endpoint;
     }
     
     int getGeneration()
     {
-        return generation_;
+        return generation;
     }
     
     int getMaxVersion()
     {
-        return maxVersion_;
+        return maxVersion;
     }
     
     public int compareTo(GossipDigest gDigest)
     {
-        if ( generation_ != gDigest.generation_ )
-            return ( generation_ - gDigest.generation_ );
-        return (maxVersion_ - gDigest.maxVersion_);
+        if ( generation != gDigest.generation )
+            return ( generation - gDigest.generation );
+        return (maxVersion - gDigest.maxVersion);
     }
     
     public String toString()
     {
         StringBuilder sb = new StringBuilder();
-        sb.append(endpoint_);
+        sb.append(endpoint);
         sb.append(":");
-        sb.append(generation_);
+        sb.append(generation);
         sb.append(":");
-        sb.append(maxVersion_);
+        sb.append(maxVersion);
         return sb.toString();
     }
 }
 
 class GossipDigestSerializer implements ICompactSerializer<GossipDigest>
 {       
-    public void serialize(GossipDigest gDigest, DataOutputStream dos) throws IOException
+    public void serialize(GossipDigest gDigest, DataOutputStream dos, int version) throws IOException
     {        
-        CompactEndpointSerializationHelper.serialize(gDigest.endpoint_, dos);
-        dos.writeInt(gDigest.generation_);
-        dos.writeInt(gDigest.maxVersion_);
+        CompactEndpointSerializationHelper.serialize(gDigest.endpoint, dos);
+        dos.writeInt(gDigest.generation);
+        dos.writeInt(gDigest.maxVersion);
     }
 
-    public GossipDigest deserialize(DataInputStream dis) throws IOException
+    public GossipDigest deserialize(DataInputStream dis, int version) throws IOException
     {
         InetAddress endpoint = CompactEndpointSerializationHelper.deserialize(dis);
         int generation = dis.readInt();
-        int version = dis.readInt();
-        return new GossipDigest(endpoint, generation, version);
+        int maxVersion = dis.readInt();
+        return new GossipDigest(endpoint, generation, maxVersion);
     }
 }

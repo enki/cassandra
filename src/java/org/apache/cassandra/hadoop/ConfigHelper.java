@@ -23,12 +23,12 @@ package org.apache.cassandra.hadoop;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.thrift.TBinaryProtocol;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
-import org.apache.thrift.protocol.TBinaryProtocol;
 
 public class ConfigHelper
 {
@@ -49,6 +49,8 @@ public class ConfigHelper
     private static final int DEFAULT_RANGE_BATCH_SIZE = 4096;
     private static final String THRIFT_PORT = "cassandra.thrift.port";
     private static final String INITIAL_THRIFT_ADDRESS = "cassandra.thrift.address";
+    private static final String READ_CONSISTENCY_LEVEL = "cassandra.consistencylevel.read";
+    private static final String WRITE_CONSISTENCY_LEVEL = "cassandra.consistencylevel.write";
 
     /**
      * Set the keyspace and column family for the input of this job.
@@ -157,6 +159,11 @@ public class ConfigHelper
         return predicateFromString(conf.get(INPUT_PREDICATE_CONFIG));
     }
 
+    public static String getRawInputSlicePredicate(Configuration conf)
+    {
+        return conf.get(INPUT_PREDICATE_CONFIG);
+    }
+
     private static String predicateToString(SlicePredicate predicate)
     {
         assert predicate != null;
@@ -222,15 +229,25 @@ public class ConfigHelper
     {
         return conf.get(INPUT_COLUMNFAMILY_CONFIG);
     }
-
+    
     public static String getOutputColumnFamily(Configuration conf)
     {
         return conf.get(OUTPUT_COLUMNFAMILY_CONFIG);
     }
 
+    public static String getReadConsistencyLevel(Configuration conf)
+    {
+        return conf.get(READ_CONSISTENCY_LEVEL, "ONE");
+    }
+
+    public static String getWriteConsistencyLevel(Configuration conf)
+    {
+        return conf.get(WRITE_CONSISTENCY_LEVEL, "ONE");
+    }
+
     public static int getRpcPort(Configuration conf)
     {
-        return Integer.valueOf(conf.get(THRIFT_PORT));
+        return Integer.parseInt(conf.get(THRIFT_PORT));
     }
 
     public static void setRpcPort(Configuration conf, String port)

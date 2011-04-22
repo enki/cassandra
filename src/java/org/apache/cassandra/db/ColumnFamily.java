@@ -18,25 +18,30 @@
 
 package org.apache.cassandra.db;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentSkipListMap;
+import static org.apache.cassandra.db.DBConstants.*;
+
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.SortedSet;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.cassandra.config.CFMetaData;
-
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.dht.BytesToken;
-import org.apache.cassandra.dht.LocalPartitioner;
-import org.apache.cassandra.io.ICompactSerializer2;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.io.util.IIterableColumns;
-import org.apache.cassandra.utils.FBUtilities;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.marshal.AbstractCommutativeType;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.io.IColumnSerializer;
+import org.apache.cassandra.io.util.IIterableColumns;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class ColumnFamily implements IColumnContainer, IIterableColumns
 {
@@ -69,16 +74,16 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     private final Integer cfid;
     private final ColumnFamilyType type;
 
-    private transient ICompactSerializer2<IColumn> columnSerializer;
+    private transient IColumnSerializer columnSerializer;
     final AtomicLong markedForDeleteAt = new AtomicLong(Long.MIN_VALUE);
     final AtomicInteger localDeletionTime = new AtomicInteger(Integer.MIN_VALUE);
-    private ConcurrentSkipListMap<byte[], IColumn> columns;
-
+    private ConcurrentSkipListMap<ByteBuffer, IColumn> columns;
+    
     public ColumnFamily(ColumnFamilyType type, AbstractType comparator, AbstractType subcolumnComparator, Integer cfid)
     {
         this.type = type;
         columnSerializer = type == ColumnFamilyType.Standard ? Column.serializer() : SuperColumn.serializer(subcolumnComparator);
-        columns = new ConcurrentSkipListMap<byte[], IColumn>(comparator);
+        columns = new ConcurrentSkipListMap<ByteBuffer, IColumn>(comparator);
         this.cfid = cfid;
      }
     
@@ -127,21 +132,16 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     public void addAll(ColumnFamily cf)
     {
         for (IColumn column : cf.getSortedColumns())
-        {
             addColumn(column);
-        }
         delete(cf);
     }
 
-    /**
-     * FIXME: Gross.
-     */
-    public ICompactSerializer2<IColumn> getColumnSerializer()
+    public IColumnSerializer getColumnSerializer()
     {
         return columnSerializer;
     }
 
-    int getColumnCount()
+    public int getColumnCount()
     {
         return columns.size();
     }
@@ -151,15 +151,15 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         return type == ColumnFamilyType.Super;
     }
 
-    public void addColumn(QueryPath path, byte[] value, long timestamp)
+    public void addColumn(QueryPath path, ByteBuffer value, long timestamp)
     {
-        assert path.columnName != null : path;
-        addColumn(path.superColumnName, new Column(path.columnName, value, timestamp));
+        addColumn(path, value, timestamp, 0);
     }
 
-    public void addColumn(QueryPath path, byte[] value, long timestamp, int timeToLive)
+    public void addColumn(QueryPath path, ByteBuffer value, long timestamp, int timeToLive)
     {
         assert path.columnName != null : path;
+        assert !metadata().getDefaultValidator().isCommutative();
         Column column;
         if (timeToLive > 0)
             column = new ExpiringColumn(path.columnName, value, timestamp, timeToLive);
@@ -168,7 +168,13 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         addColumn(path.superColumnName, column);
     }
 
-    public void addTombstone(QueryPath path, byte[] localDeletionTime, long timestamp)
+    public void addCounter(QueryPath path, long value)
+    {
+        assert path.columnName != null : path;
+        addColumn(path.superColumnName, new CounterUpdateColumn(path.columnName, value, System.currentTimeMillis()));
+    }
+
+    public void addTombstone(QueryPath path, ByteBuffer localDeletionTime, long timestamp)
     {
         assert path.columnName != null : path;
         addColumn(path.superColumnName, new DeletedColumn(path.columnName, localDeletionTime, timestamp));
@@ -180,12 +186,12 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         addColumn(path.superColumnName, new DeletedColumn(path.columnName, localDeletionTime, timestamp));
     }
 
-    public void addTombstone(byte[] name, int localDeletionTime, long timestamp)
+    public void addTombstone(ByteBuffer name, int localDeletionTime, long timestamp)
     {
         addColumn(null, new DeletedColumn(name, localDeletionTime, timestamp));
     }
 
-    public void addColumn(byte[] superColumnName, Column column)
+    public void addColumn(ByteBuffer superColumnName, Column column)
     {
         IColumn c;
         if (superColumnName == null)
@@ -212,36 +218,34 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     */
     public void addColumn(IColumn column)
     {
-        byte[] name = column.name();
-        IColumn oldColumn = columns.putIfAbsent(name, column);
-        if (oldColumn != null)
+        ByteBuffer name = column.name();
+        IColumn oldColumn;
+        while ((oldColumn = columns.putIfAbsent(name, column)) != null)
         {
             if (oldColumn instanceof SuperColumn)
             {
                 ((SuperColumn) oldColumn).putColumn(column);
+                break;  // Delegated to SuperColumn
             }
             else
             {
                 // calculate reconciled col from old (existing) col and new col
                 IColumn reconciledColumn = column.reconcile(oldColumn);
-                while (!columns.replace(name, oldColumn, reconciledColumn))
-                {
-                    // if unable to replace, then get updated old (existing) col
-                    oldColumn = columns.get(name);
-                    // re-calculate reconciled col from updated old col and original new col
-                    reconciledColumn = column.reconcile(oldColumn);
-                    // try to re-update value, again
-                }
+                if (columns.replace(name, oldColumn, reconciledColumn))
+                    break;
+
+                // We failed to replace column due to a concurrent update or a concurrent removal. Keep trying.
+                // (Currently, concurrent removal should not happen (only updates), but let us support that anyway.)
             }
         }
     }
 
-    public IColumn getColumn(byte[] name)
+    public IColumn getColumn(ByteBuffer name)
     {
         return columns.get(name);
     }
 
-    public SortedSet<byte[]> getColumnNames()
+    public SortedSet<ByteBuffer> getColumnNames()
     {
         return columns.keySet();
     }
@@ -256,12 +260,12 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         return columns.descendingMap().values();
     }
 
-    public Map<byte[], IColumn> getColumnsMap()
+    public Map<ByteBuffer, IColumn> getColumnsMap()
     {
         return columns;
     }
 
-    public void remove(byte[] columnName)
+    public void remove(ByteBuffer columnName)
     {
         columns.remove(columnName);
     }
@@ -299,12 +303,12 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         // (don't need to worry about cfNew containing IColumns that are shadowed by
         // the delete tombstone, since cfNew was generated by CF.resolve, which
         // takes care of those for us.)
-        Map<byte[], IColumn> columns = cfComposite.getColumnsMap();
-        Set<byte[]> cNames = columns.keySet();
-        for (byte[] cName : cNames)
+        Map<ByteBuffer, IColumn> columns = cfComposite.getColumnsMap();
+        for (Map.Entry<ByteBuffer, IColumn> entry : columns.entrySet())
         {
+            ByteBuffer cName = entry.getKey();
             IColumn columnInternal = this.columns.get(cName);
-            IColumn columnExternal = columns.get(cName);
+            IColumn columnExternal = entry.getValue();
             if (columnInternal == null)
             {
                 cfDiff.addColumn(columnExternal);
@@ -353,30 +357,21 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     {
         StringBuilder sb = new StringBuilder("ColumnFamily(");
         CFMetaData cfm = metadata();
-        sb.append(cfm == null ? "-deleted-" : cfm.cfName);
+        sb.append(cfm == null ? "<anonymous>" : cfm.cfName);
 
         if (isMarkedForDelete())
-            sb.append(" -deleted at " + getMarkedForDeleteAt() + "-");
+            sb.append(" -deleted at ").append(getMarkedForDeleteAt()).append("-");
 
         sb.append(" [").append(getComparator().getColumnsString(getSortedColumns())).append("])");
         return sb.toString();
     }
 
-    public static byte[] digest(ColumnFamily cf)
+    public static ByteBuffer digest(ColumnFamily cf)
     {
-        MessageDigest digest;
-        try
-        {
-            digest = MessageDigest.getInstance("MD5");
-        }
-        catch (NoSuchAlgorithmException e)
-        {
-            throw new AssertionError(e);
-        }
+        MessageDigest digest = FBUtilities.threadLocalMD5Digest();
         if (cf != null)
             cf.updateDigest(digest);
-
-        return digest.digest();
+        return ByteBuffer.wrap(digest.digest());
     }
 
     public void updateDigest(MessageDigest digest)
@@ -395,7 +390,7 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         return localDeletionTime.get();
     }
 
-    public static AbstractType getComparatorFor(String table, String columnFamilyName, byte[] superColumnName)
+    public static AbstractType getComparatorFor(String table, String columnFamilyName, ByteBuffer superColumnName)
     {
         return superColumnName == null
                ? DatabaseDescriptor.getComparator(table, columnFamilyName)
@@ -407,14 +402,6 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         if (cf1 == null)
             return cf2;
         return cf1.diff(cf2);
-    }
-
-    public static ColumnFamily resolve(ColumnFamily cf1, ColumnFamily cf2)
-    {
-        if (cf1 == null)
-            return cf2;
-        cf1.resolve(cf2);
-        return cf1;
     }
 
     public void resolve(ColumnFamily cf)
@@ -433,5 +420,31 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     public Iterator<IColumn> iterator()
     {
         return columns.values().iterator();
+    }
+
+    public long serializedSize()
+    {
+        int size = boolSize_ // bool
+                 + intSize_ // id
+                 + intSize_ // local deletion time
+                 + longSize_ // client deltion time
+                 + intSize_; // column count
+        for (IColumn column : columns.values())
+            size += column.serializedSize();
+        return size;
+    }
+
+    /**
+     * Goes over all columns and check the fields are valid (as far as we can
+     * tell).
+     * This is used to detect corruption after deserialization.
+     */
+    public void validateColumnFields() throws MarshalException
+    {
+        CFMetaData metadata = metadata();
+        for (IColumn column : getSortedColumns())
+        {
+            column.validateFields(metadata);
+        }
     }
 }

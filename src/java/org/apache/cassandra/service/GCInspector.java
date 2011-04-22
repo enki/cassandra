@@ -26,33 +26,28 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import javax.management.JMX;
 import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
-import com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.IExecutorMBean;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.CompactionManager;
-import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.utils.StatusLogger;
 
 public class GCInspector
 {
-    public static final GCInspector instance = new GCInspector();
-
     private static final Logger logger = LoggerFactory.getLogger(GCInspector.class);
     final static long INTERVAL_IN_MS = 1000;
     final static long MIN_DURATION = 200;
     final static long MIN_DURATION_TPSTATS = 1000;
+    
+    public static final GCInspector instance = new GCInspector();
 
     private HashMap<String, Long> gctimes = new HashMap<String, Long>();
-    private final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
 
     List<Object> beans = new ArrayList<Object>(); // these are instances of com.sun.management.GarbageCollectorMXBean
+    private volatile boolean cacheSizesReduced;
 
     public GCInspector()
     {
@@ -94,13 +89,13 @@ public class GCInspector
         {
             public void run()
             {
-                logIntervalGCStats();
+                logGCResults();
             }
         };
         StorageService.scheduledTasks.scheduleWithFixedDelay(t, INTERVAL_IN_MS, INTERVAL_IN_MS, TimeUnit.MILLISECONDS);
     }
 
-    private void logIntervalGCStats()
+    private void logGCResults()
     {
         for (Object gc : beans)
         {
@@ -128,69 +123,38 @@ public class GCInspector
             }
 
             String st = String.format("GC for %s: %s ms, %s reclaimed leaving %s used; max is %s",
-                    gcw.getName(), gcw.getDuration(), previousMemoryUsed - memoryUsed, memoryUsed, memoryMax);
+                                      gcw.getName(), gcw.getDuration(), previousMemoryUsed - memoryUsed, memoryUsed, memoryMax);
             if (gcw.getDuration() > MIN_DURATION)                          
                 logger.info(st);
             else if (logger.isDebugEnabled())
                 logger.debug(st);
+
             if (gcw.getDuration() > MIN_DURATION_TPSTATS)
+                StatusLogger.log();
+
+            // if we just finished a full collection and we're still using a lot of memory, try to reduce the pressure
+            if (gcw.getName().equals("ConcurrentMarkSweep"))
             {
-                try
+                double usage = (double) memoryUsed / memoryMax;
+
+                if (memoryUsed > DatabaseDescriptor.getReduceCacheSizesAt() * memoryMax && !cacheSizesReduced)
                 {
-                    logStats();
+                    cacheSizesReduced = true;
+                    logger.warn("Heap is " + usage + " full.  You may need to reduce memtable and/or cache sizes.  Cassandra is now reducing cache sizes to free up memory.  Adjust reduce_cache_sizes_at threshold in cassandra.yaml if you don't want Cassandra to do this automatically");
+                    StorageService.instance.reduceCacheSizes();
                 }
-                catch (MalformedObjectNameException e)
+
+                if (memoryUsed > DatabaseDescriptor.getFlushLargestMemtablesAt() * memoryMax)
                 {
-                    throw new RuntimeException(e);
+                    logger.warn("Heap is " + usage + " full.  You may need to reduce memtable and/or cache sizes.  Cassandra will now flush up to the two largest memtables to free up memory.  Adjust flush_largest_memtables_at threshold in cassandra.yaml if you don't want Cassandra to do this automatically");
+                    StorageService.instance.flushLargestMemtables();
                 }
             }
         }
     }
 
-    private void logStats() throws MalformedObjectNameException
-    {
-        // everything from o.a.c.concurrent
-        logger.info(String.format("%-25s%10s%10s", "Pool Name", "Active", "Pending"));
-        Set<ObjectName> requests = server.queryNames(new ObjectName("org.apache.cassandra.request:type=*"), null);
-        Set<ObjectName> internal = server.queryNames(new ObjectName("org.apache.cassandra.internal:type=*"), null);
-        for (ObjectName objectName : Iterables.concat(requests, internal))
-        {
-            String poolName = objectName.getKeyProperty("type");
-            IExecutorMBean threadPoolProxy = JMX.newMBeanProxy(server, objectName, IExecutorMBean.class);
-            logger.info(String.format("%-25s%10s%10s",
-                                      poolName, threadPoolProxy.getActiveCount(), threadPoolProxy.getPendingTasks()));
-        }
-        // one offs
-        logger.info(String.format("%-25s%10s%10s",
-                                  "CompactionManager", "n/a", CompactionManager.instance.getPendingTasks()));
-        int pendingCommands = 0;
-        for (int n : MessagingService.instance.getCommandPendingTasks().values())
-        {
-            pendingCommands += n;
-        }
-        int pendingResponses = 0;
-        for (int n : MessagingService.instance.getResponsePendingTasks().values())
-        {
-            pendingResponses += n;
-        }
-        logger.info(String.format("%-25s%10s%10s",
-                                  "MessagingService", "n/a", pendingCommands + "," + pendingResponses));
-
-        // per-CF stats
-        logger.info(String.format("%-25s%20s%20s%20s", "ColumnFamily", "Memtable ops,data", "Row cache size/cap", "Key cache size/cap"));
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
-        {
-            logger.info(String.format("%-25s%20s%20s%20s",
-                                      cfs.table.name + "." + cfs.columnFamily,
-                                      cfs.getMemtableColumnsCount() + "," + cfs.getMemtableDataSize(),
-                                      cfs.getRowCacheSize() + "/" + cfs.getRowCacheCapacity(),
-                                      cfs.getKeyCacheSize() + "/" + cfs.getKeyCacheCapacity()));
-        }
-    }
-    
-    
     // wrapper for sun class. this enables other jdks to compile this class.
-    private final class SunGcWrapper
+    private static final class SunGcWrapper
     {
         
         private Map<String, MemoryUsage> usageBeforeGc = null;
@@ -266,5 +230,4 @@ public class GCInspector
             return usageBeforeGc == null;
         }
     }
-    
 }

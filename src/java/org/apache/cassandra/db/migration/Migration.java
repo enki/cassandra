@@ -18,7 +18,7 @@
 
 package org.apache.cassandra.db.migration;
 
-import java.io.*;
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -28,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
+import org.apache.cassandra.net.MessagingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,15 +38,13 @@ import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.SerDeUtils;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
-
-import static com.google.common.base.Charsets.UTF_8;
 
 /**
  * A migration represents a single metadata mutation (cf dropped, added, etc.).  Migrations can be applied locally, or
@@ -71,8 +70,8 @@ public abstract class Migration
     public static final String NAME_VALIDATOR_REGEX = "\\w+";
     public static final String MIGRATIONS_CF = "Migrations";
     public static final String SCHEMA_CF = "Schema";
-    public static final byte[] MIGRATIONS_KEY = "Migrations Key".getBytes(UTF_8);
-    public static final byte[] LAST_MIGRATION_KEY = "Last Migration".getBytes(UTF_8);
+    public static final ByteBuffer MIGRATIONS_KEY = ByteBufferUtil.bytes("Migrations Key");
+    public static final ByteBuffer LAST_MIGRATION_KEY = ByteBufferUtil.bytes("Last Migration");
     
     protected RowMutation rm;
     protected UUID newVersion;
@@ -82,17 +81,17 @@ public abstract class Migration
     protected transient boolean clientMode;
     
     /** Subclasses must have a matching constructor */
-    protected Migration() { /* pass */ }
-
-    Migration(UUID newVersion, UUID lastVersion)
+    protected Migration() 
     {
-        this.newVersion = newVersion;
-        this.lastVersion = lastVersion;
         clientMode = StorageService.instance.isClientMode();
     }
 
-    /** override this to perform logic before writing the migration or applying it.  defaults to nothing. */
-    public void beforeApplyModels() {}
+    Migration(UUID newVersion, UUID lastVersion)
+    {
+        this();
+        this.newVersion = newVersion;
+        this.lastVersion = lastVersion;
+    }
     
     /** apply changes */
     public final void apply() throws IOException, ConfigurationException
@@ -105,21 +104,19 @@ public abstract class Migration
         if (!clientMode)
             rm.apply();
 
-        beforeApplyModels();
-        
         // write migration.
         if (!clientMode)
         {
             long now = System.currentTimeMillis();
-            byte[] buf = serialize();
+            ByteBuffer buf = serialize();
             RowMutation migration = new RowMutation(Table.SYSTEM_TABLE, MIGRATIONS_KEY);
-            migration.add(new QueryPath(MIGRATIONS_CF, null, UUIDGen.decompose(newVersion)), buf, now);
+            migration.add(new QueryPath(MIGRATIONS_CF, null, ByteBuffer.wrap(UUIDGen.decompose(newVersion))), buf, now);
             migration.apply();
             
             // note that we're storing this in the system table, which is not replicated
-            logger.debug("Applying migration " + newVersion.toString());
+            logger.info("Applying migration {} {}", newVersion.toString(), toString());
             migration = new RowMutation(Table.SYSTEM_TABLE, LAST_MIGRATION_KEY);
-            migration.add(new QueryPath(SCHEMA_CF, null, LAST_MIGRATION_KEY), UUIDGen.decompose(newVersion), now);
+            migration.add(new QueryPath(SCHEMA_CF, null, LAST_MIGRATION_KEY), ByteBuffer.wrap(UUIDGen.decompose(newVersion)), now);
             migration.apply();
 
             // if we fail here, there will be schema changes in the CL that will get replayed *AFTER* the schema is loaded.
@@ -162,12 +159,15 @@ public abstract class Migration
         if (StorageService.instance.isClientMode())
             return;
         
-        // immediate notification for esiting nodes.
+        // immediate notification for existing nodes.
         MigrationManager.announce(newVersion, Gossiper.instance.getLiveMembers());
-        // this is for notifying nodes as they arrive in the cluster.
-        Gossiper.instance.addLocalApplicationState(ApplicationState.SCHEMA, StorageService.valueFactory.migration(newVersion));
     }
-    
+
+    public final void passiveAnnounce()
+    {
+        MigrationManager.passiveAnnounce(newVersion);
+    }
+
     public static UUID getLastMigrationId()
     {
         DecoratedKey dkey = StorageService.getPartitioner().decorateKey(LAST_MIGRATION_KEY);
@@ -178,7 +178,7 @@ public abstract class Migration
         if (cf == null || cf.getColumnNames().size() == 0)
             return null;
         else
-            return UUIDGen.makeType1UUID(cf.getColumn(LAST_MIGRATION_KEY).value());
+            return UUIDGen.getUUID(cf.getColumn(LAST_MIGRATION_KEY).value());
     }
     
     /** keep in mind that applyLive might happen on another machine */
@@ -218,17 +218,17 @@ public abstract class Migration
         long now = System.currentTimeMillis();
         // add a column for each keyspace
         for (KSMetaData ksm : ksms)
-            rm.add(new QueryPath(SCHEMA_CF, null, ksm.name.getBytes(UTF_8)), SerDeUtils.serialize(ksm.deflate()), now);
+            rm.add(new QueryPath(SCHEMA_CF, null, ByteBufferUtil.bytes(ksm.name)), SerDeUtils.serialize(ksm.deflate()), now);
         // add the schema
         rm.add(new QueryPath(SCHEMA_CF,
                              null,
                              DefsTable.DEFINITION_SCHEMA_COLUMN_NAME),
-                             org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
+                             ByteBufferUtil.bytes(org.apache.cassandra.db.migration.avro.KsDef.SCHEMA$.toString()),
                              now);
         return rm;
     }
         
-    public byte[] serialize() throws IOException
+    public ByteBuffer serialize() throws IOException
     {
         // super deflate
         org.apache.cassandra.db.migration.avro.Migration mi = new org.apache.cassandra.db.migration.avro.Migration();
@@ -241,7 +241,7 @@ public abstract class Migration
         DataOutputBuffer dob = new DataOutputBuffer();
         try
         {
-            RowMutation.serializer().serialize(rm, dob);
+            RowMutation.serializer().serialize(rm, dob, MessagingService.version_);
         }
         catch (IOException e)
         {
@@ -256,7 +256,7 @@ public abstract class Migration
         return SerDeUtils.serializeWithSchema(mi);
     }
 
-    public static Migration deserialize(byte[] bytes) throws IOException
+    public static Migration deserialize(ByteBuffer bytes, int version) throws IOException
     {
         // deserialize
         org.apache.cassandra.db.migration.avro.Migration mi = SerDeUtils.deserializeWithSchema(bytes, new org.apache.cassandra.db.migration.avro.Migration());
@@ -276,11 +276,11 @@ public abstract class Migration
         }
         
         // super inflate
-        migration.lastVersion = UUIDGen.makeType1UUID(mi.old_version.bytes());
-        migration.newVersion = UUIDGen.makeType1UUID(mi.new_version.bytes());
+        migration.lastVersion = UUIDGen.getUUID(ByteBuffer.wrap(mi.old_version.bytes()));
+        migration.newVersion = UUIDGen.getUUID(ByteBuffer.wrap(mi.new_version.bytes()));
         try
         {
-            migration.rm = RowMutation.serializer().deserialize(SerDeUtils.createDataInputStream(mi.row_mutation));
+            migration.rm = RowMutation.serializer().deserialize(SerDeUtils.createDataInputStream(mi.row_mutation), version);
         }
         catch (IOException e)
         {
@@ -297,14 +297,14 @@ public abstract class Migration
         DecoratedKey dkey = StorageService.getPartitioner().decorateKey(MIGRATIONS_KEY);
         Table defs = Table.open(Table.SYSTEM_TABLE);
         ColumnFamilyStore cfStore = defs.getColumnFamilyStore(Migration.MIGRATIONS_CF);
-        QueryFilter filter = QueryFilter.getSliceFilter(dkey, new QueryPath(MIGRATIONS_CF), UUIDGen.decompose(start), UUIDGen.decompose(end), false, 1000);
+        QueryFilter filter = QueryFilter.getSliceFilter(dkey, new QueryPath(MIGRATIONS_CF), ByteBuffer.wrap(UUIDGen.decompose(start)), ByteBuffer.wrap(UUIDGen.decompose(end)), false, 1000);   
         ColumnFamily cf = cfStore.getColumnFamily(filter);
         return cf.getSortedColumns();
     }
     
-    public static byte[] toUTF8Bytes(UUID version)
+    public static ByteBuffer toUTF8Bytes(UUID version)
     {
-        return version.toString().getBytes(UTF_8);
+        return ByteBufferUtil.bytes(version.toString());
     }
     
     public static boolean isLegalName(String s)

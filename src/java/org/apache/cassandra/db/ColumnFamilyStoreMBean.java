@@ -18,10 +18,11 @@
 
 package org.apache.cassandra.db;
 
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+
+import org.apache.cassandra.config.ConfigurationException;
 
 /**
  * The MBean interface for ColumnFamilyStore
@@ -39,14 +40,14 @@ public interface ColumnFamilyStoreMBean
      * 
      * @return The size in bytes.
      */
-    public int getMemtableDataSize();
+    public long getMemtableDataSize();
     
     /**
      * Returns the total number of columns present in the memtable.
      * 
      * @return The number of columns.
      */
-    public int getMemtableColumnsCount();
+    public long getMemtableColumnsCount();
     
     /**
      * Returns the number of times that a flush has resulted in the
@@ -147,9 +148,15 @@ public interface ColumnFamilyStoreMBean
     public void forceMajorCompaction() throws ExecutionException, InterruptedException;
 
     /**
+     * invalidate the key cache; for use after invalidating row cache
+     */
+    public void invalidateKeyCache();
+
+    /**
      * invalidate the row cache; for use after bulk loading via BinaryMemtable
      */
     public void invalidateRowCache();
+
 
     /**
      * return the size of the smallest compacted row
@@ -201,4 +208,30 @@ public interface ColumnFamilyStoreMBean
      * Disable automatic compaction.
      */
     public void disableAutoCompaction();
+
+    public int getMemtableFlushAfterMins();
+    public void setMemtableFlushAfterMins(int time);
+
+    public int getMemtableThroughputInMB();
+    public void setMemtableThroughputInMB(int size) throws ConfigurationException;
+
+    public double getMemtableOperationsInMillions();
+    public void setMemtableOperationsInMillions(double ops) throws ConfigurationException;
+
+    public long estimateKeys();
+
+    public long[] getEstimatedRowSizeHistogram();
+    public long[] getEstimatedColumnCountHistogram();
+
+    /**
+     * Returns a list of the names of the built column indexes for current store
+     * @return list of the index names
+     */
+    public List<String> getBuiltIndexes();
+
+    public int getRowCacheSavePeriodInSeconds();
+    public void setRowCacheSavePeriodInSeconds(int rcspis);
+
+    public int getKeyCacheSavePeriodInSeconds();
+    public void setKeyCacheSavePeriodInSeconds(int kcspis);
 }

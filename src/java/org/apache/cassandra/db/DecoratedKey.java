@@ -18,12 +18,13 @@
 
 package org.apache.cassandra.db;
 
+import java.nio.ByteBuffer;
 import java.util.Comparator;
 
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * Represents a decorated key, handy for certain operations
@@ -47,9 +48,9 @@ public class DecoratedKey<T extends Token> implements Comparable<DecoratedKey>
     };
 
     public final T token;
-    public final byte[] key;
+    public final ByteBuffer key;
 
-    public DecoratedKey(T token, byte[] key)
+    public DecoratedKey(T token, ByteBuffer key)
     {
         super();
         assert token != null;
@@ -90,7 +91,7 @@ public class DecoratedKey<T extends Token> implements Comparable<DecoratedKey>
     @Override
     public String toString()
     {
-        String keystring = key == null ? "null" : FBUtilities.bytesToHex(key);
+        String keystring = key == null ? "null" : ByteBufferUtil.bytesToHex(key);
         return "DecoratedKey(" + token + ", " + keystring + ")";
     }
 }

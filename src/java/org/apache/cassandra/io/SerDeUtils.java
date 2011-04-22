@@ -24,19 +24,18 @@ import java.nio.ByteBuffer;
 import java.util.Collections;
 
 import org.apache.avro.Schema;
-import org.apache.avro.io.BinaryDecoder;
-import org.apache.avro.io.BinaryEncoder;
-import org.apache.avro.io.Decoder;
-import org.apache.avro.io.DecoderFactory;
-import org.apache.avro.ipc.ByteBufferInputStream;
 import org.apache.avro.generic.GenericArray;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.io.BinaryDecoder;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.ipc.ByteBufferInputStream;
 import org.apache.avro.specific.SpecificDatumReader;
 import org.apache.avro.specific.SpecificDatumWriter;
 import org.apache.avro.specific.SpecificRecord;
 import org.apache.avro.util.Utf8;
-
 import org.apache.cassandra.io.util.OutputBuffer;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * Static serialization/deserialization utility functions, intended to eventually replace ICompactSerializers.
@@ -46,14 +45,6 @@ public final class SerDeUtils
     // unbuffered decoders
     private final static DecoderFactory DIRECT_DECODERS = new DecoderFactory().configureDirectDecoder(true);
 
-    public static byte[] copy(ByteBuffer buff)
-    {
-        byte[] bytes = new byte[buff.remaining()];
-        buff.get(bytes);
-        buff.rewind();
-        return bytes;
-    }
-
 	/**
      * Deserializes a single object based on the given Schema.
      * @param writer writer's schema
@@ -61,9 +52,9 @@ public final class SerDeUtils
      * @param ob An empty object to deserialize into (must not be null).
      * @throws IOException
      */
-    public static <T extends SpecificRecord> T deserialize(Schema writer, byte[] bytes, T ob) throws IOException
+    public static <T extends SpecificRecord> T deserialize(Schema writer, ByteBuffer bytes, T ob) throws IOException
     {
-        BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(bytes, null);
+        BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(ByteBufferUtil.getArray(bytes), null);
         SpecificDatumReader<T> reader = new SpecificDatumReader<T>(writer);
         reader.setExpected(ob.getSchema());
         return reader.read(ob, dec);
@@ -73,14 +64,14 @@ public final class SerDeUtils
      * Serializes a single object.
      * @param o Object to serialize
      */
-    public static <T extends SpecificRecord> byte[] serialize(T o) throws IOException
+    public static <T extends SpecificRecord> ByteBuffer serialize(T o) throws IOException
     {
         OutputBuffer buff = new OutputBuffer();
         BinaryEncoder enc = new BinaryEncoder(buff);
         SpecificDatumWriter<T> writer = new SpecificDatumWriter<T>(o.getSchema());
         writer.write(o, enc);
         enc.flush();
-        return buff.asByteArray();
+        return ByteBuffer.wrap(buff.asByteArray());
     }
 
 	/**
@@ -89,13 +80,13 @@ public final class SerDeUtils
      * @param bytes Array to deserialize from
      * @throws IOException
      */
-    public static <T extends SpecificRecord> T deserializeWithSchema(byte[] bytes, T ob) throws IOException
+    public static <T extends SpecificRecord> T deserializeWithSchema(ByteBuffer bytes, T ob) throws IOException
     {
-        BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(bytes, null);
+        BinaryDecoder dec = DIRECT_DECODERS.createBinaryDecoder(ByteBufferUtil.getArray(bytes), null);
         Schema writer = Schema.parse(dec.readString(new Utf8()).toString());
         SpecificDatumReader<T> reader = new SpecificDatumReader<T>(writer);
         reader.setExpected(ob.getSchema());
-        return new SpecificDatumReader<T>(writer).read(ob, dec);
+        return reader.read(ob, dec);
     }
 
 	/**
@@ -103,7 +94,7 @@ public final class SerDeUtils
      * more efficient to store the Schema independently.
      * @param o Object to serialize
      */
-    public static <T extends SpecificRecord> byte[] serializeWithSchema(T o) throws IOException
+    public static <T extends SpecificRecord> ByteBuffer serializeWithSchema(T o) throws IOException
     {
         OutputBuffer buff = new OutputBuffer();
         BinaryEncoder enc = new BinaryEncoder(buff);
@@ -111,7 +102,7 @@ public final class SerDeUtils
         SpecificDatumWriter<T> writer = new SpecificDatumWriter<T>(o.getSchema());
         writer.write(o, enc);
         enc.flush();
-        return buff.asByteArray();
+        return ByteBuffer.wrap(buff.asByteArray());
     }
 
     /**

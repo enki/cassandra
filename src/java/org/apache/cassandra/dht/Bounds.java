@@ -21,7 +21,8 @@ package org.apache.cassandra.dht;
  */
 
 
-import java.util.*;
+import java.util.Collections;
+import java.util.List;
 
 import org.apache.cassandra.service.StorageService;
 
@@ -55,7 +56,6 @@ public class Bounds extends AbstractBounds
         return Collections.<AbstractBounds>singletonList(this);
     }
 
-    @Override
     public boolean equals(Object o)
     {
         if (!(o instanceof Bounds))

@@ -26,6 +26,7 @@ import java.util.UUID;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.ICompactSerializer;
+import org.apache.cassandra.utils.FBUtilities;
 
 
 /**
@@ -53,6 +54,7 @@ public class VersionedValue implements Comparable<VersionedValue>
     public final static String STATUS_NORMAL = "NORMAL";
     public final static String STATUS_LEAVING = "LEAVING";
     public final static String STATUS_LEFT = "LEFT";
+    public final static String STATUS_MOVING = "MOVING";
 
     public final static String REMOVING_TOKEN = "removing";
     public final static String REMOVED_TOKEN = "removed";
@@ -75,6 +77,12 @@ public class VersionedValue implements Comparable<VersionedValue>
     public int compareTo(VersionedValue value)
     {
         return this.version - value.version;
+    }
+
+    @Override
+    public String toString()
+    {
+        return "Value(" + value + "," + version + ")";
     }
 
     public static class VersionedValueFactory
@@ -116,6 +124,11 @@ public class VersionedValue implements Comparable<VersionedValue>
             return new VersionedValue(VersionedValue.STATUS_LEFT + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token));
         }
 
+        public VersionedValue moving(Token token)
+        {
+            return new VersionedValue(VersionedValue.STATUS_MOVING + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token));
+        }
+
         public VersionedValue removingNonlocal(Token localToken, Token token)
         {
             return new VersionedValue(VersionedValue.STATUS_NORMAL
@@ -132,21 +145,35 @@ public class VersionedValue implements Comparable<VersionedValue>
                                         + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token));
         }
 
+        public VersionedValue datacenter(String dcId)
+        {
+            return new VersionedValue(dcId);
+        }
+
+        public VersionedValue rack(String rackId)
+        {
+            return new VersionedValue(rackId);
+        }
+
+        public VersionedValue releaseVersion()
+        {
+            return new VersionedValue(FBUtilities.getReleaseVersionString());
+        }
     }
 
     private static class VersionedValueSerializer implements ICompactSerializer<VersionedValue>
     {
-        public void serialize(VersionedValue value, DataOutputStream dos) throws IOException
+        public void serialize(VersionedValue value, DataOutputStream dos, int version) throws IOException
         {
             dos.writeUTF(value.value);
             dos.writeInt(value.version);
         }
 
-        public VersionedValue deserialize(DataInputStream dis) throws IOException
+        public VersionedValue deserialize(DataInputStream dis, int version) throws IOException
         {
             String value = dis.readUTF();
-            int version = dis.readInt();
-            return new VersionedValue(value, version);
+            int valVersion = dis.readInt();
+            return new VersionedValue(value, valVersion);
         }
     }
 }

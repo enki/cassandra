@@ -18,36 +18,33 @@
 
 package org.apache.cassandra.streaming;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SocketChannel;
-import java.io.*;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.Table;
-import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.Pair;
 
 public class IncomingStreamReader
 {
     private static final Logger logger = LoggerFactory.getLogger(IncomingStreamReader.class);
 
-    private final PendingFile localFile;
-    private final PendingFile remoteFile;
+    protected final PendingFile localFile;
+    protected final PendingFile remoteFile;
     private final SocketChannel socketChannel;
-    private final StreamInSession session;
+    protected final StreamInSession session;
 
-    public IncomingStreamReader(StreamHeader header, SocketChannel socketChannel) throws IOException
+    public IncomingStreamReader(StreamHeader header, Socket socket) throws IOException
     {
-        this.socketChannel = socketChannel;
-        InetSocketAddress remoteAddress = (InetSocketAddress)socketChannel.socket().getRemoteSocketAddress();
-
+        this.socketChannel = socket.getChannel();
+        InetSocketAddress remoteAddress = (InetSocketAddress)socket.getRemoteSocketAddress();
         session = StreamInSession.get(remoteAddress.getAddress(), header.sessionId);
         session.addFiles(header.pendingFiles);
         // set the current file we are streaming so progress shows up in jmx
@@ -66,7 +63,7 @@ public class IncomingStreamReader
         session.closeIfFinished();
     }
 
-    private void readFile() throws IOException
+    protected void readFile() throws IOException
     {
         if (logger.isDebugEnabled())
         {
@@ -85,10 +82,7 @@ public class IncomingStreamReader
                 long bytesRead = 0;
                 while (bytesRead < length)
                 {
-                    long toRead = Math.min(FileStreamTask.CHUNK_SIZE, length - bytesRead);
-                    long lastRead = fc.transferFrom(socketChannel, offset + bytesRead, toRead);
-                    bytesRead += lastRead;
-                    remoteFile.progress += lastRead;
+                    bytesRead = readnwrite(length, bytesRead, offset, fc);
                 }
                 offset += length;
             }
@@ -108,5 +102,19 @@ public class IncomingStreamReader
         }
 
         session.finished(remoteFile, localFile);
+    }
+
+    protected long readnwrite(long length, long bytesRead, long offset, FileChannel fc) throws IOException
+    {
+        long toRead = Math.min(FileStreamTask.CHUNK_SIZE, length - bytesRead);
+        long lastRead = fc.transferFrom(socketChannel, offset + bytesRead, toRead);
+	// if the other side fails, we will not get an exception, but instead transferFrom will constantly return 0 byte read
+	// and we would thus enter an infinite loop. So intead, if no bytes are tranferred we assume the other side is dead and 
+	// raise an exception (that will be catch belove and 'the right thing' will be done).
+	if (lastRead == 0)
+		throw new IOException("Transfer failed for remote file " + remoteFile);
+        bytesRead += lastRead;
+        remoteFile.progress += lastRead;
+        return bytesRead;
     }
 }

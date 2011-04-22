@@ -21,32 +21,34 @@ package org.apache.cassandra.db;
 import java.io.File;
 import java.io.IOError;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.dht.LocalToken;
-import org.apache.cassandra.io.ICompactionInfo;
+import org.apache.cassandra.io.CompactionInfo;
+import org.apache.cassandra.io.CompactionType;
 import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.SSTableDeletingReference;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.NodeId;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 public class Table
@@ -58,22 +60,26 @@ public class Table
 
     /**
      * accesses to CFS.memtable should acquire this for thread safety.
-     * only Table.maybeSwitchMemtable should aquire the writeLock; see that method for the full explanation.
+     * Table.maybeSwitchMemtable should aquire the writeLock; see that method for the full explanation.
+     *
+     * (Enabling fairness in the RRWL is observed to decrease throughput, so we leave it off.)
      */
-    static final ReentrantReadWriteLock flusherLock = new ReentrantReadWriteLock(true);
+    static final ReentrantReadWriteLock switchLock = new ReentrantReadWriteLock();
 
-    // This is a result of pushing down the point in time when storage directories get created.  It used to happen in
-    // CassandraDaemon, but it is possible to call Table.open without a running daemon, so it made sense to ensure
-    // proper directories here.
-    static
+    // It is possible to call Table.open without a running daemon, so it makes sense to ensure
+    // proper directories here as well as in CassandraDaemon.
+    static 
     {
-        try
+        if (!StorageService.instance.isClientMode()) 
         {
-            DatabaseDescriptor.createAllDirectories();
-        }
-        catch (IOException ex)
-        {
-            throw new RuntimeException(ex);
+            try
+            {
+                DatabaseDescriptor.createAllDirectories();
+            }
+            catch (IOException ex)
+            {
+                throw new IOError(ex);
+            }
         }
     }
 
@@ -83,9 +89,10 @@ public class Table
     /* Table name. */
     public final String name;
     /* ColumnFamilyStore per column family */
-    public final Map<Integer, ColumnFamilyStore> columnFamilyStores = new HashMap<Integer, ColumnFamilyStore>(); // TODO make private again
+    private final Map<Integer, ColumnFamilyStore> columnFamilyStores = new ConcurrentHashMap<Integer, ColumnFamilyStore>();
     private final Object[] indexLocks;
     private ScheduledFuture<?> flushTask;
+    private volatile AbstractReplicationStrategy replicationStrategy;
 
     public static Table open(String table)
     {
@@ -105,7 +112,7 @@ public class Table
 
                     //table has to be constructed and in the cache before cacheRow can be called
                     for (ColumnFamilyStore cfs : tableInstance.getColumnFamilyStores())
-                        cfs.initRowCache();
+                        cfs.initCaches();
                 }
             }
         }
@@ -137,19 +144,45 @@ public class Table
         Integer id = CFMetaData.getId(name, cfName);
         if (id == null)
             throw new IllegalArgumentException(String.format("Unknown table/cf pair (%s.%s)", name, cfName));
-        return columnFamilyStores.get(id);
+        return getColumnFamilyStore(id);
+    }
+
+    public ColumnFamilyStore getColumnFamilyStore(Integer id)
+    {
+        ColumnFamilyStore cfs = columnFamilyStores.get(id);
+        if (cfs == null)
+            throw new IllegalArgumentException("Unknown CF " + id);
+        return cfs;
     }
 
     /**
      * Do a cleanup of keys that do not belong locally.
      */
-    public void forceCleanup() throws IOException, ExecutionException, InterruptedException
+    public void forceCleanup(NodeId.OneShotRenewer renewer) throws IOException, ExecutionException, InterruptedException
     {
         if (name.equals(SYSTEM_TABLE))
-            throw new RuntimeException("Cleanup of the system table is neither necessary nor wise");
+            throw new UnsupportedOperationException("Cleanup of the system table is neither necessary nor wise");
 
-        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
-            cfStore.forceCleanup();
+        // Sort the column families in order of SSTable size, so cleanup of smaller CFs
+        // can free up space for larger ones
+        List<ColumnFamilyStore> sortedColumnFamilies = new ArrayList<ColumnFamilyStore>(columnFamilyStores.values());
+        Collections.sort(sortedColumnFamilies, new Comparator<ColumnFamilyStore>()
+        {
+            // Compare first on size and, if equal, sort by name (arbitrary & deterministic).
+            public int compare(ColumnFamilyStore cf1, ColumnFamilyStore cf2)
+            {
+                long diff = (cf1.getTotalDiskSpaceUsed() - cf2.getTotalDiskSpaceUsed());
+                if (diff > 0)
+                    return 1;
+                if (diff < 0)
+                    return -1;
+                return cf1.columnFamily.compareTo(cf2.columnFamily);
+            }
+        });
+
+        // Cleanup in sorted order to free up space for the larger ones
+        for (ColumnFamilyStore cfs : sortedColumnFamilies)
+            cfs.forceCleanup(renewer);
     }
 
     /**
@@ -158,10 +191,8 @@ public class Table
      * @param clientSuppliedName the tag associated with the name of the snapshot.  This
      *                           value can be null.
      */
-    public void snapshot(String clientSuppliedName)
+    public void snapshot(String snapshotName)
     {
-        String snapshotName = getTimestampedSnapshotName(clientSuppliedName);
-
         for (ColumnFamilyStore cfStore : columnFamilyStores.values())
         {
             cfStore.snapshot(snapshotName);
@@ -182,15 +213,36 @@ public class Table
         return snapshotName;
     }
 
+    /**
+     * Clear snapshots for this table. If no tag is given we will clear all
+     * snapshots
+     *
+     * @param snapshotName the user supplied snapshot name
+     * @return true if the snapshot exists
+     */
+    public boolean snapshotExists(String snapshotName)
+    {
+        for (String dataDirPath : DatabaseDescriptor.getAllDataFileLocations())
+        {
+            String snapshotPath = dataDirPath + File.separator + name + File.separator + SNAPSHOT_SUBDIR_NAME + File.separator + snapshotName;
+            File snapshot = new File(snapshotPath);
+            if (snapshot.exists())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Clear all the snapshots for a given table.
      */
-    public void clearSnapshot() throws IOException
+    public void clearSnapshot(String tag) throws IOException
     {
         for (String dataDirPath : DatabaseDescriptor.getAllDataFileLocations())
         {
-            String snapshotPath = dataDirPath + File.separator + name + File.separator + SNAPSHOT_SUBDIR_NAME;
+            // If tag is empty we will delete the entire snapshot directory
+            String snapshotPath = dataDirPath + File.separator + name + File.separator + SNAPSHOT_SUBDIR_NAME + File.separator + tag;
             File snapshotDir = new File(snapshotPath);
             if (snapshotDir.exists())
             {
@@ -201,16 +253,6 @@ public class Table
         }
     }
     
-    /*
-     * This method is an ADMIN operation to force compaction
-     * of all SSTables on disk. 
-     */
-    public void forceCompaction() throws IOException, ExecutionException, InterruptedException
-    {
-        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
-            CompactionManager.instance.performMajor(cfStore);
-    }
-
     /**
      * @return A list of open SSTableReaders (TODO: ensure that the caller doesn't modify these).
      */
@@ -225,7 +267,18 @@ public class Table
     private Table(String table)
     {
         name = table;
-        indexLocks = new Object[DatabaseDescriptor.getConcurrentWriters() * 8];
+        KSMetaData ksm = DatabaseDescriptor.getKSMetaData(table);
+        assert ksm != null : "Unknown keyspace " + table;
+        try
+        {
+            createReplicationStrategy(ksm);
+        }
+        catch (ConfigurationException e)
+        {
+            throw new RuntimeException(e);
+        }
+
+        indexLocks = new Object[DatabaseDescriptor.getConcurrentWriters() * 128];
         for (int i = 0; i < indexLocks.length; i++)
             indexLocks[i] = new Object();
         // create data directories.
@@ -234,7 +287,8 @@ public class Table
             try
             {
                 String keyspaceDir = dataDir + File.separator + table;
-                FileUtils.createDirectory(keyspaceDir);
+                if (!StorageService.instance.isClientMode())
+                    FileUtils.createDirectory(keyspaceDir);
     
                 // remove the deprecated streaming directory.
                 File streamingDir = new File(keyspaceDir, "stream");
@@ -253,13 +307,6 @@ public class Table
             initCf(cfm.cfId, cfm.cfName);
         }
 
-        // check 10x as often as the shortest lifetime, so we can exceed all lifetimes by 10% at most
-        int minCheckMs = Integer.MAX_VALUE;
-        for (ColumnFamilyStore cfs : columnFamilyStores.values())
-        {
-            minCheckMs = Math.min(minCheckMs, cfs.metadata.memtableFlushAfterMins * 60 * 1000);
-        }
-
         Runnable runnable = new Runnable()
         {
             public void run()
@@ -270,13 +317,22 @@ public class Table
                 }
             }
         };
-        logger.debug("scheduleWithFixedDelay {} {}", runnable, minCheckMs);
-        
-        if (minCheckMs > 0) {
-            flushTask = StorageService.scheduledTasks.scheduleWithFixedDelay(runnable, minCheckMs, minCheckMs, TimeUnit.MILLISECONDS);
-        }
+        flushTask = StorageService.scheduledTasks.scheduleWithFixedDelay(runnable, 10, 10, TimeUnit.SECONDS);
     }
-    
+
+    public void createReplicationStrategy(KSMetaData ksm) throws ConfigurationException
+    {
+        if (replicationStrategy != null)
+            StorageService.instance.getTokenMetadata().unregister(replicationStrategy);
+            
+        replicationStrategy = AbstractReplicationStrategy.createReplicationStrategy(ksm.name,
+                                                                                    ksm.strategyClass,
+                                                                                    StorageService.instance.getTokenMetadata(),
+                                                                                    DatabaseDescriptor.getEndpointSnitch(),
+                                                                                    ksm.strategyOptions);
+    }
+
+    // best invoked on the compaction mananger.
     public void dropCf(Integer cfId) throws IOException
     {
         assert columnFamilyStores.containsKey(cfId);
@@ -313,15 +369,7 @@ public class Table
                                                                      cfName, cfId, columnFamilyStores.get(cfId));
         columnFamilyStores.put(cfId, ColumnFamilyStore.createColumnFamilyStore(this, cfName));
     }
-    
-    public void reloadCf(Integer cfId) throws IOException
-    {
-        ColumnFamilyStore cfs = columnFamilyStores.remove(cfId);
-        assert cfs != null;
-        unloadCf(cfs);
-        initCf(cfId, cfs.getColumnFamilyName());
-    }
-    
+
     /** basically a combined drop and add */
     public void renameCf(Integer cfId, String newName) throws IOException
     {
@@ -344,18 +392,20 @@ public class Table
      * Once this happens the data associated with the individual column families
      * is also written to the column family store's memtable.
     */
-    public void apply(RowMutation mutation, Object serializedMutation, boolean writeCommitLog) throws IOException
+    public void apply(RowMutation mutation, boolean writeCommitLog) throws IOException
     {
         List<Memtable> memtablesToFlush = Collections.emptyList();
+        if (logger.isDebugEnabled())
+            logger.debug("applying mutation of row {}", ByteBufferUtil.bytesToHex(mutation.key()));
 
         // write the mutation to the commitlog and memtables
-        flusherLock.readLock().lock();
+        switchLock.readLock().lock();
         try
         {
             if (writeCommitLog)
-                CommitLog.instance().add(mutation, serializedMutation);
+                CommitLog.instance.add(mutation);
         
-            DecoratedKey key = StorageService.getPartitioner().decorateKey(mutation.key());
+            DecoratedKey<?> key = StorageService.getPartitioner().decorateKey(mutation.key());
             for (ColumnFamily cf : mutation.getColumnFamilies())
             {
                 ColumnFamilyStore cfs = columnFamilyStores.get(cf.id());
@@ -365,14 +415,23 @@ public class Table
                     continue;
                 }
 
-                SortedSet<byte[]> mutatedIndexedColumns = null;
-                for (byte[] column : cfs.getIndexedColumns())
+                SortedSet<ByteBuffer> mutatedIndexedColumns = null;
+                for (ByteBuffer column : cfs.getIndexedColumns())
                 {
                     if (cf.getColumnNames().contains(column) || cf.isMarkedForDelete())
                     {
                         if (mutatedIndexedColumns == null)
-                            mutatedIndexedColumns = new TreeSet<byte[]>(FBUtilities.byteArrayComparator);
+                            mutatedIndexedColumns = new TreeSet<ByteBuffer>();
                         mutatedIndexedColumns.add(column);
+                        if (logger.isDebugEnabled())
+                        {
+                            // can't actually use validator to print value here, because we overload value
+                            // for deletion timestamp as well (which may not be a well-formed value for the column type)
+                            ByteBuffer value = cf.getColumn(column) == null ? null : cf.getColumn(column).value(); // may be null on row-level deletion
+                            logger.debug(String.format("mutating indexed column %s value %s",
+                                                       cf.getComparator().getString(column),
+                                                       value == null ? "null" : ByteBufferUtil.bytesToHex(value)));
+                        }
                     }
                 }
 
@@ -386,6 +445,7 @@ public class Table
                         // but for indexed data we need to make sure that we're not creating index entries
                         // for obsolete writes.
                         oldIndexedColumns = readCurrentIndexedColumns(key, cfs, mutatedIndexedColumns);
+                        logger.debug("Pre-mutation index row is {}", oldIndexedColumns);
                         ignoreObsoleteMutations(cf, mutatedIndexedColumns, oldIndexedColumns);
                     }
 
@@ -403,7 +463,7 @@ public class Table
         }
         finally
         {
-            flusherLock.readLock().unlock();
+            switchLock.readLock().unlock();
         }
 
         // flush memtables that got filled up outside the readlock (maybeSwitchMemtable acquires writeLock).
@@ -420,7 +480,7 @@ public class Table
         return memtablesToFlush;
     }
 
-    private static void ignoreObsoleteMutations(ColumnFamily cf, SortedSet<byte[]> mutatedIndexedColumns, ColumnFamily oldIndexedColumns)
+    private static void ignoreObsoleteMutations(ColumnFamily cf, SortedSet<ByteBuffer> mutatedIndexedColumns, ColumnFamily oldIndexedColumns)
     {
         if (oldIndexedColumns == null)
             return;
@@ -437,6 +497,8 @@ public class Table
             IColumn resolvedColumn = resolved == null ? null : resolved.getColumn(oldColumn.name());
             if (resolvedColumn != null && resolvedColumn.equals(oldColumn))
             {
+                if (logger.isDebugEnabled())
+                    logger.debug("ignoring obsolete mutation of " + cf.getComparator().getString(oldColumn.name()));
                 cf.remove(oldColumn.name());
                 mutatedIndexedColumns.remove(oldColumn.name());
                 oldIndexedColumns.remove(oldColumn.name());
@@ -444,7 +506,7 @@ public class Table
         }
     }
 
-    private static ColumnFamily readCurrentIndexedColumns(DecoratedKey key, ColumnFamilyStore cfs, SortedSet<byte[]> mutatedIndexedColumns)
+    private static ColumnFamily readCurrentIndexedColumns(DecoratedKey<?> key, ColumnFamilyStore cfs, SortedSet<ByteBuffer> mutatedIndexedColumns)
     {
         QueryFilter filter = QueryFilter.getNamesFilter(key, new QueryPath(cfs.getColumnFamilyName()), mutatedIndexedColumns);
         return cfs.getColumnFamily(filter);
@@ -454,16 +516,16 @@ public class Table
      * removes obsolete index entries and creates new ones for the given row key and mutated columns.
      * @return list of full (index CF) memtables
      */
-    private static List<Memtable> applyIndexUpdates(byte[] key,
+    private static List<Memtable> applyIndexUpdates(ByteBuffer key,
                                                     ColumnFamily cf,
                                                     ColumnFamilyStore cfs,
-                                                    SortedSet<byte[]> mutatedIndexedColumns,
+                                                    SortedSet<ByteBuffer> mutatedIndexedColumns,
                                                     ColumnFamily oldIndexedColumns)
     {
         List<Memtable> fullMemtables = Collections.emptyList();
 
         // add new index entries
-        for (byte[] columnName : mutatedIndexedColumns)
+        for (ByteBuffer columnName : mutatedIndexedColumns)
         {
             IColumn column = cf.getColumn(columnName);
             if (column == null || column.isMarkedForDelete())
@@ -474,12 +536,14 @@ public class Table
             if (column instanceof ExpiringColumn)
             {
                 ExpiringColumn ec = (ExpiringColumn)column;
-                cfi.addColumn(new ExpiringColumn(key, ArrayUtils.EMPTY_BYTE_ARRAY, ec.timestamp, ec.getTimeToLive(), ec.getLocalDeletionTime()));
+                cfi.addColumn(new ExpiringColumn(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, ec.timestamp, ec.getTimeToLive(), ec.getLocalDeletionTime()));
             }
             else
             {
-                cfi.addColumn(new Column(key, ArrayUtils.EMPTY_BYTE_ARRAY, column.timestamp()));
+                cfi.addColumn(new Column(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, column.timestamp()));
             }
+            if (logger.isDebugEnabled())
+                logger.debug("applying index row {}:{}", valueKey, cfi);
             Memtable fullMemtable = cfs.getIndexedColumnFamilyStore(columnName).apply(valueKey, cfi);
             if (fullMemtable != null)
                 fullMemtables = addFullMemtable(fullMemtables, fullMemtable);
@@ -489,9 +553,9 @@ public class Table
         if (oldIndexedColumns != null)
         {
             int localDeletionTime = (int) (System.currentTimeMillis() / 1000);
-            for (Map.Entry<byte[], IColumn> entry : oldIndexedColumns.getColumnsMap().entrySet())
+            for (Map.Entry<ByteBuffer, IColumn> entry : oldIndexedColumns.getColumnsMap().entrySet())
             {
-                byte[] columnName = entry.getKey();
+                ByteBuffer columnName = entry.getKey();
                 IColumn column = entry.getValue();
                 if (column.isMarkedForDelete())
                     continue;
@@ -499,6 +563,8 @@ public class Table
                 ColumnFamily cfi = cfs.newIndexedColumnFamily(columnName);
                 cfi.addTombstone(key, localDeletionTime, column.timestamp());
                 Memtable fullMemtable = cfs.getIndexedColumnFamilyStore(columnName).apply(valueKey, cfi);
+                if (logger.isDebugEnabled())
+                    logger.debug("applying index tombstones {}:{}", valueKey, cfi);
                 if (fullMemtable != null)
                     fullMemtables = addFullMemtable(fullMemtables, fullMemtable);
             }
@@ -507,32 +573,61 @@ public class Table
         return fullMemtables;
     }
 
-    public IndexBuilder createIndexBuilder(ColumnFamilyStore cfs, SortedSet<byte[]> columns, ReducingKeyIterator iter)
+    public static void cleanupIndexEntry(ColumnFamilyStore cfs, ByteBuffer key, IColumn column)
+    {
+        if (column.isMarkedForDelete())
+            return;
+        int localDeletionTime = (int) (System.currentTimeMillis() / 1000);
+        DecoratedKey<LocalToken> valueKey = cfs.getIndexKeyFor(column.name(), column.value());
+        ColumnFamily cfi = cfs.newIndexedColumnFamily(column.name());
+        cfi.addTombstone(key, localDeletionTime, column.timestamp());
+        Memtable fullMemtable = cfs.getIndexedColumnFamilyStore(column.name()).apply(valueKey, cfi);
+        if (logger.isDebugEnabled())
+            logger.debug("removed index entry for cleaned-up value {}:{}", valueKey, cfi);
+        if (fullMemtable != null)
+            fullMemtable.cfs.maybeSwitchMemtable(fullMemtable, false);
+    }
+
+    public IndexBuilder createIndexBuilder(ColumnFamilyStore cfs, SortedSet<ByteBuffer> columns, ReducingKeyIterator iter)
     {
         return new IndexBuilder(cfs, columns, iter);
     }
 
-    public class IndexBuilder implements ICompactionInfo
+    public AbstractReplicationStrategy getReplicationStrategy()
+    {
+        return replicationStrategy;
+    }
+
+    public class IndexBuilder implements CompactionInfo.Holder
     {
         private final ColumnFamilyStore cfs;
-        private final SortedSet<byte[]> columns;
+        private final SortedSet<ByteBuffer> columns;
         private final ReducingKeyIterator iter;
 
-        public IndexBuilder(ColumnFamilyStore cfs, SortedSet<byte[]> columns, ReducingKeyIterator iter)
+        public IndexBuilder(ColumnFamilyStore cfs, SortedSet<ByteBuffer> columns, ReducingKeyIterator iter)
         {
             this.cfs = cfs;
             this.columns = columns;
             this.iter = iter;
         }
 
+        public CompactionInfo getCompactionInfo()
+        {
+            return new CompactionInfo(cfs.table.name,
+                                      cfs.columnFamily,
+                                      CompactionType.INDEX_BUILD,
+                                      iter.getTotalBytes(),
+                                      iter.getBytesRead());
+        }
+
         public void build()
         {
             while (iter.hasNext())
             {
-                DecoratedKey key = iter.next();
+                DecoratedKey<?> key = iter.next();
                 logger.debug("Indexing row {} ", key);
                 List<Memtable> memtablesToFlush = Collections.emptyList();
-                flusherLock.readLock().lock();
+                switchLock.readLock().lock();
                 try
                 {
                     synchronized (indexLockFor(key.key))
@@ -544,7 +639,7 @@ public class Table
                 }
                 finally
                 {
-                    flusherLock.readLock().unlock();
+                    switchLock.readLock().unlock();
                 }
 
                 // during index build, we do flush index memtables separately from master; otherwise we could OOM
@@ -561,26 +656,11 @@ public class Table
                 throw new RuntimeException(e);
             }
         }
-
-        public long getTotalBytes()
-        {
-            return iter.getTotalBytes();
-        }
-
-        public long getBytesRead()
-        {
-            return iter.getBytesRead();
-        }
-
-        public String getTaskType()
-        {
-            return "Secondary index build";
-        }
     }
 
-    private Object indexLockFor(byte[] key)
+    private Object indexLockFor(ByteBuffer key)
     {
-        return indexLocks[Math.abs(Arrays.hashCode(key) % indexLocks.length)];
+        return indexLocks[Math.abs(key.hashCode() % indexLocks.length)];
     }
 
     public List<Future<?>> flush() throws IOException
@@ -598,13 +678,13 @@ public class Table
     // for binary load path.  skips commitlog.
     void load(RowMutation rowMutation) throws IOException
     {
-        DecoratedKey key = StorageService.getPartitioner().decorateKey(rowMutation.key());
+        DecoratedKey<?> key = StorageService.getPartitioner().decorateKey(rowMutation.key());
         for (ColumnFamily columnFamily : rowMutation.getColumnFamilies())
         {
             Collection<IColumn> columns = columnFamily.getSortedColumns();
             for (IColumn column : columns)
             {
-                ColumnFamilyStore cfStore = columnFamilyStores.get(FBUtilities.byteArrayToInt(column.name()));
+                ColumnFamilyStore cfStore = columnFamilyStores.get(ByteBufferUtil.toInt(column.name()));
                 cfStore.applyBinary(key, column.value());
             }
         }
@@ -662,5 +742,10 @@ public class Table
         // truncate, blocking
         cfs.truncate().get();
         logger.debug("Truncation done.");
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(name='" + name + "')";
     }
 }

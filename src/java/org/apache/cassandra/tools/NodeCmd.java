@@ -25,41 +25,63 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.management.MemoryUsage;
 import java.net.InetAddress;
+import java.text.DecimalFormat;
 import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
 
+import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.config.ConfigurationException;
+
 import org.apache.commons.cli.*;
 
-import org.apache.cassandra.cache.JMXInstrumentedCacheMBean;
+import org.apache.cassandra.cache.InstrumentingCacheMBean;
 import org.apache.cassandra.concurrent.IExecutorMBean;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.CompactionManagerMBean;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.CompactionInfo;
 import org.apache.cassandra.net.MessagingServiceMBean;
+import org.apache.cassandra.utils.EstimatedHistogram;
 
-public class NodeCmd {
-    private static final String HOST_OPT_LONG = "host";
-    private static final String HOST_OPT_SHORT = "h";
-    private static final String PORT_OPT_LONG = "port";
-    private static final String PORT_OPT_SHORT = "p";
-    private static final int defaultPort = 8080;
-    private static Options options = null;
-    
+public class NodeCmd
+{
+    private static final Pair<String, String> HOST_OPT = new Pair<String, String>("h", "host");
+    private static final Pair<String, String> PORT_OPT = new Pair<String, String>("p", "port");
+    private static final Pair<String, String> USERNAME_OPT = new Pair<String, String>("u",  "username");
+    private static final Pair<String, String> PASSWORD_OPT = new Pair<String, String>("pw", "password");
+    private static final Pair<String, String> TAG_OPT = new Pair<String, String>("t", "tag");
+    private static final int DEFAULT_PORT = 7199;
+
+    private static ToolOptions options = null;
+
     private NodeProbe probe;
     
     static
     {
-        options = new Options();
-        Option optHost = new Option(HOST_OPT_SHORT, HOST_OPT_LONG, true, "node hostname or ip address");
-        optHost.setRequired(true);
-        options.addOption(optHost);
-        options.addOption(PORT_OPT_SHORT, PORT_OPT_LONG, true, "remote jmx agent port number");
+        options = new ToolOptions();
+
+        options.addOption(HOST_OPT,     true, "node hostname or ip address", true);
+        options.addOption(PORT_OPT,     true, "remote jmx agent port number");
+        options.addOption(USERNAME_OPT, true, "remote jmx agent username");
+        options.addOption(PASSWORD_OPT, true, "remote jmx agent password");
+        options.addOption(TAG_OPT,      true, "optional name to give a snapshot");
     }
     
     public NodeCmd(NodeProbe probe)
     {
         this.probe = probe;
     }
+
+    public enum NodeCommand
+    {
+        RING, INFO, CFSTATS, SNAPSHOT, CLEARSNAPSHOT, VERSION, TPSTATS, FLUSH, DRAIN,
+        DECOMMISSION, MOVE, REMOVETOKEN, REPAIR, CLEANUP, COMPACT, SCRUB,
+        SETCACHECAPACITY, GETCOMPACTIONTHRESHOLD, SETCOMPACTIONTHRESHOLD, NETSTATS, CFHISTOGRAMS,
+        COMPACTIONSTATS, DISABLEGOSSIP, ENABLEGOSSIP, INVALIDATEKEYCACHE, INVALIDATEROWCACHE,
+        DISABLETHRIFT, ENABLETHRIFT, JOIN, SETCOMPACTIONTHROUGHPUT
+    }
+
     
     /**
      * Prints usage information to stdout.
@@ -67,14 +89,58 @@ public class NodeCmd {
     private static void printUsage()
     {
         HelpFormatter hf = new HelpFormatter();
-        String header = String.format(
-                "%nAvailable commands: ring, info, version, cleanup, compact [keyspacename], cfstats, snapshot [snapshotname], " +
-                "clearsnapshot, tpstats, flush, drain, repair, decommission, move, loadbalance, removetoken [status|force]|[token], " +
-                "setcachecapacity [keyspace] [cfname] [keycachecapacity] [rowcachecapacity], " +
-                "getcompactionthreshold [keyspace] [cfname], setcompactionthreshold [cfname] [minthreshold] [maxthreshold], " +
-                "netstats [host]");
+        StringBuilder header = new StringBuilder();
+        header.append("\nAvailable commands:\n");
+        // No args
+        addCmdHelp(header, "ring", "Print informations on the token ring");
+        addCmdHelp(header, "join", "Join the ring");
+        addCmdHelp(header, "info", "Print node informations (uptime, load, ...)");
+        addCmdHelp(header, "cfstats", "Print statistics on column families");
+        addCmdHelp(header, "version", "Print cassandra version");
+        addCmdHelp(header, "tpstats", "Print usage statistics of thread pools");
+        addCmdHelp(header, "drain", "Drain the node (stop accepting writes and flush all column families)");
+        addCmdHelp(header, "decommission", "Decommission the node");
+        addCmdHelp(header, "compactionstats", "Print statistics on compactions");
+        addCmdHelp(header, "disablegossip", "Disable gossip (effectively marking the node dead)");
+        addCmdHelp(header, "enablegossip", "Reenable gossip");
+        addCmdHelp(header, "disablethrift", "Disable thrift server");
+        addCmdHelp(header, "enablethrift", "Reenable thrift server");
+
+        // One arg
+        addCmdHelp(header, "netstats [host]", "Print network information on provided host (connecting node by default)");
+        addCmdHelp(header, "move <new token>", "Move node on the token ring to a new token");
+        addCmdHelp(header, "removetoken status|force|<token>", "Show status of current token removal, force completion of pending removal or remove providen token");
+        addCmdHelp(header, "setcompactionthroughput <value_in_mb>", "Set the MB/s throughput cap for compaction in the system, or 0 to disable throttling.");
+
+        // Two args
+        addCmdHelp(header, "snapshot [keyspaces...] -t [snapshotName]", "Take a snapshot of the specified keyspaces using optional name snapshotName");
+        addCmdHelp(header, "clearsnapshot [keyspaces...] -t [snapshotName]", "Remove snapshots for the specified keyspaces. Either remove all snapshots or remove the snapshots with the given name.");
+        addCmdHelp(header, "flush [keyspace] [cfnames]", "Flush one or more column family");
+        addCmdHelp(header, "repair [keyspace] [cfnames]", "Repair one or more column family");
+        addCmdHelp(header, "cleanup [keyspace] [cfnames]", "Run cleanup on one or more column family");
+        addCmdHelp(header, "compact [keyspace] [cfnames]", "Force a (major) compaction on one or more column family");
+        addCmdHelp(header, "scrub [keyspace] [cfnames]", "Scrub (rebuild sstables for) one or more column family");
+        addCmdHelp(header, "invalidatekeycache [keyspace] [cfnames]", "Invalidate the key cache of one or more column family");
+        addCmdHelp(header, "invalidaterowcache [keyspace] [cfnames]", "Invalidate the key cache of one or more column family");
+        addCmdHelp(header, "getcompactionthreshold <keyspace> <cfname>", "Print min and max compaction thresholds for a given column family");
+        addCmdHelp(header, "cfhistograms <keyspace> <cfname>", "Print statistic histograms for a given column family");
+
+        // Four args
+        addCmdHelp(header, "setcachecapacity <keyspace> <cfname> <keycachecapacity> <rowcachecapacity>", "Set the key and row cache capacities of a given column family");
+        addCmdHelp(header, "setcompactionthreshold <keyspace> <cfname> <minthreshold> <maxthreshold>", "Set the min and max compaction thresholds for a given column family");
+
         String usage = String.format("java %s --host <arg> <command>%n", NodeCmd.class.getName());
-        hf.printHelp(usage, "", options, header);
+        hf.printHelp(usage, "", options, "");
+        System.out.println(header.toString());
+    }
+
+    private static void addCmdHelp(StringBuilder sb, String cmd, String description)
+    {
+        sb.append("  ").append(cmd);
+        // Ghetto indentation (trying, but not too hard, to not look too bad)
+        if (cmd.length() <= 20)
+            for (int i = cmd.length(); i < 22; ++i) sb.append(" ");
+        sb.append(" - ").append(description).append("\n");
     }
     
     /**
@@ -88,35 +154,51 @@ public class NodeCmd {
         List<Token> sortedTokens = new ArrayList<Token>(tokenToEndpoint.keySet());
         Collections.sort(sortedTokens);
 
-        Set<String> liveNodes = probe.getLiveNodes();
-        Set<String> deadNodes = probe.getUnreachableNodes();
-        Set<String> joiningNodes = probe.getJoiningNodes();
-        Set<String> leavingNodes = probe.getLeavingNodes();
+        Collection<String> liveNodes = probe.getLiveNodes();
+        Collection<String> deadNodes = probe.getUnreachableNodes();
+        Collection<String> joiningNodes = probe.getJoiningNodes();
+        Collection<String> leavingNodes = probe.getLeavingNodes();
+        Collection<String> movingNodes = probe.getMovingNodes();
         Map<String, String> loadMap = probe.getLoadMap();
 
-        outs.printf("%-16s%-7s%-8s%-16s%-44s\n", "Address", "Status", "State", "Load", "Token");
+        outs.printf("%-16s%-7s%-8s%-16s%-8s%-44s%n", "Address", "Status", "State", "Load", "Owns", "Token");
         // show pre-wrap token twice so you can always read a node's range as
         // (previous line token, current line token]
         if (sortedTokens.size() > 1)
-            outs.printf("%-14s%-11s%-14s%-43s\n", "", "", "", sortedTokens.get(sortedTokens.size() - 1));
+            outs.printf("%-16s%-7s%-8s%-16s%-8s%-44s%n", "", "", "", "", "", sortedTokens.get(sortedTokens.size() - 1));
+
+        // Calculate per-token ownership of the ring
+        Map<Token, Float> ownerships = probe.getOwnership();
 
         for (Token token : sortedTokens)
         {
             String primaryEndpoint = tokenToEndpoint.get(token);
             String status = liveNodes.contains(primaryEndpoint)
                             ? "Up"
-                            : deadNodes.contains(primaryEndpoint) ? "Down" : "?";
-            String state = joiningNodes.contains(primaryEndpoint)
-                           ? "Joining"
-                           : leavingNodes.contains(primaryEndpoint) ? "Leaving" : "Normal";
-            String load = loadMap.containsKey(primaryEndpoint) ? loadMap.get(primaryEndpoint) : "?";
-            outs.printf("%-16s%-7s%-8s%-16s%-44s\n", primaryEndpoint, status, state, load, token);
+                            : deadNodes.contains(primaryEndpoint)
+                              ? "Down"
+                              : "?";
+
+            String state = "Normal";
+
+            if (joiningNodes.contains(primaryEndpoint))
+                state = "Joining";
+            else if (leavingNodes.contains(primaryEndpoint))
+                state = "Leaving";
+            else if (movingNodes.contains(primaryEndpoint))
+                state = "Moving";
+
+            String load = loadMap.containsKey(primaryEndpoint)
+                          ? loadMap.get(primaryEndpoint)
+                          : "?";
+            String owns = new DecimalFormat("##0.00%").format(ownerships.get(token));
+            outs.printf("%-16s%-7s%-8s%-16s%-8s%-44s%n", primaryEndpoint, status, state, load, owns, token);
         }
     }
 
     public void printThreadPoolStats(PrintStream outs)
     {
-        outs.printf("%-25s%10s%10s%15s\n", "Pool Name", "Active", "Pending", "Completed");
+        outs.printf("%-25s%10s%10s%15s%n", "Pool Name", "Active", "Pending", "Completed");
 
         Iterator<Map.Entry<String, IExecutorMBean>> threads = probe.getThreadPoolMBeanProxies();
         while (threads.hasNext())
@@ -124,7 +206,7 @@ public class NodeCmd {
             Entry<String, IExecutorMBean> thread = threads.next();
             String poolName = thread.getKey();
             IExecutorMBean threadPoolProxy = thread.getValue();
-            outs.printf("%-25s%10s%10s%15s\n",
+            outs.printf("%-25s%10s%10s%15s%n",
                         poolName, threadPoolProxy.getActiveCount(), threadPoolProxy.getPendingTasks(), threadPoolProxy.getCompletedTasks());
         }
     }
@@ -136,19 +218,24 @@ public class NodeCmd {
      */
     public void printInfo(PrintStream outs)
     {
+        boolean gossipInitialized = probe.isInitialized();
         outs.println(probe.getToken());
-        outs.printf("%-17s: %s\n", "Load", probe.getLoadString());
-        outs.printf("%-17s: %s\n", "Generation No", probe.getCurrentGenerationNumber());
-        
+        outs.printf("%-17s: %s%n", "Gossip active", gossipInitialized);
+        outs.printf("%-17s: %s%n", "Load", probe.getLoadString());
+        if (gossipInitialized)
+            outs.printf("%-17s: %s%n", "Generation No", probe.getCurrentGenerationNumber());
+        else
+            outs.printf("%-17s: %s%n", "Generation No", 0);
+
         // Uptime
         long secondsUp = probe.getUptime() / 1000;
-        outs.printf("%-17s: %d\n", "Uptime (seconds)", secondsUp);
+        outs.printf("%-17s: %d%n", "Uptime (seconds)", secondsUp);
 
         // Memory usage
         MemoryUsage heapUsage = probe.getHeapMemoryUsage();
         double memUsed = (double)heapUsage.getUsed() / (1024 * 1024);
         double memMax = (double)heapUsage.getMax() / (1024 * 1024);
-        outs.printf("%-17s: %.2f / %.2f\n", "Heap Memory (MB)", memUsed, memMax);
+        outs.printf("%-17s: %.2f / %.2f%n", "Heap Memory (MB)", memUsed, memMax);
     }
 
     public void printReleaseVersion(PrintStream outs)
@@ -158,7 +245,7 @@ public class NodeCmd {
 
     public void printNetworkStats(final InetAddress addr, PrintStream outs)
     {
-        outs.printf("Mode: %s\n", probe.getOperationMode());
+        outs.printf("Mode: %s%n", probe.getOperationMode());
         Set<InetAddress> hosts = addr == null ? probe.getStreamDestinations() : new HashSet<InetAddress>(){{add(addr);}};
         if (hosts.size() == 0)
             outs.println("Not sending any streams.");
@@ -169,18 +256,18 @@ public class NodeCmd {
                 List<String> files = probe.getFilesDestinedFor(host);
                 if (files.size() > 0)
                 {
-                    outs.printf("Streaming to: %s\n", host);
+                    outs.printf("Streaming to: %s%n", host);
                     for (String file : files)
-                        outs.printf("   %s\n", file);
+                        outs.printf("   %s%n", file);
                 }
                 else
                 {
-                    outs.printf(" Nothing streaming to %s\n", host);
+                    outs.printf(" Nothing streaming to %s%n", host);
                 }
             }
             catch (IOException ex)
             {
-                outs.printf("   Error retrieving file data for %s\n", host);
+                outs.printf("   Error retrieving file data for %s%n", host);
             }
         }
 
@@ -194,18 +281,18 @@ public class NodeCmd {
                 List<String> files = probe.getIncomingFiles(host);
                 if (files.size() > 0)
                 {
-                    outs.printf("Streaming from: %s\n", host);
+                    outs.printf("Streaming from: %s%n", host);
                     for (String file : files)
-                        outs.printf("   %s\n", file);
+                        outs.printf("   %s%n", file);
                 }
                 else
                 {
-                    outs.printf(" Nothing streaming from %s\n", host);
+                    outs.printf(" Nothing streaming from %s%n", host);
                 }
             }
             catch (IOException ex)
             {
-                outs.printf("   Error retrieving file data for %s\n", host);
+                outs.printf("   Error retrieving file data for %s%n", host);
             }
         }
 
@@ -213,7 +300,7 @@ public class NodeCmd {
         outs.printf("%-25s", "Pool Name");
         outs.printf("%10s", "Active");
         outs.printf("%10s", "Pending");
-        outs.printf("%15s\n", "Completed");
+        outs.printf("%15s%n", "Completed");
 
         int pending;
         long completed;
@@ -224,7 +311,7 @@ public class NodeCmd {
         completed = 0;
         for (long n : ms.getCommandCompletedTasks().values())
             completed += n;
-        outs.printf("%-25s%10s%10s%15s\n", "Commands", "n/a", pending, completed);
+        outs.printf("%-25s%10s%10s%15s%n", "Commands", "n/a", pending, completed);
 
         pending = 0;
         for (int n : ms.getResponsePendingTasks().values())
@@ -232,9 +319,24 @@ public class NodeCmd {
         completed = 0;
         for (long n : ms.getResponseCompletedTasks().values())
             completed += n;
-        outs.printf("%-25s%10s%10s%15s\n", "Responses", "n/a", pending, completed);
+        outs.printf("%-25s%10s%10s%15s%n", "Responses", "n/a", pending, completed);
     }
-    
+   
+    public void printCompactionStats(PrintStream outs)
+    {
+        CompactionManagerMBean cm = probe.getCompactionManagerProxy();
+        for (CompactionInfo c : cm.getCompactions())
+        {
+            outs.println("compaction type: " + c.getTaskType());
+            outs.println("keyspace: " + c.getKeyspace());
+            outs.println("column family: " + c.getColumnFamily());
+            outs.println("bytes compacted: " + c.getBytesComplete());
+            outs.println("bytes total: " + c.getTotalBytes());
+            outs.println("-----------------");
+        }
+        outs.println("pending tasks: " + cm.getPendingTasks());
+    }
+ 
     public void printColumnFamilyStats(PrintStream outs)
     {
         Map <String, List <ColumnFamilyStoreMBean>> cfstoreMap = new HashMap <String, List <ColumnFamilyStoreMBean>>();
@@ -265,8 +367,8 @@ public class NodeCmd {
         {
             String tableName = entry.getKey();
             List<ColumnFamilyStoreMBean> columnFamilies = entry.getValue();
-            int tableReadCount = 0;
-            int tableWriteCount = 0;
+            long tableReadCount = 0;
+            long tableWriteCount = 0;
             int tablePendingTasks = 0;
             double tableTotalReadTime = 0.0f;
             double tableTotalWriteTime = 0.0f;
@@ -315,11 +417,11 @@ public class NodeCmd {
                 outs.println("\t\tWrite Latency: " + String.format("%01.3f", cfstore.getRecentWriteLatencyMicros() / 1000) + " ms.");
                 outs.println("\t\tPending Tasks: " + cfstore.getPendingTasks());
 
-                JMXInstrumentedCacheMBean keyCacheMBean = probe.getKeyCacheMBean(tableName, cfstore.getColumnFamilyName());
+                InstrumentingCacheMBean keyCacheMBean = probe.getKeyCacheMBean(tableName, cfstore.getColumnFamilyName());
                 if (keyCacheMBean.getCapacity() > 0)
                 {
                     outs.println("\t\tKey cache capacity: " + keyCacheMBean.getCapacity());
-                    outs.println("\t\tKey cache size: " + keyCacheMBean.getSize());
+                    outs.println("\t\tKey cache size: " + keyCacheMBean.size());
                     outs.println("\t\tKey cache hit rate: " + keyCacheMBean.getRecentHitRate());
                 }
                 else
@@ -327,11 +429,11 @@ public class NodeCmd {
                     outs.println("\t\tKey cache: disabled");
                 }
 
-                JMXInstrumentedCacheMBean rowCacheMBean = probe.getRowCacheMBean(tableName, cfstore.getColumnFamilyName());
+                InstrumentingCacheMBean rowCacheMBean = probe.getRowCacheMBean(tableName, cfstore.getColumnFamilyName());
                 if (rowCacheMBean.getCapacity() > 0)
                 {
                     outs.println("\t\tRow cache capacity: " + rowCacheMBean.getCapacity());
-                    outs.println("\t\tRow cache size: " + rowCacheMBean.getSize());
+                    outs.println("\t\tRow cache size: " + rowCacheMBean.size());
                     outs.println("\t\tRow cache hit rate: " + rowCacheMBean.getRecentHitRate());
                 }
                 else
@@ -354,26 +456,54 @@ public class NodeCmd {
         outs.println("RemovalStatus: " + probe.getRemovalStatus());
     }
 
-    public static void main(String[] args) throws IOException, InterruptedException, ParseException
+    private void printCfHistograms(String keySpace, String columnFamily, PrintStream output)
+    {
+        ColumnFamilyStoreMBean store = this.probe.getCfsProxy(keySpace, columnFamily);
+
+        // default is 90 offsets
+        long[] offsets = new EstimatedHistogram().getBucketOffsets();
+
+        long[] rrlh = store.getRecentReadLatencyHistogramMicros();
+        long[] rwlh = store.getRecentWriteLatencyHistogramMicros();
+        long[] sprh = store.getRecentSSTablesPerReadHistogram();
+        long[] ersh = store.getEstimatedRowSizeHistogram();
+        long[] ecch = store.getEstimatedColumnCountHistogram();
+
+        output.println(String.format("%s/%s histograms", keySpace, columnFamily));
+
+        output.println(String.format("%-10s%10s%18s%18s%18s%18s",
+                                     "Offset", "SSTables", "Write Latency", "Read Latency", "Row Size", "Column Count"));
+
+        for (int i = 0; i < offsets.length; i++)
+        {
+            output.println(String.format("%-10d%10s%18s%18s%18s%18s",
+                                         offsets[i],
+                                         (i < sprh.length ? sprh[i] : ""),
+                                         (i < rwlh.length ? rrlh[i] : ""),
+                                         (i < rrlh.length ? rwlh[i] : ""),
+                                         (i < ersh.length ? ersh[i] : ""),
+                                         (i < ecch.length ? ecch[i] : "")));
+        }
+    }
+
+    public static void main(String[] args) throws IOException, InterruptedException, ConfigurationException, ParseException
     {
         CommandLineParser parser = new PosixParser();
-        CommandLine cmd = null;
-        
+        ToolCommandLine cmd = null;
+
         try
         {
-            cmd = parser.parse(options, args);
+            cmd = new ToolCommandLine(parser.parse(options, args));
         }
-        catch (ParseException parseExcep)
+        catch (ParseException p)
         {
-            System.err.println(parseExcep);
-            printUsage();
-            System.exit(1);
+            badUse(p.getMessage());
         }
 
-        String host = cmd.getOptionValue(HOST_OPT_LONG);
-        int port = defaultPort;
+        String host = cmd.getOptionValue(HOST_OPT.left);
+        int port = DEFAULT_PORT;
         
-        String portNum = cmd.getOptionValue(PORT_OPT_LONG);
+        String portNum = cmd.getOptionValue(PORT_OPT.left);
         if (portNum != null)
         {
             try
@@ -385,242 +515,292 @@ public class NodeCmd {
                 throw new ParseException("Port must be a number");
             }
         }
+
+        String username = cmd.getOptionValue(USERNAME_OPT.left);
+        String password = cmd.getOptionValue(PASSWORD_OPT.left);
         
         NodeProbe probe = null;
         try
         {
-            probe = new NodeProbe(host, port);
+            probe = username == null ? new NodeProbe(host, port) : new NodeProbe(host, port, username, password);
         }
         catch (IOException ioe)
         {
-            System.err.println("Error connecting to remote JMX agent!");
-            ioe.printStackTrace();
-            System.exit(3);
+            err(ioe, "Error connection to remote JMX agent!");
         }
-        
-        if (cmd.getArgs().length < 1)
+
+        NodeCommand command = null;
+
+        try
         {
-            System.err.println("Missing argument for command.");
-            printUsage();
-            System.exit(1);
+            command = cmd.getCommand();
         }
-        
+        catch (IllegalArgumentException e)
+        {
+            badUse(e.getMessage());
+        }
+
+
         NodeCmd nodeCmd = new NodeCmd(probe);
-        
+
         // Execute the requested command.
-        String[] arguments = cmd.getArgs();
-        String cmdName = arguments[0];
-        if (cmdName.equals("ring"))
-        {
-            nodeCmd.printRing(System.out);
-        }
-        else if (cmdName.equals("info"))
-        {
-            nodeCmd.printInfo(System.out);
-        }
-        else if (cmdName.equals("cleanup"))
-        {
-            try
-            {
-                if (arguments.length > 1)
-                    probe.forceTableCleanup(arguments[1]);
-                else
-                    probe.forceTableCleanup();
-            }
-            catch (ExecutionException ee)
-            {
-                System.err.println("Error occured during Keyspace cleanup");
-                ee.printStackTrace();
-                System.exit(3);
-            }
-        }
-        else if (cmdName.equals("compact"))
-        {
-            try
-            {
-                if (arguments.length > 1)
-                    probe.forceTableCompaction(arguments[1]);
-                else
-                    probe.forceTableCompaction();
-            }
-            catch (ExecutionException ee)
-            {
-                System.err.println("Error occured during Keyspace compaction");
-                ee.printStackTrace();
-                System.exit(3);
-            }
-        }
-        else if (cmdName.equals("cfstats"))
-        {
-            nodeCmd.printColumnFamilyStats(System.out);
-        }
-        else if (cmdName.equals("decommission"))
-        {
-            probe.decommission();
-        }
-        else if (cmdName.equals("loadbalance"))
-        {
-            probe.loadBalance();
-        }
-        else if (cmdName.equals("move"))
-        {
-            if (arguments.length <= 1)
-            {
-                System.err.println("missing token argument");
-            }
-            probe.move(arguments[1]);
-        }
-        else if (cmdName.equals("removetoken"))
-        {
-            if (arguments.length <= 1)
-            {
-                System.err.println("Missing an argument.");
-                printUsage();
-            }
-            else if (arguments[1].equals("status"))
-            {
-                nodeCmd.printRemovalStatus(System.out);
-            }
-            else if (arguments[1].equals("force"))
-            {
-                nodeCmd.printRemovalStatus(System.out);
-                probe.forceRemoveCompletion();
-            }
-            else
-                probe.removeToken(arguments[1]);
+        String[] arguments = cmd.getCommandArguments();
 
-        }
-        else if (cmdName.equals("snapshot"))
+        switch (command)
         {
-            String snapshotName = "";
-            if (arguments.length > 1)
-            {
-                snapshotName = arguments[1];
-            }
-            probe.takeSnapshot(snapshotName);
-        }
-        else if (cmdName.equals("clearsnapshot"))
-        {
-            probe.clearSnapshot();
-        }
-        else if (cmdName.equals("tpstats"))
-        {
-            nodeCmd.printThreadPoolStats(System.out);
-        }
-        else if (cmdName.equals("flush") || cmdName.equals("repair"))
-        {
-            if (cmd.getArgs().length < 2)
-            {
-                System.err.println("Missing keyspace argument.");
-                printUsage();
-                System.exit(1);
-            }
+            case RING            : nodeCmd.printRing(System.out); break;
+            case INFO            : nodeCmd.printInfo(System.out); break;
+            case CFSTATS         : nodeCmd.printColumnFamilyStats(System.out); break;
+            case DECOMMISSION    : probe.decommission(); break;
+            case TPSTATS         : nodeCmd.printThreadPoolStats(System.out); break;
+            case VERSION         : nodeCmd.printReleaseVersion(System.out); break;
+            case COMPACTIONSTATS : nodeCmd.printCompactionStats(System.out); break;
+            case DISABLEGOSSIP   : probe.stopGossiping(); break;
+            case ENABLEGOSSIP    : probe.startGossiping(); break;
+            case DISABLETHRIFT   : probe.stopThriftServer(); break;
+            case ENABLETHRIFT    : probe.startThriftServer(); break;
 
-            String[] columnFamilies = new String[cmd.getArgs().length - 2];
-            for (int i = 0; i < columnFamilies.length; i++)
-            {
-                columnFamilies[i] = cmd.getArgs()[i + 2];
-            }
-            if (cmdName.equals("flush"))
-                try
+            case DRAIN :
+                try { probe.drain(); }
+                catch (ExecutionException ee) { err(ee, "Error occured during flushing"); }
+                break;
+
+            case NETSTATS :
+                if (arguments.length > 0) { nodeCmd.printNetworkStats(InetAddress.getByName(arguments[0]), System.out); }
+                else                      { nodeCmd.printNetworkStats(null, System.out); }
+                break;
+
+            case SNAPSHOT :
+            case CLEARSNAPSHOT :
+                String tag = cmd.getOptionValue(TAG_OPT.left);
+                handleSnapshots(command, tag, arguments, probe);
+                break;
+
+            case MOVE :
+                if (arguments.length != 1) { badUse("Missing token argument for move."); }
+                probe.move(arguments[0]);
+                break;
+
+            case JOIN:
+                if (probe.isJoined())
                 {
-                    probe.forceTableFlush(cmd.getArgs()[1], columnFamilies);
-                } catch (ExecutionException ee)
-                {
-                    System.err.println("Error occured during flushing");
-                    ee.printStackTrace();
-                    System.exit(3);
+                    System.err.println("This node has already joined the ring.");
+                    System.exit(1);
                 }
-            else // cmdName.equals("repair")
-                probe.forceTableRepair(cmd.getArgs()[1], columnFamilies);
-        }
-        else if (cmdName.equals("drain"))
-        {
-            try 
-            {
-                probe.drain();
-            } catch (ExecutionException ee) 
-            {
-                System.err.println("Error occured during flushing");
-                ee.printStackTrace();
-                System.exit(3);
-            }    	
-        }
-        else if (cmdName.equals("setcachecapacity"))
-        {
-            if (cmd.getArgs().length != 5) // ks cf keycachecap rowcachecap
-            {
-                System.err.println("cacheinfo requires: Keyspace name, ColumnFamily name, key cache capacity (in keys), and row cache capacity (in rows)");
-            }
-            String tableName = cmd.getArgs()[1];
-            String cfName = cmd.getArgs()[2];
-            int keyCacheCapacity = Integer.valueOf(cmd.getArgs()[3]);
-            int rowCacheCapacity = Integer.valueOf(cmd.getArgs()[4]);
-            probe.setCacheCapacities(tableName, cfName, keyCacheCapacity, rowCacheCapacity);
-        }
-        else if (cmdName.equals("getcompactionthreshold"))
-        {
-            if (arguments.length < 3) // ks cf
-            {
-                System.err.println("Missing keyspace/cfname");
-                printUsage();
-                System.exit(1);
-            }
-            probe.getCompactionThreshold(System.out, cmd.getArgs()[1], cmd.getArgs()[2]);
-        }
-        else if (cmdName.equals("setcompactionthreshold"))
-        {
-            if (cmd.getArgs().length != 5) // ks cf min max
-            {
-                System.err.println("setcompactionthreshold requires: Keyspace name, ColumnFamily name, " +
-                                   "min threshold, and max threshold.");
-                printUsage();
-                System.exit(1);
-            }
-            String ks = cmd.getArgs()[1];
-            String cf = cmd.getArgs()[2];
-            int minthreshold = Integer.parseInt(arguments[3]);
-            int maxthreshold = Integer.parseInt(arguments[4]);
 
-            if ((minthreshold < 0) || (maxthreshold < 0))
-            {
-                System.err.println("Thresholds must be positive integers.");
-                printUsage();
-                System.exit(1);
-            }
+                probe.joinRing();
+                break;
 
-            if (minthreshold > maxthreshold)
-            {
-                System.err.println("Min threshold can't be greater than Max threshold");
-                printUsage();
-                System.exit(1);
-            }
+            case SETCOMPACTIONTHROUGHPUT :
+                if (arguments.length != 2) { badUse("Missing value argument."); }
+                probe.setCompactionThroughput(Integer.valueOf(arguments[1]));
+                break;
 
-            if (minthreshold < 2 && maxthreshold != 0)
-            {
-                System.err.println("Min threshold must be at least 2");
-                printUsage();
-                System.exit(1);
-            }
-            probe.setCompactionThreshold(ks, cf, minthreshold, maxthreshold);
-        }
-        else if (cmdName.equals("netstats"))
-        {
-            // optional host
-            String otherHost = arguments.length > 1 ? arguments[1] : null;
-            nodeCmd.printNetworkStats(otherHost == null ? null : InetAddress.getByName(otherHost), System.out);
-        }
-        else if (cmdName.equals("version"))
-        {
-            nodeCmd.printReleaseVersion(System.out);
-        }
-        else
-        {
-            System.err.println("Unrecognized command: " + cmdName + ".");
-            printUsage();
-            System.exit(1);
+            case REMOVETOKEN :
+                if (arguments.length != 1) { badUse("Missing an argument for removetoken (either status, force, or a token)"); }
+                else if (arguments[0].equals("status")) { nodeCmd.printRemovalStatus(System.out); }
+                else if (arguments[0].equals("force"))  { nodeCmd.printRemovalStatus(System.out); probe.forceRemoveCompletion(); }
+                else                                    { probe.removeToken(arguments[0]); }
+                break;
+
+            case CLEANUP :
+            case COMPACT :
+            case REPAIR  :
+            case FLUSH   :
+            case SCRUB   :
+            case INVALIDATEKEYCACHE :
+            case INVALIDATEROWCACHE :
+                optionalKSandCFs(command, arguments, probe);
+                break;
+
+            case GETCOMPACTIONTHRESHOLD :
+                if (arguments.length != 2) { badUse("getcompactionthreshold requires ks and cf args."); }
+                probe.getCompactionThreshold(System.out, arguments[0], arguments[1]);
+                break;
+
+            case CFHISTOGRAMS :
+                if (arguments.length != 2) { badUse("cfhistograms requires ks and cf args"); }
+                nodeCmd.printCfHistograms(arguments[0], arguments[1], System.out);
+                break;
+
+            case SETCACHECAPACITY :
+                if (arguments.length != 4) { badUse("setcachecapacity requires ks, cf, keycachecap, and rowcachecap args."); }
+                probe.setCacheCapacities(arguments[0], arguments[1], Integer.parseInt(arguments[2]), Integer.parseInt(arguments[3]));
+                break;
+
+            case SETCOMPACTIONTHRESHOLD :
+                if (arguments.length != 4) { badUse("setcompactionthreshold requires ks, cf, min, and max threshold args."); }
+                int minthreshold = Integer.parseInt(arguments[2]);
+                int maxthreshold = Integer.parseInt(arguments[3]);
+                if ((minthreshold < 0) || (maxthreshold < 0)) { badUse("Thresholds must be positive integers"); }
+                if (minthreshold > maxthreshold)              { badUse("Min threshold cannot be greater than max."); }
+                if (minthreshold < 2 && maxthreshold != 0)    { badUse("Min threshold must be at least 2"); }
+                probe.setCompactionThreshold(arguments[0], arguments[1], minthreshold, maxthreshold);
+                break;
+
+            default :
+                throw new RuntimeException("Unreachable code.");
+
         }
 
         System.exit(0);
+    }
+
+    private static void badUse(String useStr)
+    {
+        System.err.println(useStr);
+        printUsage();
+        System.exit(1);
+    }
+
+    private static void err(Exception e, String errStr)
+    {
+        System.err.println(errStr);
+        e.printStackTrace();
+        System.exit(3);
+    }
+
+    private static void handleSnapshots(NodeCommand nc, String tag, String[] cmdArgs, NodeProbe probe) throws InterruptedException, IOException
+    {
+        int length = cmdArgs.length > 1 ? cmdArgs.length - 1 : 0;
+        String[] keyspaces = new String[length];
+        for (int i = 0; i < keyspaces.length; i++)
+            keyspaces[i] = cmdArgs[i + 1];
+
+        switch (nc)
+        {
+            case SNAPSHOT :
+                if (tag == null || tag.equals(""))
+                    tag = new Long(System.currentTimeMillis()).toString();
+                probe.takeSnapshot(tag, keyspaces);
+                System.out.println("Snapshot directory: " + tag);
+                break;
+            case CLEARSNAPSHOT :
+                probe.clearSnapshot(tag, keyspaces);
+                break;
+        }
+    }
+
+    private static void optionalKSandCFs(NodeCommand nc, String[] cmdArgs, NodeProbe probe) throws InterruptedException, IOException
+    {
+        // if there is one additional arg, it's the keyspace; more are columnfamilies
+        List<String> keyspaces = cmdArgs.length == 0 ? probe.getKeyspaces() : Arrays.asList(cmdArgs[0]);
+        for (String keyspace : keyspaces)
+        {
+            if (!probe.getKeyspaces().contains(keyspace))
+            {
+                System.err.println("Keyspace [" + keyspace + "] does not exist.");
+                System.exit(1);
+            }
+        }
+
+        // second loop so we're less likely to die halfway through due to invalid keyspace
+        for (String keyspace : keyspaces)
+        {
+            String[] columnFamilies = cmdArgs.length <= 1 ? new String[0] : Arrays.copyOfRange(cmdArgs, 1, cmdArgs.length);
+            switch (nc)
+            {
+                case REPAIR  : probe.forceTableRepair(keyspace, columnFamilies); break;
+                case INVALIDATEKEYCACHE : probe.invalidateKeyCaches(keyspace, columnFamilies); break;
+                case INVALIDATEROWCACHE : probe.invalidateRowCaches(keyspace, columnFamilies); break;
+                case FLUSH   :
+                    try { probe.forceTableFlush(keyspace, columnFamilies); }
+                    catch (ExecutionException ee) { err(ee, "Error occured during flushing"); }
+                    break;
+                case COMPACT :
+                    try { probe.forceTableCompaction(keyspace, columnFamilies); }
+                    catch (ExecutionException ee) { err(ee, "Error occured during compaction"); }
+                    break;
+                case CLEANUP :
+                    if (keyspace.equals("system")) { break; } // Skip cleanup on system cfs.
+                    try { probe.forceTableCleanup(keyspace, columnFamilies); }
+                    catch (ExecutionException ee) { err(ee, "Error occured during cleanup"); }
+                    break;
+                case SCRUB :
+                    try { probe.scrub(keyspace, columnFamilies); }
+                    catch (ExecutionException ee) { err(ee, "Error occured while scrubbing keyspace " + keyspace); }
+                    break;
+                default:
+                    throw new RuntimeException("Unreachable code.");
+            }
+        }
+    }
+
+
+    private static class ToolOptions extends Options
+    {
+        public void addOption(Pair<String, String> opts, boolean hasArgument, String description)
+        {
+            addOption(opts, hasArgument, description, false);
+        }
+
+        public void addOption(Pair<String, String> opts, boolean hasArgument, String description, boolean required)
+        {
+            addOption(opts.left, opts.right, hasArgument, description, required);
+        }
+
+        public void addOption(String opt, String longOpt, boolean hasArgument, String description, boolean required)
+        {
+            Option option = new Option(opt, longOpt, hasArgument, description);
+            option.setRequired(required);
+            addOption(option);
+        }
+    }
+
+    private static class ToolCommandLine
+    {
+        private final CommandLine commandLine;
+
+        public ToolCommandLine(CommandLine commands)
+        {
+            commandLine = commands;
+        }
+
+        public Option[] getOptions()
+        {
+            return commandLine.getOptions();
+        }
+
+        public boolean hasOption(String opt)
+        {
+            return commandLine.hasOption(opt);
+        }
+
+        public String getOptionValue(String opt)
+        {
+            return commandLine.getOptionValue(opt);
+        }
+
+        public NodeCommand getCommand()
+        {
+            if (commandLine.getArgs().length == 0)
+                throw new IllegalArgumentException("Command was not specified.");
+
+            String command = commandLine.getArgs()[0];
+
+            try
+            {
+                return NodeCommand.valueOf(command.toUpperCase());
+            }
+            catch (IllegalArgumentException e)
+            {
+                throw new IllegalArgumentException("Unrecognized command: " + command);
+            }
+        }
+
+        public String[] getCommandArguments()
+        {
+            List params = commandLine.getArgList();
+
+            if (params.size() < 2) // command parameters are empty
+                return new String[0];
+
+            String[] toReturn = new String[params.size() - 1];
+
+            for (int i = 1; i < params.size(); i++)
+                toReturn[i - 1] = (String) params.get(i);
+
+            return toReturn;
+        }
     }
 }

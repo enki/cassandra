@@ -18,10 +18,13 @@
 
 package org.apache.cassandra.db;
 
-import java.util.Collection;
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
+import java.util.Collection;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.utils.FBUtilities;
 
 public interface IColumn
@@ -31,17 +34,30 @@ public interface IColumn
     public boolean isMarkedForDelete();
     public long getMarkedForDeleteAt();
     public long mostRecentLiveChangeAt();
-    public byte[] name();
+    public ByteBuffer name();
     public int size();
     public int serializedSize();
+    public int serializationFlags();
     public long timestamp();
-    public byte[] value();
+    public ByteBuffer value();
     public Collection<IColumn> getSubColumns();
-    public IColumn getSubColumn(byte[] columnName);
+    public IColumn getSubColumn(ByteBuffer columnName);
     public void addColumn(IColumn column);
     public IColumn diff(IColumn column);
     public IColumn reconcile(IColumn column);
     public void updateDigest(MessageDigest digest);
     public int getLocalDeletionTime(); // for tombstone GC, so int is sufficient granularity
     public String getString(AbstractType comparator);
+    public void validateFields(CFMetaData metadata) throws MarshalException;
+
+    /** clones the column, interning column names and making copies of other underlying byte buffers
+     * @param cfs*/
+    IColumn localCopy(ColumnFamilyStore cfs);
+
+    /**
+     * For a simple column, live == !isMarkedForDelete.
+     * For a supercolumn, live means it has at least one subcolumn whose timestamp is greater than the
+     * supercolumn deleted-at time.
+     */
+    boolean isLive();
 }

@@ -20,20 +20,18 @@ package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.utils.FBUtilities;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class DeletedColumn extends Column
-{
-    private static Logger logger = LoggerFactory.getLogger(DeletedColumn.class);
-    
-    public DeletedColumn(byte[] name, int localDeletionTime, long timestamp)
+{    
+    public DeletedColumn(ByteBuffer name, int localDeletionTime, long timestamp)
     {
-        this(name, FBUtilities.toByteArray(localDeletionTime), timestamp);
+        this(name, ByteBufferUtil.bytes(localDeletionTime), timestamp);
     }
 
-    public DeletedColumn(byte[] name, byte[] value, long timestamp)
+    public DeletedColumn(ByteBuffer name, ByteBuffer value, long timestamp)
     {
         super(name, value, timestamp);
     }
@@ -53,6 +51,36 @@ public class DeletedColumn extends Column
     @Override
     public int getLocalDeletionTime()
     {
-        return ByteBuffer.wrap(value()).getInt();
+       return value.getInt(value.position());
+    }
+
+    @Override
+    public IColumn reconcile(IColumn column)
+    {
+        if (column instanceof DeletedColumn)
+            return super.reconcile(column);
+        return column.reconcile(this);
+    }
+    
+    @Override
+    public IColumn localCopy(ColumnFamilyStore cfs)
+    {
+        return new DeletedColumn(cfs.internOrCopy(name), ByteBufferUtil.clone(value), timestamp);
+    }
+
+    @Override
+    public int serializationFlags()
+    {
+        return ColumnSerializer.DELETION_MASK;
+    }
+
+    @Override
+    public void validateFields(CFMetaData metadata) throws MarshalException
+    {
+        validateName(metadata);
+        if (value().remaining() != 4)
+            throw new MarshalException("A tombstone value should be 4 bytes long");
+        if (getLocalDeletionTime() < 0)
+            throw new MarshalException("The local deletion time should not be negative");
     }
 }

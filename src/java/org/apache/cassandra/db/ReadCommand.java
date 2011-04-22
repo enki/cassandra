@@ -22,22 +22,22 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessageProducer;
+import org.apache.cassandra.service.IReadCommand;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.concurrent.StageManager;
 
 
-public abstract class ReadCommand
+public abstract class ReadCommand implements MessageProducer, IReadCommand
 {
-    public static final String DO_REPAIR = "READ-REPAIR";
     public static final byte CMD_TYPE_GET_SLICE_BY_NAMES = 1;
     public static final byte CMD_TYPE_GET_SLICE = 2;
 
@@ -48,21 +48,21 @@ public abstract class ReadCommand
         return serializer;
     }
 
-    public Message makeReadMessage() throws IOException
+    public Message getMessage(Integer version) throws IOException
     {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(bos);
-        ReadCommand.serializer().serialize(this, dos);
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.READ, bos.toByteArray());
+        ReadCommand.serializer().serialize(this, dos, version);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.READ, bos.toByteArray(), version);
     }
 
     public final QueryPath queryPath;
     public final String table;
-    public final byte[] key;
+    public final ByteBuffer key;
     private boolean isDigestQuery = false;    
     protected final byte commandType;
 
-    protected ReadCommand(String table, byte[] key, QueryPath queryPath, byte cmdType)
+    protected ReadCommand(String table, ByteBuffer key, QueryPath queryPath, byte cmdType)
     {
         this.table = table;
         this.key = key;
@@ -93,6 +93,11 @@ public abstract class ReadCommand
     {
         return ColumnFamily.getComparatorFor(table, getColumnFamilyName(), queryPath.superColumnName);
     }
+
+    public String getKeyspace()
+    {
+        return table;
+    }
 }
 
 class ReadCommandSerializer implements ICompactSerializer<ReadCommand>
@@ -105,17 +110,17 @@ class ReadCommandSerializer implements ICompactSerializer<ReadCommand>
     }
 
 
-    public void serialize(ReadCommand rm, DataOutputStream dos) throws IOException
+    public void serialize(ReadCommand rm, DataOutputStream dos, int version) throws IOException
     {
         dos.writeByte(rm.commandType);
         ReadCommandSerializer ser = CMD_SERIALIZER_MAP.get(rm.commandType);
-        ser.serialize(rm, dos);
+        ser.serialize(rm, dos, version);
     }
 
-    public ReadCommand deserialize(DataInputStream dis) throws IOException
+    public ReadCommand deserialize(DataInputStream dis, int version) throws IOException
     {
         byte msgType = dis.readByte();
-        return CMD_SERIALIZER_MAP.get(msgType).deserialize(dis);
+        return CMD_SERIALIZER_MAP.get(msgType).deserialize(dis, version);
     }
         
 }

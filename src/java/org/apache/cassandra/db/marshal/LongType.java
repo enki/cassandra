@@ -23,41 +23,90 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class LongType extends AbstractType
+public class LongType extends AbstractType<Long>
 {
     public static final LongType instance = new LongType();
 
     LongType() {} // singleton
 
-    public int compare(byte[] o1, byte[] o2)
+    public Long compose(ByteBuffer bytes)
     {
-        if (o1.length == 0)
+        return ByteBufferUtil.toLong(bytes);
+    }
+
+    public ByteBuffer decompose(Long value)
+    {
+        return ByteBufferUtil.bytes(value);
+    }
+
+    public int compare(ByteBuffer o1, ByteBuffer o2)
+    {
+        if (o1.remaining() == 0)
         {
-            return o2.length == 0 ? 0 : -1;
+            return o2.remaining() == 0 ? 0 : -1;
         }
-        if (o2.length == 0)
+        if (o2.remaining() == 0)
         {
             return 1;
         }
 
-        int diff = o1[0] - o2[0];
+        int diff = o1.get(o1.position()) - o2.get(o2.position());
         if (diff != 0)
             return diff;
-        return FBUtilities.compareByteArrays(o1, o2);
+        
+       
+        return ByteBufferUtil.compareUnsigned(o1, o2);
     }
 
-    public String getString(byte[] bytes)
+    public String getString(ByteBuffer bytes)
     {
-        if (bytes.length == 0)
+        if (bytes.remaining() == 0)
         {
             return "";
         }
-        if (bytes.length != 8)
+        if (bytes.remaining() != 8)
         {
-            throw new MarshalException("A long is exactly 8 bytes");
+            throw new MarshalException("A long is exactly 8 bytes: "+bytes.remaining());
         }
-        return String.valueOf(ByteBuffer.wrap(bytes).getLong());
+        
+        return String.valueOf(bytes.getLong(bytes.position()));
+    }
+
+    public String toString(Long l)
+    {
+        return l.toString();
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+
+        long longType;
+
+        try
+        {
+            longType = Long.parseLong(source);
+        }
+        catch (Exception e)
+        {
+            throw new MarshalException(String.format("unable to make long from '%s'", source), e);
+        }
+
+        return decompose(longType);
+    }
+
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        if (bytes.remaining() != 8 && bytes.remaining() != 0)
+            throw new MarshalException(String.format("Expected 8 or 0 byte long (%d)", bytes.remaining()));
+    }
+
+    public Class<Long> getType()
+    {
+        return Long.class;
     }
 }

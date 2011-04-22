@@ -23,8 +23,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import static org.apache.cassandra.config.DatabaseDescriptor.getConcurrentReaders;
-import static org.apache.cassandra.config.DatabaseDescriptor.getConcurrentWriters;
+import static org.apache.cassandra.config.DatabaseDescriptor.*;
 
 
 /**
@@ -42,23 +41,21 @@ public class StageManager
     {
         stages.put(Stage.MUTATION, multiThreadedConfigurableStage(Stage.MUTATION, getConcurrentWriters()));
         stages.put(Stage.READ, multiThreadedConfigurableStage(Stage.READ, getConcurrentReaders()));        
-        stages.put(Stage.RESPONSE, multiThreadedStage(Stage.RESPONSE, Math.max(2, Runtime.getRuntime().availableProcessors())));
+        stages.put(Stage.REQUEST_RESPONSE, multiThreadedStage(Stage.REQUEST_RESPONSE, Runtime.getRuntime().availableProcessors()));
+        stages.put(Stage.INTERNAL_RESPONSE, multiThreadedStage(Stage.INTERNAL_RESPONSE, Runtime.getRuntime().availableProcessors()));
+        stages.put(Stage.REPLICATE_ON_WRITE, multiThreadedConfigurableStage(Stage.REPLICATE_ON_WRITE, getConcurrentReplicators()));
         // the rest are all single-threaded
         stages.put(Stage.STREAM, new JMXEnabledThreadPoolExecutor(Stage.STREAM));
         stages.put(Stage.GOSSIP, new JMXEnabledThreadPoolExecutor(Stage.GOSSIP));
-        stages.put(Stage.ANTIENTROPY, new JMXEnabledThreadPoolExecutor(Stage.ANTIENTROPY));
+        stages.put(Stage.ANTI_ENTROPY, new JMXEnabledThreadPoolExecutor(Stage.ANTI_ENTROPY));
         stages.put(Stage.MIGRATION, new JMXEnabledThreadPoolExecutor(Stage.MIGRATION));
         stages.put(Stage.MISC, new JMXEnabledThreadPoolExecutor(Stage.MISC));
+        stages.put(Stage.READ_REPAIR, multiThreadedStage(Stage.READ_REPAIR, Runtime.getRuntime().availableProcessors()));
     }
 
     private static ThreadPoolExecutor multiThreadedStage(Stage stage, int numThreads)
     {
-        // avoid running afoul of requirement in DebuggableThreadPoolExecutor that single-threaded executors
-        // must have unbounded queues
-        assert numThreads > 1 : "multi-threaded stages must have at least 2 threads";
-
         return new JMXEnabledThreadPoolExecutor(numThreads,
-                                                numThreads,
                                                 KEEPALIVE,
                                                 TimeUnit.SECONDS,
                                                 new LinkedBlockingQueue<Runnable>(),
@@ -68,10 +65,7 @@ public class StageManager
     
     private static ThreadPoolExecutor multiThreadedConfigurableStage(Stage stage, int numThreads)
     {
-        assert numThreads > 1 : "multi-threaded stages must have at least 2 threads";
-        
         return new JMXConfigurableThreadPoolExecutor(numThreads,
-                                                     numThreads,
                                                      KEEPALIVE,
                                                      TimeUnit.SECONDS,
                                                      new LinkedBlockingQueue<Runnable>(),

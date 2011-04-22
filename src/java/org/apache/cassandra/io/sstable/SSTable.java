@@ -23,6 +23,7 @@ import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOError;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -31,10 +32,10 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
 /**
@@ -59,12 +60,10 @@ public abstract class SSTable
     public static final String COMPONENT_FILTER = Component.Type.FILTER.repr;
     public static final String COMPONENT_STATS = Component.Type.STATS.repr;
 
-    public static final String COMPONENT_COMPACTED = Component.Type.COMPACTED_MARKER.repr;
-
     public static final String TEMPFILE_MARKER = "tmp";
 
     public final Descriptor descriptor;
-    public final Set<Component> components;
+    protected final Set<Component> components;
     public final CFMetaData metadata;
     public final IPartitioner partitioner;
 
@@ -94,7 +93,10 @@ public abstract class SSTable
     protected SSTable(Descriptor descriptor, Set<Component> components, CFMetaData metadata, IPartitioner partitioner, EstimatedHistogram rowSizes, EstimatedHistogram columnCounts)
     {
         this.descriptor = descriptor;
-        this.components = components;
+        Set<Component> dataComponents = new HashSet<Component>(components);
+        for (Component component : components)
+            assert component.type != Component.Type.COMPACTED_MARKER;
+        this.components = Collections.unmodifiableSet(dataComponents);
         this.metadata = metadata;
         this.partitioner = partitioner;
         estimatedRowSize = rowSizes;
@@ -122,11 +124,8 @@ public abstract class SSTable
      *
      * @return true if the file was deleted
      */
-    public static boolean conditionalDelete(Descriptor desc, Set<Component> components)
+    public static boolean delete(Descriptor desc, Set<Component> components)
     {
-        if (!components.contains(Component.COMPACTED_MARKER) && !desc.temporary)
-            // not compacted or temporary
-            return false;
         try
         {
             // remove the DATA component first if it exists
@@ -139,8 +138,7 @@ public abstract class SSTable
                 FileUtils.deleteWithConfirm(desc.filenameFor(component));
             }
             // remove the COMPACTED_MARKER component last if it exists
-            if (components.contains(Component.COMPACTED_MARKER))
-                FileUtils.deleteWithConfirm(desc.filenameFor(Component.COMPACTED_MARKER));
+            FileUtils.delete(desc.filenameFor(Component.COMPACTED_MARKER));
         }
         catch (IOException e)
         {
@@ -176,7 +174,7 @@ public abstract class SSTable
         }
         catch (Exception e)
         {
-            if (!"snapshots".equals(name))
+            if (!"snapshots".equals(name) && !"backups".equals(name))
                 logger.warn("Invalid file '{}' in data directory {}.", name, dir);
             return null;
         }
@@ -185,7 +183,7 @@ public abstract class SSTable
     /**
      * Discovers existing components for the descriptor. Slow: only intended for use outside the critical path.
      */
-    static Set<Component> componentsFor(final Descriptor desc) throws IOException
+    static Set<Component> componentsFor(final Descriptor desc) 
     {
         final Set<Component> components = new HashSet<Component>();
         desc.directory.list(new FilenameFilter()
@@ -211,7 +209,7 @@ public abstract class SSTable
         while (dataPosition < BYTES_CAP && keys < SAMPLES_CAP)
         {
             dfile.seek(dataPosition);
-            FBUtilities.skipShortByteArray(dfile);
+            ByteBufferUtil.skipShortLength(dfile);
             long dataSize = SSTableReader.readRowSize(dfile, desc);
             dataPosition = dfile.getFilePointer() + dataSize;
             keys++;
@@ -228,10 +226,11 @@ public abstract class SSTable
         int keys = 0;
         while (ifile.getFilePointer() < BYTES_CAP && keys < SAMPLES_CAP)
         {
-            FBUtilities.skipShortByteArray(ifile);
-            ifile.skipBytes(8);
+            ByteBufferUtil.skipShortLength(ifile);
+            FileUtils.skipBytesFully(ifile, 8);
             keys++;
         }
+        assert keys > 0 && ifile.getFilePointer() > 0 && ifile.length() > 0;
         long estimatedRows = ifile.length() / (ifile.getFilePointer() / keys);
         ifile.seek(0);
         return estimatedRows;
@@ -260,7 +259,7 @@ public abstract class SSTable
     @Override
     public String toString()
     {
-        return getClass().getName() + "(" +
+        return getClass().getSimpleName() + "(" +
                "path='" + getFilename() + '\'' +
                ')';
     }

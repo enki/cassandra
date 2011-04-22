@@ -18,6 +18,7 @@
 */
 package org.apache.cassandra.db;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import org.apache.cassandra.SchemaLoader;
@@ -27,6 +28,8 @@ import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.fail;
 import org.apache.cassandra.db.marshal.AsciiType;
 import static org.apache.cassandra.Util.column;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
 
 public class RowTest extends SchemaLoader
 {
@@ -47,10 +50,10 @@ public class RowTest extends SchemaLoader
     @Test
     public void testDiffSuperColumn()
     {
-        SuperColumn sc1 = new SuperColumn("one".getBytes(), AsciiType.instance);
+        SuperColumn sc1 = new SuperColumn(ByteBufferUtil.bytes("one"), AsciiType.instance);
         sc1.addColumn(column("subcolumn", "A", 0));
 
-        SuperColumn sc2 = new SuperColumn("one".getBytes(), AsciiType.instance);
+        SuperColumn sc2 = new SuperColumn(ByteBufferUtil.bytes("one"), AsciiType.instance);
         sc2.markForDeleteAt(0, 0);
 
         SuperColumn scDiff = (SuperColumn)sc1.diff(sc2);
@@ -69,14 +72,14 @@ public class RowTest extends SchemaLoader
         cf2.addColumn(column("two", "C", 1));
 
         cf1.resolve(cf2);
-        assert Arrays.equals(cf1.getColumn("one".getBytes()).value(), "B".getBytes());
-        assert Arrays.equals(cf1.getColumn("two".getBytes()).value(), "C".getBytes());
+        assert Arrays.equals(cf1.getColumn(ByteBufferUtil.bytes("one")).value().array(), "B".getBytes());
+        assert Arrays.equals(cf1.getColumn(ByteBufferUtil.bytes("two")).value().array(), "C".getBytes());
     }
 
     @Test
     public void testExpiringColumnExpiration()
     {
-        Column c = new ExpiringColumn("one".getBytes(), "A".getBytes(), 0, 1);
+        Column c = new ExpiringColumn(ByteBufferUtil.bytes("one"), ByteBufferUtil.bytes("A"), 0, 1);
         assert !c.isMarkedForDelete();
 
         try

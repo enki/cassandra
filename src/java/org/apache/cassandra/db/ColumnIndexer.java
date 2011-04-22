@@ -18,15 +18,15 @@
 
 package org.apache.cassandra.db;
 
+import java.io.DataOutput;
 import java.io.IOError;
 import java.io.IOException;
-import java.io.DataOutput;
 import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.sstable.IndexHelper;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.IIterableColumns;
 import org.apache.cassandra.utils.BloomFilter;
 
@@ -142,6 +142,7 @@ public class ColumnIndexer
         BloomFilter.serializer().serialize(bf, bufOut);
         dos.writeInt(bufOut.getLength());
         dos.write(bufOut.getData(), 0, bufOut.getLength());
+        bufOut.flush();
     }
 
 }

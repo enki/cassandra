@@ -18,42 +18,33 @@
 
 package org.apache.cassandra.db;
 
-import org.apache.avro.Schema;
-
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
-import org.apache.cassandra.db.migration.Migration;
-import org.apache.cassandra.io.SerDeUtils;
-import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.*;
 
-import static com.google.common.base.Charsets.UTF_8;
+import org.apache.avro.Schema;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.migration.Migration;
+import org.apache.cassandra.io.SerDeUtils;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.UUIDGen;
 
 public class DefsTable
 {
     // column name for the schema storing serialized keyspace definitions
     // NB: must be an invalid keyspace name
-    public static final byte[] DEFINITION_SCHEMA_COLUMN_NAME = "Avro/Schema".getBytes(UTF_8);
+    public static final ByteBuffer DEFINITION_SCHEMA_COLUMN_NAME = ByteBufferUtil.bytes("Avro/Schema");
 
     /** dumps current keyspace definitions to storage */
     public static synchronized void dumpToStorage(UUID version) throws IOException
     {
-        final byte[] versionKey = Migration.toUTF8Bytes(version);
+        final ByteBuffer versionKey = Migration.toUTF8Bytes(version);
 
         // build a list of keyspaces
         Collection<String> ksnames = DatabaseDescriptor.getNonSystemTables();
@@ -64,20 +55,20 @@ public class DefsTable
         for (String ksname : ksnames)
         {
             KSMetaData ksm = DatabaseDescriptor.getTableDefinition(ksname);
-            rm.add(new QueryPath(Migration.SCHEMA_CF, null, ksm.name.getBytes(UTF_8)), SerDeUtils.serialize(ksm.deflate()), now);
+            rm.add(new QueryPath(Migration.SCHEMA_CF, null, ByteBufferUtil.bytes(ksm.name)), SerDeUtils.serialize(ksm.deflate()), now);
         }
         // add the schema
         rm.add(new QueryPath(Migration.SCHEMA_CF,
                              null,
                              DEFINITION_SCHEMA_COLUMN_NAME),
-                             org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8),
+                             ByteBufferUtil.bytes(org.apache.cassandra.db.migration.avro.KsDef.SCHEMA$.toString()),
                              now);
         rm.apply();
 
         // apply new version
         rm = new RowMutation(Table.SYSTEM_TABLE, Migration.LAST_MIGRATION_KEY);
         rm.add(new QueryPath(Migration.SCHEMA_CF, null, Migration.LAST_MIGRATION_KEY),
-               UUIDGen.decompose(version),
+               ByteBuffer.wrap(UUIDGen.decompose(version)),
                now);
         rm.apply();
     }
@@ -94,15 +85,17 @@ public class DefsTable
         if (avroschema == null)
             // TODO: more polite way to handle this?
             throw new RuntimeException("Cannot read system table! Are you upgrading a pre-release version?");
-        Schema schema = Schema.parse(new String(avroschema.value()));
+
+        ByteBuffer value = avroschema.value();
+        Schema schema = Schema.parse(ByteBufferUtil.string(value));
 
         // deserialize keyspaces using schema
         Collection<KSMetaData> keyspaces = new ArrayList<KSMetaData>();
         for (IColumn column : cf.getSortedColumns())
         {
-            if (Arrays.equals(column.name(), DEFINITION_SCHEMA_COLUMN_NAME))
+            if (column.name().equals(DEFINITION_SCHEMA_COLUMN_NAME))
                 continue;
-            org.apache.cassandra.avro.KsDef ks = SerDeUtils.deserialize(schema, column.value(), new org.apache.cassandra.avro.KsDef());
+            org.apache.cassandra.db.migration.avro.KsDef ks = SerDeUtils.deserialize(schema, column.value(), new org.apache.cassandra.db.migration.avro.KsDef());
             keyspaces.add(KSMetaData.inflate(ks));
         }
         return keyspaces;

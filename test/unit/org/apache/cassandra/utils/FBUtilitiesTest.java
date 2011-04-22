@@ -20,11 +20,14 @@ package org.apache.cassandra.utils;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.Arrays;
 
+import com.google.common.base.Charsets;
 import org.junit.Test;
 
 public class FBUtilitiesTest 
@@ -68,26 +71,62 @@ public class FBUtilitiesTest
     }
 
     @Test
-    public void testIntBytesConversions()
+    public void testCopyIntoBytes()
     {
-        // positive, negative, 1 and 2 byte cases, including a few edges that would foul things up unless you're careful
-        // about masking away sign extension.
-        int[] ints = new int[]
-        {
-            -20, -127, -128, 0, 1, 127, 128, 65534, 65535, -65534, -65535
-        };
+        int i = 300;
+        long l = 1000;
+        ByteBuffer b = ByteBuffer.allocate(20);
+        FBUtilities.copyIntoBytes(b.array(), 0, i);
+        FBUtilities.copyIntoBytes(b.array(), 4, l);
+        assertEquals(i, b.getInt(0));
+        assertEquals(l, b.getLong(4));
+    }
+    
+    @Test
+    public void testCompareByteSubArrays()
+    {
+        ByteBuffer bytes = ByteBuffer.allocate(16);
 
-        for (int i : ints) {
-            byte[] ba = FBUtilities.toByteArray(i);
-            int actual = FBUtilities.byteArrayToInt(ba);
-            assertEquals(i, actual);
+        // handle null
+        assert ByteBufferUtil.compareSubArrays(
+                null, 0, null, 0, 0) == 0;
+        assert ByteBufferUtil.compareSubArrays(
+                null, 0, ByteBufferUtil.bytes(524255231), 0, 4) == -1;
+        assert ByteBufferUtil.compareSubArrays(
+                ByteBufferUtil.bytes(524255231), 0, null, 0, 4) == 1;
+
+        // handle comparisons
+        FBUtilities.copyIntoBytes(bytes.array(), 3, 524255231);
+        assert ByteBufferUtil.compareSubArrays(
+                bytes, 3, ByteBufferUtil.bytes(524255231), 0, 4) == 0;
+        assert ByteBufferUtil.compareSubArrays(
+                bytes, 3, ByteBufferUtil.bytes(524255232), 0, 4) == -1;
+        assert ByteBufferUtil.compareSubArrays(
+                bytes, 3, ByteBufferUtil.bytes(524255230), 0, 4) == 1;
+
+        // check that incorrect length throws exception
+        try
+        {
+            assert ByteBufferUtil.compareSubArrays(
+                    bytes, 3, ByteBufferUtil.bytes(524255231), 0, 24) == 0;
+            fail("Should raise an AssertionError.");
+        } catch (AssertionError ae)
+        {
+        }
+        try
+        {
+            assert ByteBufferUtil.compareSubArrays(
+                    bytes, 3, ByteBufferUtil.bytes(524255231), 0, 12) == 0;
+            fail("Should raise an AssertionError.");
+        } catch (AssertionError ae)
+        {
         }
     }
 
     @Test(expected=CharacterCodingException.class)
     public void testDecode() throws IOException
     {
-        byte[] bytes = new byte[]{(byte)0xff, (byte)0xfe};
-        FBUtilities.decodeToUTF8(bytes);
+        ByteBuffer bytes = ByteBuffer.wrap(new byte[]{(byte)0xff, (byte)0xfe});
+        ByteBufferUtil.string(bytes, Charsets.UTF_8);
     } 
 }

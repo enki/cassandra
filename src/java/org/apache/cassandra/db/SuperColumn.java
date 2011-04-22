@@ -18,47 +18,48 @@
 
 package org.apache.cassandra.db;
 
-import java.io.*;
-import java.util.Collection;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.ConcurrentSkipListMap;
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.io.ICompactSerializer2;
-import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.io.IColumnSerializer;
+import org.apache.cassandra.io.util.ColumnSortedMap;
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 
 public class SuperColumn implements IColumn, IColumnContainer
 {
-	private static Logger logger_ = LoggerFactory.getLogger(SuperColumn.class);
-
     public static SuperColumnSerializer serializer(AbstractType comparator)
     {
         return new SuperColumnSerializer(comparator);
     }
 
-    private byte[] name_;
-    private ConcurrentSkipListMap<byte[], IColumn> columns_;
+    private ByteBuffer name_;
+    private ConcurrentSkipListMap<ByteBuffer, IColumn> columns_;
     private AtomicInteger localDeletionTime = new AtomicInteger(Integer.MIN_VALUE);
     private AtomicLong markedForDeleteAt = new AtomicLong(Long.MIN_VALUE);
 
-    public SuperColumn(byte[] name, AbstractType comparator)
+    public SuperColumn(ByteBuffer name, AbstractType comparator)
     {
-        this(name, new ConcurrentSkipListMap<byte[], IColumn>(comparator));
+        this(name, new ConcurrentSkipListMap<ByteBuffer, IColumn>(comparator));
     }
 
-    private SuperColumn(byte[] name, ConcurrentSkipListMap<byte[], IColumn> columns)
+    SuperColumn(ByteBuffer name, ConcurrentSkipListMap<ByteBuffer, IColumn> columns)
     {
         assert name != null;
-        assert name.length <= IColumn.MAX_NAME_LENGTH;
+        assert name.remaining() <= IColumn.MAX_NAME_LENGTH;
         name_ = name;
         columns_ = columns;
     }
@@ -77,7 +78,7 @@ public class SuperColumn implements IColumn, IColumnContainer
 
     public IColumn cloneMe()
     {
-        SuperColumn sc = new SuperColumn(name_, new ConcurrentSkipListMap<byte[], IColumn>(columns_));
+        SuperColumn sc = new SuperColumn(name_, new ConcurrentSkipListMap<ByteBuffer, IColumn>(columns_));
         sc.markForDeleteAt(localDeletionTime.get(), markedForDeleteAt.get());
         return sc;
     }
@@ -87,7 +88,7 @@ public class SuperColumn implements IColumn, IColumnContainer
         return markedForDeleteAt.get() > Long.MIN_VALUE;
 	}
 
-    public byte[] name()
+    public ByteBuffer name()
     {
     	return name_;
     }
@@ -97,7 +98,12 @@ public class SuperColumn implements IColumn, IColumnContainer
     	return columns_.values();
     }
 
-    public IColumn getSubColumn(byte[] columnName)
+    public Collection<IColumn> getSortedColumns()
+    {
+        return getSubColumns();
+    }
+
+    public IColumn getSubColumn(ByteBuffer columnName)
     {
         IColumn column = columns_.get(columnName);
         assert column == null || column instanceof Column;
@@ -127,10 +133,10 @@ public class SuperColumn implements IColumn, IColumnContainer
     	 * We need to keep the way we are calculating the column size in sync with the
     	 * way we are calculating the size for the column family serializer.
     	 */
-      return DBConstants.shortSize_ + name_.length + DBConstants.intSize_ + DBConstants.longSize_ + DBConstants.intSize_ + size();
+      return DBConstants.shortSize_ + name_.remaining() + DBConstants.intSize_ + DBConstants.longSize_ + DBConstants.intSize_ + size();
     }
 
-    public void remove(byte[] columnName)
+    public void remove(ByteBuffer columnName)
     {
     	columns_.remove(columnName);
     }
@@ -153,7 +159,7 @@ public class SuperColumn implements IColumn, IColumnContainer
         return max;
     }
 
-    public byte[] value()
+    public ByteBuffer value()
     {
     	throw new UnsupportedOperationException("This operation is not supported for Super Columns.");
     }
@@ -162,20 +168,17 @@ public class SuperColumn implements IColumn, IColumnContainer
     {
         assert column instanceof Column : "A super column can only contain simple columns";
 
-        byte[] name = column.name();
-        IColumn oldColumn = columns_.putIfAbsent(name, column);
-        if (oldColumn != null)
+        ByteBuffer name = column.name();
+        IColumn oldColumn;
+        while ((oldColumn = columns_.putIfAbsent(name, column)) != null)
         {
             IColumn reconciledColumn = column.reconcile(oldColumn);
-            while (!columns_.replace(name, oldColumn, reconciledColumn))
-            {
-                // if unable to replace, then get updated old (existing) col
-                oldColumn = columns_.get(name);
-                // re-calculate reconciled col from updated old col and original new col
-                reconciledColumn = column.reconcile(oldColumn);
-                // try to re-update value, again
-            }
-    	}
+            if (columns_.replace(name, oldColumn, reconciledColumn))
+                break;
+
+            // We failed to replace column due to a concurrent update or a concurrent removal. Keep trying.
+            // (Currently, concurrent removal should not happen (only updates), but let us support that anyway.)
+        }
     }
 
     /*
@@ -236,7 +239,7 @@ public class SuperColumn implements IColumn, IColumnContainer
     public void updateDigest(MessageDigest digest)
     {
         assert name_ != null;
-        digest.update(name_);
+        digest.update(name_.duplicate());
         DataOutputBuffer buffer = new DataOutputBuffer();
         try
         {
@@ -270,6 +273,11 @@ public class SuperColumn implements IColumn, IColumnContainer
         return sb.toString();
     }
 
+    public boolean isLive()
+    {
+        return mostRecentLiveChangeAt() > markedForDeleteAt.get();
+    }
+
     public int getLocalDeletionTime()
     {
         return localDeletionTime.get();
@@ -282,13 +290,51 @@ public class SuperColumn implements IColumn, IColumnContainer
         this.markedForDeleteAt.set(timestamp);
     }
 
+    public IColumn shallowCopy()
+    {
+        SuperColumn sc = new SuperColumn(ByteBufferUtil.clone(name_), this.getComparator());
+        sc.localDeletionTime = localDeletionTime;
+        sc.markedForDeleteAt = markedForDeleteAt;
+        return sc;
+    }
+    
+    public IColumn localCopy(ColumnFamilyStore cfs)
+    {
+        // we don't try to intern supercolumn names, because if we're using Cassandra correctly it's almost
+        // certainly just going to pollute our interning map with unique, dynamic values
+        SuperColumn sc = new SuperColumn(ByteBufferUtil.clone(name_), this.getComparator());
+        sc.localDeletionTime = localDeletionTime;
+        sc.markedForDeleteAt = markedForDeleteAt;
+        
+        for(Map.Entry<ByteBuffer, IColumn> c : columns_.entrySet())
+        {
+            sc.addColumn(c.getValue().localCopy(cfs));
+        }
+
+        return sc;
+    }
+
     public IColumn reconcile(IColumn c)
     {
         throw new UnsupportedOperationException("This operation is unsupported on super columns.");
     }
+
+    public int serializationFlags()
+    {
+        throw new UnsupportedOperationException("Super columns don't have a serialization mask");
+    }
+
+    public void validateFields(CFMetaData metadata) throws MarshalException
+    {
+        metadata.comparator.validate(name());
+        for (IColumn column : getSubColumns())
+        {
+            column.validateFields(metadata);
+        }
+    }
 }
 
-class SuperColumnSerializer implements ICompactSerializer2<IColumn>
+class SuperColumnSerializer implements IColumnSerializer
 {
     private AbstractType comparator;
 
@@ -304,8 +350,8 @@ class SuperColumnSerializer implements ICompactSerializer2<IColumn>
 
     public void serialize(IColumn column, DataOutput dos)
     {
-    	SuperColumn superColumn = (SuperColumn)column;
-        FBUtilities.writeShortByteArray(column.name(), dos);
+        SuperColumn superColumn = (SuperColumn)column;
+        ByteBufferUtil.writeWithShortLength(column.name(), dos);
         try
         {
             dos.writeInt(superColumn.getLocalDeletionTime());
@@ -326,22 +372,39 @@ class SuperColumnSerializer implements ICompactSerializer2<IColumn>
 
     public IColumn deserialize(DataInput dis) throws IOException
     {
-        byte[] name = FBUtilities.readShortByteArray(dis);
-        SuperColumn superColumn = new SuperColumn(name, comparator);
+        return deserialize(dis, null, false);
+    }
+
+    public IColumn deserialize(DataInput dis, ColumnFamilyStore interner) throws IOException
+    {
+        return deserialize(dis, interner, false);
+    }
+
+    public IColumn deserialize(DataInput dis, ColumnFamilyStore interner, boolean fromRemote) throws IOException
+    {
+        return deserialize(dis, interner, fromRemote, (int)(System.currentTimeMillis() / 1000));
+    }
+
+    public IColumn deserialize(DataInput dis, ColumnFamilyStore interner, boolean fromRemote, int expireBefore) throws IOException
+    {
+        ByteBuffer name = ByteBufferUtil.readWithShortLength(dis);
         int localDeleteTime = dis.readInt();
         if (localDeleteTime != Integer.MIN_VALUE && localDeleteTime <= 0)
         {
             throw new IOException("Invalid localDeleteTime read: " + localDeleteTime);
         }
-        superColumn.markForDeleteAt(localDeleteTime, dis.readLong());
+        long markedForDeleteAt = dis.readLong();
 
         /* read the number of columns */
         int size = dis.readInt();
-        for ( int i = 0; i < size; ++i )
+        ColumnSerializer serializer = Column.serializer();
+        ColumnSortedMap preSortedMap = new ColumnSortedMap(comparator, serializer, dis, interner, size, fromRemote, expireBefore);
+        SuperColumn superColumn = new SuperColumn(name, new ConcurrentSkipListMap<ByteBuffer,IColumn>(preSortedMap));
+        if (localDeleteTime != Integer.MIN_VALUE && localDeleteTime <= 0)
         {
-            IColumn subColumn = Column.serializer().deserialize(dis);
-            superColumn.addColumn(subColumn);
+            throw new IOException("Invalid localDeleteTime read: " + localDeleteTime);
         }
+        superColumn.markForDeleteAt(localDeleteTime, markedForDeleteAt);
         return superColumn;
     }
 }

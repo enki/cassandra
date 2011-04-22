@@ -40,7 +40,7 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.thrift.TException;
 import org.apache.thrift.transport.TSocket;
 
-import static org.apache.cassandra.io.SerDeUtils.copy;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * The <code>ColumnFamilyRecordWriter</code> maps the output &lt;key, value&gt;
@@ -59,8 +59,8 @@ import static org.apache.cassandra.io.SerDeUtils.copy;
  * @see OutputFormat
  * 
  */
-final class ColumnFamilyRecordWriter extends RecordWriter<ByteBuffer,List<org.apache.cassandra.avro.Mutation>>
-implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cassandra.avro.Mutation>>
+final class ColumnFamilyRecordWriter extends RecordWriter<ByteBuffer,List<org.apache.cassandra.hadoop.avro.Mutation>>
+implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cassandra.hadoop.avro.Mutation>>
 {
     // The configuration this writer is associated with.
     private final Configuration conf;
@@ -78,6 +78,9 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
     // handles for clients for each range running in the threadpool
     private final Map<Range,RangeClient> clients;
     private final long batchThreshold;
+    
+    private final ConsistencyLevel consistencyLevel;
+
 
     /**
      * Upon construction, obtain the map that this writer will use to collect
@@ -101,6 +104,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
         this.queueSize = conf.getInt(ColumnFamilyOutputFormat.QUEUE_SIZE, 32 * Runtime.getRuntime().availableProcessors());
         this.clients = new HashMap<Range,RangeClient>();
         batchThreshold = conf.getLong(ColumnFamilyOutputFormat.BATCH_THRESHOLD, 32);
+        consistencyLevel = ConsistencyLevel.valueOf(ConfigHelper.getWriteConsistencyLevel(conf));
     }
 
     /**
@@ -118,10 +122,9 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
      * @throws IOException
      */
     @Override
-    public void write(ByteBuffer keybuff, List<org.apache.cassandra.avro.Mutation> value) throws IOException
+    public void write(ByteBuffer keybuff, List<org.apache.cassandra.hadoop.avro.Mutation> value) throws IOException
     {
-        byte[] key = copy(keybuff);
-        Range range = ringCache.getRange(key);
+        Range range = ringCache.getRange(keybuff);
 
         // get the client for the given range, or create a new one
         RangeClient client = clients.get(range);
@@ -133,18 +136,49 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
             clients.put(range, client);
         }
 
-        for (org.apache.cassandra.avro.Mutation amut : value)
-            client.put(new Pair<byte[],Mutation>(key, avroToThrift(amut)));
+        for (org.apache.cassandra.hadoop.avro.Mutation amut : value)
+            client.put(new Pair<ByteBuffer,Mutation>(keybuff, avroToThrift(amut)));
     }
 
     /**
      * Deep copies the given Avro mutation into a new Thrift mutation.
      */
-    private Mutation avroToThrift(org.apache.cassandra.avro.Mutation amut)
+    private Mutation avroToThrift(org.apache.cassandra.hadoop.avro.Mutation amut)
     {
         Mutation mutation = new Mutation();
-        org.apache.cassandra.avro.ColumnOrSuperColumn acosc = amut.column_or_supercolumn;
-        if (acosc != null)
+        org.apache.cassandra.hadoop.avro.ColumnOrSuperColumn acosc = amut.column_or_supercolumn;
+        if (acosc == null)
+        {
+            // deletion
+            assert amut.deletion != null;
+            Deletion deletion = new Deletion().setTimestamp(amut.deletion.timestamp);
+            mutation.setDeletion(deletion);
+
+            org.apache.cassandra.hadoop.avro.SlicePredicate apred = amut.deletion.predicate;
+            if (apred == null && amut.deletion.super_column == null)
+            {
+                // leave Deletion alone to delete entire row
+            }
+            else if (amut.deletion.super_column != null)
+            {
+                // super column
+                deletion.setSuper_column(ByteBufferUtil.getArray(amut.deletion.super_column));
+            }
+            else if (apred.column_names != null)
+            {
+                // column names
+                List<ByteBuffer> names = new ArrayList<ByteBuffer>(apred.column_names.size());
+                for (ByteBuffer name : apred.column_names)
+                    names.add(name);
+                deletion.setPredicate(new SlicePredicate().setColumn_names(names));
+            }
+            else
+            {
+                // range
+                deletion.setPredicate(new SlicePredicate().setSlice_range(avroToThrift(apred.slice_range)));
+            }
+        }
+        else
         {
             // creation
             ColumnOrSuperColumn cosc = new ColumnOrSuperColumn();
@@ -155,47 +189,24 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
             else
             {
                 // super column
-                byte[] scolname = copy(acosc.super_column.name);
+                ByteBuffer scolname = acosc.super_column.name;
                 List<Column> scolcols = new ArrayList<Column>(acosc.super_column.columns.size());
-                for (org.apache.cassandra.avro.Column acol : acosc.super_column.columns)
+                for (org.apache.cassandra.hadoop.avro.Column acol : acosc.super_column.columns)
                     scolcols.add(avroToThrift(acol));
                 cosc.setSuper_column(new SuperColumn(scolname, scolcols));
-            }
-        }
-        else
-        {
-            // deletion
-            Deletion deletion = new Deletion(amut.deletion.timestamp);
-            mutation.setDeletion(deletion);
-            org.apache.cassandra.avro.SlicePredicate apred = amut.deletion.predicate;
-            if (amut.deletion.super_column != null)
-                // super column
-                deletion.setSuper_column(copy(amut.deletion.super_column));
-            else if (apred.column_names != null)
-            {
-                // column names
-                List<byte[]> names = new ArrayList<byte[]>(apred.column_names.size());
-                for (ByteBuffer name : apred.column_names)
-                    names.add(copy(name));
-                deletion.setPredicate(new SlicePredicate().setColumn_names(names));
-            }
-            else
-            {
-                // range
-                deletion.setPredicate(new SlicePredicate().setSlice_range(avroToThrift(apred.slice_range)));
             }
         }
         return mutation;
     }
 
-    private SliceRange avroToThrift(org.apache.cassandra.avro.SliceRange asr)
+    private SliceRange avroToThrift(org.apache.cassandra.hadoop.avro.SliceRange asr)
     {
-        return new SliceRange(copy(asr.start), copy(asr.finish), asr.reversed, asr.count);
+        return new SliceRange(asr.start, asr.finish, asr.reversed, asr.count);
     }
 
-    private Column avroToThrift(org.apache.cassandra.avro.Column acol)
+    private Column avroToThrift(org.apache.cassandra.hadoop.avro.Column acol)
     {
-        return new Column(copy(acol.name), copy(acol.value), acol.timestamp);
+        return new Column(acol.name).setValue(acol.value).setTimestamp(acol.timestamp);
     }
 
     /**
@@ -241,7 +252,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
         private final List<InetAddress> endpoints;
         private final String columnFamily = ConfigHelper.getOutputColumnFamily(conf);
         // A bounded queue of incoming mutations for this range
-        private final BlockingQueue<Pair<byte[], Mutation>> queue = new ArrayBlockingQueue<Pair<byte[],Mutation>>(queueSize);
+        private final BlockingQueue<Pair<ByteBuffer, Mutation>> queue = new ArrayBlockingQueue<Pair<ByteBuffer,Mutation>>(queueSize);
 
         private volatile boolean run = true;
         private volatile IOException lastException;
@@ -262,7 +273,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
         /**
          * enqueues the given value to Cassandra
          */
-        public void put(Pair<byte[],Mutation> value) throws IOException
+        public void put(Pair<ByteBuffer,Mutation> value) throws IOException
         {
             while (true)
             {
@@ -306,7 +317,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
             outer:
             while (run || !queue.isEmpty())
             {
-                Pair<byte[], Mutation> mutation;
+                Pair<ByteBuffer, Mutation> mutation;
                 try
                 {
                     mutation = queue.take();
@@ -317,13 +328,21 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
                     continue;
                 }
 
-                Map<byte[], Map<String, List<Mutation>>> batch = new HashMap<byte[], Map<String, List<Mutation>>>();
-                while (batch.size() < batchThreshold)
+                Map<ByteBuffer, Map<String, List<Mutation>>> batch = new HashMap<ByteBuffer, Map<String, List<Mutation>>>();
+                while (mutation != null)
                 {
-                    Map<String, List<Mutation>> subBatch = Collections.singletonMap(columnFamily, Arrays.asList(mutation.right));
-                    batch.put(mutation.left, subBatch);
-                    if ((mutation = queue.poll()) == null)
+                    Map<String, List<Mutation>> subBatch = batch.get(mutation.left);
+                    if (subBatch == null)
+                    {
+                        subBatch = Collections.singletonMap(columnFamily, (List<Mutation>) new ArrayList<Mutation>());
+                        batch.put(mutation.left, subBatch);
+                    }
+
+                    subBatch.get(columnFamily).add(mutation.right);
+                    if (batch.size() >= batchThreshold)
                         break;
+
+                    mutation = queue.poll();
                 }
 
                 Iterator<InetAddress> iter = endpoints.iterator();
@@ -332,7 +351,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<org.apache.cass
                     // send the mutation to the last-used endpoint.  first time through, this will NPE harmlessly.
                     try
                     {
-                        thriftClient.batch_mutate(batch, ConsistencyLevel.ONE);
+                        thriftClient.batch_mutate(batch, consistencyLevel);
                         break;
                     }
                     catch (Exception e)

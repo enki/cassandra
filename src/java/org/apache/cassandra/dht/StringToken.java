@@ -18,16 +18,16 @@
 */
 package org.apache.cassandra.dht;
 
-import org.apache.cassandra.service.StorageService;
 
 public class StringToken extends Token<String>
 {
+    static final long serialVersionUID = 5464084395277974963L;
+
     public StringToken(String token)
     {
         super(token);
     }
 
-    @Override
     public int compareTo(Token<String> o)
     {
         return token.compareTo(o.token);

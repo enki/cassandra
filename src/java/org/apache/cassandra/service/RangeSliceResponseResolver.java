@@ -21,13 +21,15 @@ package org.apache.cassandra.service;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.*;
+import java.util.concurrent.LinkedBlockingQueue;
 
+import com.google.common.collect.AbstractIterator;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Iterators;
+import org.apache.commons.collections.iterators.CollatingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.commons.collections.iterators.CollatingIterator;
-
-import com.google.common.collect.AbstractIterator;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RangeSliceReply;
@@ -40,20 +42,29 @@ import org.apache.cassandra.utils.ReducingIterator;
  * Turns RangeSliceReply objects into row (string -> CF) maps, resolving
  * to the most recent ColumnFamily and setting up read repairs as necessary.
  */
-public class RangeSliceResponseResolver implements IResponseResolver<List<Row>>
+public class RangeSliceResponseResolver implements IResponseResolver<Iterable<Row>>
 {
     private static final Logger logger_ = LoggerFactory.getLogger(RangeSliceResponseResolver.class);
     private final String table;
     private final List<InetAddress> sources;
+    protected final Collection<Message> responses = new LinkedBlockingQueue<Message>();;
 
     public RangeSliceResponseResolver(String table, List<InetAddress> sources)
     {
-        assert sources.size() > 0;
         this.sources = sources;
         this.table = table;
     }
 
-    public List<Row> resolve(Collection<Message> responses) throws DigestMismatchException, IOException
+    public List<Row> getData() throws IOException
+    {
+        Message response = responses.iterator().next();
+        RangeSliceReply reply = RangeSliceReply.read(response.getMessageBody(), response.getVersion());
+        return reply.rows;
+    }
+
+    // Note: this deserializes the response a 2nd time if getData was called first
+    // (this is not currently an issue since we don't do read repair for range queries.)
+    public Iterable<Row> resolve() throws IOException
     {
         CollatingIterator collator = new CollatingIterator(new Comparator<Pair<Row,InetAddress>>()
         {
@@ -66,13 +77,14 @@ public class RangeSliceResponseResolver implements IResponseResolver<List<Row>>
         int n = 0;
         for (Message response : responses)
         {
-            RangeSliceReply reply = RangeSliceReply.read(response.getMessageBody());
+            RangeSliceReply reply = RangeSliceReply.read(response.getMessageBody(), response.getVersion());
             n = Math.max(n, reply.rows.size());
             collator.addIterator(new RowIterator(reply.rows.iterator(), response.getFrom()));
         }
 
         // for each row, compute the combination of all different versions seen, and repair incomplete versions
-        ReducingIterator<Pair<Row,InetAddress>, Row> iter = new ReducingIterator<Pair<Row,InetAddress>, Row>(collator)
+
+        return new ReducingIterator<Pair<Row,InetAddress>, Row>(collator)
         {
             List<ColumnFamily> versions = new ArrayList<ColumnFamily>(sources.size());
             List<InetAddress> versionSources = new ArrayList<InetAddress>(sources.size());
@@ -93,24 +105,23 @@ public class RangeSliceResponseResolver implements IResponseResolver<List<Row>>
 
             protected Row getReduced()
             {
-                ColumnFamily resolved = ReadResponseResolver.resolveSuperset(versions);
-                ReadResponseResolver.maybeScheduleRepairs(resolved, table, key, versions, versionSources);
+                ColumnFamily resolved = RowRepairResolver.resolveSuperset(versions);
+                RowRepairResolver.maybeScheduleRepairs(resolved, table, key, versions, versionSources);
                 versions.clear();
                 versionSources.clear();
                 return new Row(key, resolved);
             }
         };
-
-        List<Row> resolvedRows = new ArrayList<Row>(n);
-        while (iter.hasNext())
-            resolvedRows.add(iter.next());
-
-        return resolvedRows;
     }
 
-    public boolean isDataPresent(Collection<Message> responses)
+    public void preprocess(Message message)
     {
-        return responses.size() >= sources.size();
+        responses.add(message);
+    }
+
+    public boolean isDataPresent()
+    {
+        return !responses.isEmpty();
     }
 
     private static class RowIterator extends AbstractIterator<Pair<Row,InetAddress>>
@@ -124,10 +135,19 @@ public class RangeSliceResponseResolver implements IResponseResolver<List<Row>>
             this.source = source;
         }
 
-        @Override
         protected Pair<Row,InetAddress> computeNext()
         {
             return iter.hasNext() ? new Pair<Row, InetAddress>(iter.next(), source) : endOfData();
         }
+    }
+
+    public Iterable<Message> getMessages()
+    {
+        return responses;
+    }
+
+    public int getMessageCount()
+    {
+        return responses.size();
     }
 }

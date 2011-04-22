@@ -27,8 +27,10 @@ package org.apache.cassandra.service;
 import java.net.InetAddress;
 import java.util.Collection;
 
+import com.google.common.collect.Multimap;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.locator.AbstractNetworkTopologySnitch;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.net.Message;
@@ -36,10 +38,8 @@ import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.FBUtilities;
 
-import com.google.common.collect.Multimap;
-
 /**
- * This class blocks for a quorum of responses _in the local datacenter only_ (CL.DCQUORUM).
+ * This class blocks for a quorum of responses _in the local datacenter only_ (CL.LOCAL_QUORUM).
  */
 public class DatacenterWriteResponseHandler extends WriteResponseHandler
 {
@@ -54,7 +54,7 @@ public class DatacenterWriteResponseHandler extends WriteResponseHandler
     protected DatacenterWriteResponseHandler(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistencyLevel, String table)
     {
         super(writeEndpoints, hintedEndpoints, consistencyLevel, table);
-        assert consistencyLevel == ConsistencyLevel.DCQUORUM;
+        assert consistencyLevel == ConsistencyLevel.LOCAL_QUORUM;
     }
 
     public static IWriteResponseHandler create(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistencyLevel, String table)
@@ -65,7 +65,7 @@ public class DatacenterWriteResponseHandler extends WriteResponseHandler
     @Override
     protected int determineBlockFor(String table)
     {
-        NetworkTopologyStrategy strategy = (NetworkTopologyStrategy) StorageService.instance.getReplicationStrategy(table);
+        NetworkTopologyStrategy strategy = (NetworkTopologyStrategy) Table.open(table).getReplicationStrategy();
         return (strategy.getReplicationFactor(localdc) / 2) + 1;
     }
 
@@ -84,9 +84,9 @@ public class DatacenterWriteResponseHandler extends WriteResponseHandler
     public void assureSufficientLiveNodes() throws UnavailableException
     {
         int liveNodes = 0;
-        for (InetAddress destination : writeEndpoints)
+        for (InetAddress destination : hintedEndpoints.keySet())
         {
-            if (localdc.equals(snitch.getDatacenter(destination)))
+            if (localdc.equals(snitch.getDatacenter(destination)) && writeEndpoints.contains(destination))
                 liveNodes++;
         }
 

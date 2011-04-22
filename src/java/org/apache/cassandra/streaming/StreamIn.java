@@ -25,9 +25,10 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.Collection;
 
+import org.apache.cassandra.gms.Gossiper;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.commons.lang.StringUtils;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Table;
@@ -49,20 +50,20 @@ public class StreamIn
     /**
      * Request ranges to be transferred from source to local node
      */
-    public static void requestRanges(InetAddress source, String tableName, Collection<Range> ranges)
-    {
-        requestRanges(source, tableName, ranges, null);
-    }
-
-    public static void requestRanges(InetAddress source, String tableName, Collection<Range> ranges, Runnable callback)
+    public static void requestRanges(InetAddress source, String tableName, Collection<Range> ranges, Runnable callback, OperationType type)
     {
         assert ranges.size() > 0;
 
         if (logger.isDebugEnabled())
             logger.debug("Requesting from {} ranges {}", source, StringUtils.join(ranges, ", "));
         StreamInSession session = StreamInSession.create(source, callback);
-        Message message = new StreamRequestMessage(FBUtilities.getLocalAddress(), ranges, tableName, session.getSessionId()).makeMessage();
-        MessagingService.instance.sendOneWay(message, source);
+        Message message = new StreamRequestMessage(FBUtilities.getLocalAddress(), 
+                                                   ranges, 
+                                                   tableName, 
+                                                   session.getSessionId(), 
+                                                   type)
+                .getMessage(Gossiper.instance.getVersion(source));
+        MessagingService.instance().sendOneWay(message, source);
     }
 
     /** Translates remote files to local files by creating a local sstable per remote sstable. */
@@ -74,7 +75,7 @@ public class StreamIn
         // new local sstable
         Table table = Table.open(remotedesc.ksname);
         ColumnFamilyStore cfStore = table.getColumnFamilyStore(remotedesc.cfname);
-        Descriptor localdesc = Descriptor.fromFilename(cfStore.getFlushPath());
+        Descriptor localdesc = Descriptor.fromFilename(cfStore.getFlushPath(remote.size, remote.desc.version));
 
         return new PendingFile(localdesc, remote);
      }

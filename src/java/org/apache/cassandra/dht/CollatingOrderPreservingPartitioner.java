@@ -18,38 +18,35 @@
 
 package org.apache.cassandra.dht;
 
-import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.text.Collator;
-import java.util.Arrays;
-import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
-import java.util.Random;
+import java.util.Map;
 
-import org.apache.commons.lang.ArrayUtils;
-
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class CollatingOrderPreservingPartitioner extends AbstractByteOrderedPartitioner
 {
     static final Collator collator = Collator.getInstance(new Locale("en", "US"));
 
-    public BytesToken getToken(byte[] key)
+    public BytesToken getToken(ByteBuffer key)
     {
-        if (key.length == 0)
+        if (key.remaining() == 0)
             return MINIMUM;
 
         String skey;
         try
         {
-            skey = FBUtilities.decodeToUTF8(key);
+            skey = ByteBufferUtil.string(key);
         }
         catch (CharacterCodingException e)
         {
             throw new RuntimeException("The provided key was not UTF8 encoded.", e);
         }
-        return new BytesToken(collator.getCollationKey(skey).toByteArray());
+        return new BytesToken(ByteBuffer.wrap(collator.getCollationKey(skey).toByteArray()));
     }
+
+    public Map<Token, Float> describeOwnership(List<Token> sortedTokens){ throw new UnsupportedOperationException(); }
 }

@@ -22,6 +22,7 @@ package org.apache.cassandra.db;
 
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import org.junit.Test;
 
@@ -32,6 +33,7 @@ import static org.apache.cassandra.Util.column;
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class RecoveryManager2Test extends CleanupHelper
 {
@@ -62,6 +64,7 @@ public class RecoveryManager2Test extends CleanupHelper
 
         logger.debug("begin manual replay");
         // replay the commit log (nothing should be replayed since everything was flushed)
+        CommitLog.instance.resetUnsafe();
         CommitLog.recover();
 
         // since everything that was flushed was removed (i.e. clearUnsafe)
@@ -71,7 +74,7 @@ public class RecoveryManager2Test extends CleanupHelper
 
     private void insertRow(String cfname, String key) throws IOException
     {
-        RowMutation rm = new RowMutation("Keyspace1", key.getBytes());
+        RowMutation rm = new RowMutation("Keyspace1", ByteBufferUtil.bytes(key));
         ColumnFamily cf = ColumnFamily.create("Keyspace1", cfname);
         cf.addColumn(column("col1", "val1", 1L));
         rm.add(cf);

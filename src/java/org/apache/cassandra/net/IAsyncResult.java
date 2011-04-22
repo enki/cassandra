@@ -18,11 +18,11 @@
 
 package org.apache.cassandra.net;
 
-import java.util.List;
+import java.net.InetAddress;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-public interface IAsyncResult
+public interface IAsyncResult extends IMessageCallback
 {    
     /**
      * Same operation as the above get() but allows the calling
@@ -38,4 +38,6 @@ public interface IAsyncResult
      * @param result the response message
      */
     public void result(Message result);
+
+    public InetAddress getFrom();
 }

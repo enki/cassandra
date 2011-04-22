@@ -37,15 +37,10 @@ import java.util.HashSet;
 import java.util.EnumSet;
 import java.util.Collections;
 import java.util.BitSet;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import org.apache.thrift.*;
-import org.apache.thrift.async.*;
-import org.apache.thrift.meta_data.*;
-import org.apache.thrift.transport.*;
-import org.apache.thrift.protocol.*;
 
 /**
  * A SlicePredicate is similar to a mathematic predicate (see http://en.wikipedia.org/wiki/Predicate_(mathematical_logic)),
@@ -59,17 +54,17 @@ import org.apache.thrift.protocol.*;
  *                     and 'Jim' you can pass those column names as a list to fetch all three at once.
  * @param slice_range. A SliceRange describing how to range, order, and/or limit the slice.
  */
-public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fields>, java.io.Serializable, Cloneable {
-  private static final TStruct STRUCT_DESC = new TStruct("SlicePredicate");
+public class SlicePredicate implements org.apache.thrift.TBase<SlicePredicate, SlicePredicate._Fields>, java.io.Serializable, Cloneable {
+  private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("SlicePredicate");
 
-  private static final TField COLUMN_NAMES_FIELD_DESC = new TField("column_names", TType.LIST, (short)1);
-  private static final TField SLICE_RANGE_FIELD_DESC = new TField("slice_range", TType.STRUCT, (short)2);
+  private static final org.apache.thrift.protocol.TField COLUMN_NAMES_FIELD_DESC = new org.apache.thrift.protocol.TField("column_names", org.apache.thrift.protocol.TType.LIST, (short)1);
+  private static final org.apache.thrift.protocol.TField SLICE_RANGE_FIELD_DESC = new org.apache.thrift.protocol.TField("slice_range", org.apache.thrift.protocol.TType.STRUCT, (short)2);
 
-  public List<byte[]> column_names;
+  public List<ByteBuffer> column_names;
   public SliceRange slice_range;
 
   /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
-  public enum _Fields implements TFieldIdEnum {
+  public enum _Fields implements org.apache.thrift.TFieldIdEnum {
     COLUMN_NAMES((short)1, "column_names"),
     SLICE_RANGE((short)2, "slice_range");
 
@@ -131,16 +126,16 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
 
   // isset id assignments
 
-  public static final Map<_Fields, FieldMetaData> metaDataMap;
+  public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
   static {
-    Map<_Fields, FieldMetaData> tmpMap = new EnumMap<_Fields, FieldMetaData>(_Fields.class);
-    tmpMap.put(_Fields.COLUMN_NAMES, new FieldMetaData("column_names", TFieldRequirementType.OPTIONAL, 
-        new ListMetaData(TType.LIST, 
-            new FieldValueMetaData(TType.STRING))));
-    tmpMap.put(_Fields.SLICE_RANGE, new FieldMetaData("slice_range", TFieldRequirementType.OPTIONAL, 
-        new StructMetaData(TType.STRUCT, SliceRange.class)));
+    Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+    tmpMap.put(_Fields.COLUMN_NAMES, new org.apache.thrift.meta_data.FieldMetaData("column_names", org.apache.thrift.TFieldRequirementType.OPTIONAL, 
+        new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+            new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING            , true))));
+    tmpMap.put(_Fields.SLICE_RANGE, new org.apache.thrift.meta_data.FieldMetaData("slice_range", org.apache.thrift.TFieldRequirementType.OPTIONAL, 
+        new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, SliceRange.class)));
     metaDataMap = Collections.unmodifiableMap(tmpMap);
-    FieldMetaData.addStructMetaDataMap(SlicePredicate.class, metaDataMap);
+    org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(SlicePredicate.class, metaDataMap);
   }
 
   public SlicePredicate() {
@@ -151,10 +146,10 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
    */
   public SlicePredicate(SlicePredicate other) {
     if (other.isSetColumn_names()) {
-      List<byte[]> __this__column_names = new ArrayList<byte[]>();
-      for (byte[] other_element : other.column_names) {
-        byte[] temp_binary_element = new byte[other_element.length];
-        System.arraycopy(other_element, 0, temp_binary_element, 0, other_element.length);
+      List<ByteBuffer> __this__column_names = new ArrayList<ByteBuffer>();
+      for (ByteBuffer other_element : other.column_names) {
+        ByteBuffer temp_binary_element = org.apache.thrift.TBaseHelper.copyBinary(other_element);
+;
         __this__column_names.add(temp_binary_element);
       }
       this.column_names = __this__column_names;
@@ -168,31 +163,32 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     return new SlicePredicate(this);
   }
 
-  @Deprecated
-  public SlicePredicate clone() {
-    return new SlicePredicate(this);
+  @Override
+  public void clear() {
+    this.column_names = null;
+    this.slice_range = null;
   }
 
   public int getColumn_namesSize() {
     return (this.column_names == null) ? 0 : this.column_names.size();
   }
 
-  public java.util.Iterator<byte[]> getColumn_namesIterator() {
+  public java.util.Iterator<ByteBuffer> getColumn_namesIterator() {
     return (this.column_names == null) ? null : this.column_names.iterator();
   }
 
-  public void addToColumn_names(byte[] elem) {
+  public void addToColumn_names(ByteBuffer elem) {
     if (this.column_names == null) {
-      this.column_names = new ArrayList<byte[]>();
+      this.column_names = new ArrayList<ByteBuffer>();
     }
     this.column_names.add(elem);
   }
 
-  public List<byte[]> getColumn_names() {
+  public List<ByteBuffer> getColumn_names() {
     return this.column_names;
   }
 
-  public SlicePredicate setColumn_names(List<byte[]> column_names) {
+  public SlicePredicate setColumn_names(List<ByteBuffer> column_names) {
     this.column_names = column_names;
     return this;
   }
@@ -201,7 +197,7 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     this.column_names = null;
   }
 
-  /** Returns true if field column_names is set (has been asigned a value) and false otherwise */
+  /** Returns true if field column_names is set (has been assigned a value) and false otherwise */
   public boolean isSetColumn_names() {
     return this.column_names != null;
   }
@@ -225,7 +221,7 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     this.slice_range = null;
   }
 
-  /** Returns true if field slice_range is set (has been asigned a value) and false otherwise */
+  /** Returns true if field slice_range is set (has been assigned a value) and false otherwise */
   public boolean isSetSlice_range() {
     return this.slice_range != null;
   }
@@ -242,7 +238,7 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
       if (value == null) {
         unsetColumn_names();
       } else {
-        setColumn_names((List<byte[]>)value);
+        setColumn_names((List<ByteBuffer>)value);
       }
       break;
 
@@ -257,10 +253,6 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     }
   }
 
-  public void setFieldValue(int fieldID, Object value) {
-    setFieldValue(_Fields.findByThriftIdOrThrow(fieldID), value);
-  }
-
   public Object getFieldValue(_Fields field) {
     switch (field) {
     case COLUMN_NAMES:
@@ -273,12 +265,12 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     throw new IllegalStateException();
   }
 
-  public Object getFieldValue(int fieldId) {
-    return getFieldValue(_Fields.findByThriftIdOrThrow(fieldId));
-  }
-
-  /** Returns true if field corresponding to fieldID is set (has been asigned a value) and false otherwise */
+  /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
   public boolean isSet(_Fields field) {
+    if (field == null) {
+      throw new IllegalArgumentException();
+    }
+
     switch (field) {
     case COLUMN_NAMES:
       return isSetColumn_names();
@@ -286,10 +278,6 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
       return isSetSlice_range();
     }
     throw new IllegalStateException();
-  }
-
-  public boolean isSet(int fieldID) {
-    return isSet(_Fields.findByThriftIdOrThrow(fieldID));
   }
 
   @Override
@@ -355,7 +343,8 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetColumn_names()) {      lastComparison = TBaseHelper.compareTo(this.column_names, typedOther.column_names);
+    if (isSetColumn_names()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.column_names, typedOther.column_names);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -364,7 +353,8 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetSlice_range()) {      lastComparison = TBaseHelper.compareTo(this.slice_range, typedOther.slice_range);
+    if (isSetSlice_range()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.slice_range, typedOther.slice_range);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -372,43 +362,47 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     return 0;
   }
 
-  public void read(TProtocol iprot) throws TException {
-    TField field;
+  public _Fields fieldForId(int fieldId) {
+    return _Fields.findByThriftId(fieldId);
+  }
+
+  public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+    org.apache.thrift.protocol.TField field;
     iprot.readStructBegin();
     while (true)
     {
       field = iprot.readFieldBegin();
-      if (field.type == TType.STOP) { 
+      if (field.type == org.apache.thrift.protocol.TType.STOP) { 
         break;
       }
       switch (field.id) {
         case 1: // COLUMN_NAMES
-          if (field.type == TType.LIST) {
+          if (field.type == org.apache.thrift.protocol.TType.LIST) {
             {
-              TList _list4 = iprot.readListBegin();
-              this.column_names = new ArrayList<byte[]>(_list4.size);
-              for (int _i5 = 0; _i5 < _list4.size; ++_i5)
+              org.apache.thrift.protocol.TList _list8 = iprot.readListBegin();
+              this.column_names = new ArrayList<ByteBuffer>(_list8.size);
+              for (int _i9 = 0; _i9 < _list8.size; ++_i9)
               {
-                byte[] _elem6;
-                _elem6 = iprot.readBinary();
-                this.column_names.add(_elem6);
+                ByteBuffer _elem10;
+                _elem10 = iprot.readBinary();
+                this.column_names.add(_elem10);
               }
               iprot.readListEnd();
             }
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         case 2: // SLICE_RANGE
-          if (field.type == TType.STRUCT) {
+          if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
             this.slice_range = new SliceRange();
             this.slice_range.read(iprot);
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         default:
-          TProtocolUtil.skip(iprot, field.type);
+          org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
       }
       iprot.readFieldEnd();
     }
@@ -418,7 +412,7 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     validate();
   }
 
-  public void write(TProtocol oprot) throws TException {
+  public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
     validate();
 
     oprot.writeStructBegin(STRUCT_DESC);
@@ -426,10 +420,10 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
       if (isSetColumn_names()) {
         oprot.writeFieldBegin(COLUMN_NAMES_FIELD_DESC);
         {
-          oprot.writeListBegin(new TList(TType.STRING, this.column_names.size()));
-          for (byte[] _iter7 : this.column_names)
+          oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, this.column_names.size()));
+          for (ByteBuffer _iter11 : this.column_names)
           {
-            oprot.writeBinary(_iter7);
+            oprot.writeBinary(_iter11);
           }
           oprot.writeListEnd();
         }
@@ -475,8 +469,24 @@ public class SlicePredicate implements TBase<SlicePredicate, SlicePredicate._Fie
     return sb.toString();
   }
 
-  public void validate() throws TException {
+  public void validate() throws org.apache.thrift.TException {
     // check for required fields
+  }
+
+  private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+    try {
+      write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+    } catch (org.apache.thrift.TException te) {
+      throw new java.io.IOException(te);
+    }
+  }
+
+  private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+    try {
+      read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+    } catch (org.apache.thrift.TException te) {
+      throw new java.io.IOException(te);
+    }
   }
 
 }

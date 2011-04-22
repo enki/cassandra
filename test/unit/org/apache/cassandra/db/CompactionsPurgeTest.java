@@ -19,13 +19,13 @@
 package org.apache.cassandra.db;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.concurrent.ExecutionException;
 
 import org.junit.Test;
 
 import org.apache.cassandra.CleanupHelper;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -33,6 +33,8 @@ import org.apache.cassandra.Util;
 
 import static junit.framework.Assert.assertEquals;
 import static org.apache.cassandra.db.TableTest.assertColumns;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
 
 public class CompactionsPurgeTest extends CleanupHelper
 {
@@ -55,7 +57,7 @@ public class CompactionsPurgeTest extends CleanupHelper
         rm = new RowMutation(TABLE1, key.key);
         for (int i = 0; i < 10; i++)
         {
-            rm.add(new QueryPath(cfName, null, String.valueOf(i).getBytes()), new byte[0], 0);
+            rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
         rm.apply();
         cfs.forceBlockingFlush();
@@ -64,14 +66,14 @@ public class CompactionsPurgeTest extends CleanupHelper
         for (int i = 0; i < 10; i++)
         {
             rm = new RowMutation(TABLE1, key.key);
-            rm.delete(new QueryPath(cfName, null, String.valueOf(i).getBytes()), 1);
+            rm.delete(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), 1);
             rm.apply();
         }
         cfs.forceBlockingFlush();
 
         // resurrect one column
         rm = new RowMutation(TABLE1, key.key);
-        rm.add(new QueryPath(cfName, null, String.valueOf(5).getBytes()), new byte[0], 2);
+        rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(5))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 2);
         rm.apply();
         cfs.forceBlockingFlush();
 
@@ -80,7 +82,7 @@ public class CompactionsPurgeTest extends CleanupHelper
         cfs.invalidateCachedRow(key);
         ColumnFamily cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, new QueryPath(cfName)));
         assertColumns(cf, "5");
-        assert cf.getColumn(String.valueOf(5).getBytes()) != null;
+        assert cf.getColumn(ByteBufferUtil.bytes(String.valueOf(5))) != null;
     }
 
     @Test
@@ -100,7 +102,7 @@ public class CompactionsPurgeTest extends CleanupHelper
             rm = new RowMutation(TABLE2, key.key);
             for (int i = 0; i < 10; i++)
             {
-                rm.add(new QueryPath(cfName, null, String.valueOf(i).getBytes()), new byte[0], 0);
+                rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
             }
             rm.apply();
             cfs.forceBlockingFlush();
@@ -109,7 +111,7 @@ public class CompactionsPurgeTest extends CleanupHelper
             for (int i = 0; i < 10; i++)
             {
                 rm = new RowMutation(TABLE2, key.key);
-                rm.delete(new QueryPath(cfName, null, String.valueOf(i).getBytes()), 1);
+                rm.delete(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), 1);
                 rm.apply();
             }
             cfs.forceBlockingFlush();
@@ -123,7 +125,7 @@ public class CompactionsPurgeTest extends CleanupHelper
         cfs.forceBlockingFlush();
         Collection<SSTableReader> sstablesIncomplete = cfs.getSSTables();
         rm = new RowMutation(TABLE2, key1.key);
-        rm.add(new QueryPath(cfName, null, String.valueOf(5).getBytes()), new byte[0], 2);
+        rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(5))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 2);
         rm.apply();
         cfs.forceBlockingFlush();
         CompactionManager.instance.doCompaction(cfs, sstablesIncomplete, Integer.MAX_VALUE);
@@ -155,7 +157,7 @@ public class CompactionsPurgeTest extends CleanupHelper
         rm = new RowMutation(TABLE1, key.key);
         for (int i = 0; i < 5; i++)
         {
-            rm.add(new QueryPath(cfName, null, String.valueOf(i).getBytes()), new byte[0], 0);
+            rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
         rm.apply();
 
@@ -163,7 +165,7 @@ public class CompactionsPurgeTest extends CleanupHelper
         for (int i = 0; i < 5; i++)
         {
             rm = new RowMutation(TABLE1, key.key);
-            rm.delete(new QueryPath(cfName, null, String.valueOf(i).getBytes()), 1);
+            rm.delete(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), 1);
             rm.apply();
         }
         store.forceBlockingFlush();
@@ -178,57 +180,51 @@ public class CompactionsPurgeTest extends CleanupHelper
     }
 
     @Test
-    public void testKeyCache50() throws IOException, ExecutionException, InterruptedException
-    {
-        testKeyCache("Standard3", 64);
-    }
-
-    @Test
-    public void testKeyCache100() throws IOException, ExecutionException, InterruptedException
-    {
-        testKeyCache("Standard4", 128);
-    }
-
-    public void testKeyCache(String cfname, int expectedCacheSize) throws IOException, ExecutionException, InterruptedException
+    public void testCompactionPurgeTombstonedRow() throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        Table table = Table.open(TABLE1);
-        String cfName = cfname;
-        ColumnFamilyStore store = table.getColumnFamilyStore(cfName);
+        String tableName = "RowCacheSpace";
+        String cfName = "CachedCF";
+        Table table = Table.open(tableName);
+        ColumnFamilyStore cfs = table.getColumnFamilyStore(cfName);
 
-        // KeyCache should start at size 1 if we're caching X% of zero data.
-        int keyCacheSize = store.getKeyCacheCapacity();
-        assert keyCacheSize == 1 : keyCacheSize;
-
-        DecoratedKey key1 = Util.dk("key1");
-        DecoratedKey key2 = Util.dk("key2");
+        DecoratedKey key = Util.dk("key3");
         RowMutation rm;
 
         // inserts
-        rm = new RowMutation(TABLE1, key1.key);
-        rm.add(new QueryPath(cfName, null, "1".getBytes()), new byte[0], 0);
-        rm.apply();
-        rm = new RowMutation(TABLE1, key2.key);
-        rm.add(new QueryPath(cfName, null, "2".getBytes()), new byte[0], 0);
-        rm.apply();
-
-        // deletes
-        rm = new RowMutation(TABLE1, key1.key);
-        rm.delete(new QueryPath(cfName, null, "1".getBytes()), 1);
-        rm.apply();
-        rm = new RowMutation(TABLE1, key2.key);
-        rm.delete(new QueryPath(cfName, null, "2".getBytes()), 1);
+        rm = new RowMutation(tableName, key.key);
+        for (int i = 0; i < 10; i++)
+        {
+            rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        }
         rm.apply();
 
-        // After a flush, the cache should expand to be X% of indices * INDEX_INTERVAL.
-        store.forceBlockingFlush();
-        keyCacheSize = store.getKeyCacheCapacity();
-        assert keyCacheSize == expectedCacheSize : keyCacheSize;
+        // move the key up in row cache
+        cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, new QueryPath(cfName)));
 
-        // After a compaction, the cache should expand to be X% of zero data.
-        CompactionManager.instance.submitMajor(store, 0, Integer.MAX_VALUE).get();
-        keyCacheSize = store.getKeyCacheCapacity();
-        assert keyCacheSize == 1 : keyCacheSize;
+        // deletes row
+        rm = new RowMutation(tableName, key.key);
+        rm.delete(new QueryPath(cfName, null, null), 1);
+        rm.apply();
+
+        // flush and major compact
+        cfs.forceBlockingFlush();
+        CompactionManager.instance.submitMajor(cfs, 0, Integer.MAX_VALUE).get();
+        //cfs.invalidateCachedRow(key);
+
+        // re-inserts with timestamp lower than delete
+        rm = new RowMutation(tableName, key.key);
+        for (int i = 0; i < 10; i++)
+        {
+            rm.add(new QueryPath(cfName, null, ByteBufferUtil.bytes(String.valueOf(i))), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        }
+        rm.apply();
+
+        // Check that the second insert did went in
+        ColumnFamily cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, new QueryPath(cfName)));
+        assert cf.getColumnCount() == 10;
+        for (IColumn c : cf)
+            assert !c.isMarkedForDelete();
     }
 }

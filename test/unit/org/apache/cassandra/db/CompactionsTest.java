@@ -20,6 +20,7 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.List;
@@ -32,9 +33,9 @@ import org.apache.cassandra.Util;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import static junit.framework.Assert.assertEquals;
@@ -45,32 +46,49 @@ public class CompactionsTest extends CleanupHelper
     public static final String TABLE2 = "Keyspace2";
     public static final InetAddress LOCAL = FBUtilities.getLocalAddress();
 
+    public static final int MIN_COMPACTION_THRESHOLD = 2;
+
     @Test
     public void testCompactions() throws IOException, ExecutionException, InterruptedException
     {
-        CompactionManager.instance.disableAutoCompaction();
-
         // this test does enough rows to force multiple block indexes to be used
         Table table = Table.open(TABLE1);
         ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
 
         final int ROWS_PER_SSTABLE = 10;
+        final int SSTABLES = (DatabaseDescriptor.getIndexInterval() * 3 / ROWS_PER_SSTABLE);
+
+        // disable compaction while flushing
+        store.disableAutoCompaction();
+
         Set<DecoratedKey> inserted = new HashSet<DecoratedKey>();
-        for (int j = 0; j < (DatabaseDescriptor.getIndexInterval() * 3) / ROWS_PER_SSTABLE; j++) {
+        for (int j = 0; j < SSTABLES; j++) {
             for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
                 DecoratedKey key = Util.dk(String.valueOf(i % 2));
                 RowMutation rm = new RowMutation(TABLE1, key.key);
-                rm.add(new QueryPath("Standard1", null, String.valueOf(i / 2).getBytes()), new byte[0], j * ROWS_PER_SSTABLE + i);
+                rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes(String.valueOf(i / 2))), ByteBufferUtil.EMPTY_BYTE_BUFFER, j * ROWS_PER_SSTABLE + i);
                 rm.apply();
                 inserted.add(key);
             }
             store.forceBlockingFlush();
             assertEquals(inserted.toString(), inserted.size(), Util.getRangeSlice(store).size());
         }
+        // re-enable compaction with thresholds low enough to force a few rounds
+        store.setMinimumCompactionThreshold(2);
+        store.setMaximumCompactionThreshold(4);
+        // loop submitting parallel compactions until they all return 0
         while (true)
         {
-            Future<Integer> ft = CompactionManager.instance.submitMinorIfNeeded(store);
-            if (ft.get() == 0)
+            ArrayList<Future<Integer>> compactions = new ArrayList<Future<Integer>>();
+            for (int i = 0; i < 10; i++)
+                compactions.add(CompactionManager.instance.submitMinorIfNeeded(store));
+            // another compaction attempt will be launched in the background by
+            // each completing compaction: not much we can do to control them here
+            boolean progress = false;
+            for (Future<Integer> compaction : compactions)
+               if (compaction.get() > 0)
+                   progress = true;
+            if (!progress)
                 break;
         }
         if (store.getSSTables().size() > 1)
@@ -135,5 +153,4 @@ public class CompactionsTest extends CleanupHelper
         buckets = CompactionManager.getBuckets(pairs, 10); // notice the min is 10
         assertEquals(1, buckets.size());
     }
-
 }

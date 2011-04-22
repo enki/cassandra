@@ -1,19 +1,18 @@
 package org.apache.cassandra.db.migration;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.SystemTable;
+import org.apache.cassandra.db.CompactionManager;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -38,21 +37,19 @@ public class DropColumnFamily extends Migration
 {
     private String tableName;
     private String cfName;
-    private boolean blockOnFileDeletion;
     
     /** Required no-arg constructor */
     protected DropColumnFamily() { /* pass */ }
     
-    public DropColumnFamily(String tableName, String cfName, boolean blockOnFileDeletion) throws ConfigurationException, IOException
+    public DropColumnFamily(String tableName, String cfName) throws ConfigurationException, IOException
     {
         super(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress()), DatabaseDescriptor.getDefsVersion());
         this.tableName = tableName;
         this.cfName = cfName;
-        this.blockOnFileDeletion = blockOnFileDeletion;
         
         KSMetaData ksm = DatabaseDescriptor.getTableDefinition(tableName);
         if (ksm == null)
-            throw new ConfigurationException("Keyspace does not already exist.");
+            throw new ConfigurationException("No such keyspace: " + tableName);
         else if (!ksm.cfMetaData().containsKey(cfName))
             throw new ConfigurationException("CF is not defined in that keyspace.");
         
@@ -67,31 +64,35 @@ public class DropColumnFamily extends Migration
         List<CFMetaData> newCfs = new ArrayList<CFMetaData>(ksm.cfMetaData().values());
         newCfs.remove(cfm);
         assert newCfs.size() == ksm.cfMetaData().size() - 1;
-        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
+        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, newCfs.toArray(new CFMetaData[newCfs.size()]));
     }
 
-    @Override
-    public void beforeApplyModels()
-    {
-        if (clientMode)
-            return;
-        ColumnFamilyStore cfs = Table.open(tableName).getColumnFamilyStore(cfName);
-        cfs.snapshot(Table.getTimestampedSnapshotName(null));
-    }
-
-    @Override
     public void applyModels() throws IOException
     {
+        ColumnFamilyStore cfs = Table.open(tableName).getColumnFamilyStore(cfName);
+
         // reinitialize the table.
         KSMetaData existing = DatabaseDescriptor.getTableDefinition(tableName);
         CFMetaData cfm = existing.cfMetaData().get(cfName);
         KSMetaData ksm = makeNewKeyspaceDefinition(existing);
         CFMetaData.purge(cfm);
         DatabaseDescriptor.setTableDefinition(ksm, newVersion);
-        
+
         if (!clientMode)
         {
-            Table.open(ksm.name).dropCf(cfm.cfId);
+            cfs.snapshot(Table.getTimestampedSnapshotName(null));
+
+            CompactionManager.instance.getCompactionLock().lock();
+            cfs.flushLock.lock();
+            try
+            {
+                Table.open(ksm.name).dropCf(cfm.cfId);
+            }
+            finally
+            {
+                cfs.flushLock.unlock();
+                CompactionManager.instance.getCompactionLock().unlock();
+            }
         }
     }
     
@@ -100,7 +101,6 @@ public class DropColumnFamily extends Migration
         org.apache.cassandra.db.migration.avro.DropColumnFamily dcf = new org.apache.cassandra.db.migration.avro.DropColumnFamily();
         dcf.ksname = new org.apache.avro.util.Utf8(tableName);
         dcf.cfname = new org.apache.avro.util.Utf8(cfName);
-        dcf.block_on_deletion = blockOnFileDeletion;
         mi.migration = dcf;
     }
 
@@ -109,6 +109,11 @@ public class DropColumnFamily extends Migration
         org.apache.cassandra.db.migration.avro.DropColumnFamily dcf = (org.apache.cassandra.db.migration.avro.DropColumnFamily)mi.migration;
         tableName = dcf.ksname.toString();
         cfName = dcf.cfname.toString();
-        blockOnFileDeletion = dcf.block_on_deletion;
+    }
+
+    @Override
+    public String toString()
+    {
+        return String.format("Drop column family: %s.%s", tableName, cfName);
     }
 }

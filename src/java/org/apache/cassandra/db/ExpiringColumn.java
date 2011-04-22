@@ -18,13 +18,15 @@
 
 package org.apache.cassandra.db;
 
-import java.security.MessageDigest;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 
-import org.apache.log4j.Logger;
-
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * Alternative to Column that have an expiring time.
@@ -38,21 +40,19 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
  */
 public class ExpiringColumn extends Column
 {
-    private static Logger logger = Logger.getLogger(ExpiringColumn.class);
-
     private final int localExpirationTime;
     private final int timeToLive;
 
-    public ExpiringColumn(byte[] name, byte[] value, long timestamp, int timeToLive)
+    public ExpiringColumn(ByteBuffer name, ByteBuffer value, long timestamp, int timeToLive)
     {
       this(name, value, timestamp, timeToLive, (int) (System.currentTimeMillis() / 1000) + timeToLive);
     }
 
-    public ExpiringColumn(byte[] name, byte[] value, long timestamp, int timeToLive, int localExpirationTime)
+    public ExpiringColumn(ByteBuffer name, ByteBuffer value, long timestamp, int timeToLive, int localExpirationTime)
     {
         super(name, value, timestamp);
-        assert timeToLive > 0;
-        assert localExpirationTime > 0;
+        assert timeToLive > 0 : timeToLive;
+        assert localExpirationTime > 0 : localExpirationTime;
         this.timeToLive = timeToLive;
         this.localExpirationTime = localExpirationTime;
     }
@@ -82,13 +82,14 @@ public class ExpiringColumn extends Column
     @Override
     public void updateDigest(MessageDigest digest)
     {
-        digest.update(name());
-        digest.update(value());
+        digest.update(name.duplicate());
+        digest.update(value.duplicate());
+
         DataOutputBuffer buffer = new DataOutputBuffer();
         try
         {
             buffer.writeLong(timestamp);
-            buffer.writeByte(ColumnSerializer.EXPIRATION_MASK);
+            buffer.writeByte(serializationFlags());
             buffer.writeInt(timeToLive);
         }
         catch (IOException e)
@@ -104,6 +105,12 @@ public class ExpiringColumn extends Column
         return localExpirationTime;
     }
 
+    @Override
+    public IColumn localCopy(ColumnFamilyStore cfs)
+    {
+        return new ExpiringColumn(cfs.internOrCopy(name), ByteBufferUtil.clone(value), timestamp, timeToLive, localExpirationTime);
+    }
+    
     @Override
     public String getString(AbstractType comparator)
     {
@@ -125,5 +132,21 @@ public class ExpiringColumn extends Column
         {
             throw new IllegalStateException("column is not marked for delete");
         }
+    }
+
+    @Override
+    public int serializationFlags()
+    {
+        return ColumnSerializer.EXPIRATION_MASK;
+    }
+
+    @Override
+    public void validateFields(CFMetaData metadata) throws MarshalException
+    {
+        super.validateFields(metadata);
+        if (timeToLive <= 0)
+            throw new MarshalException("A column TTL should be > 0");
+        if (localExpirationTime < 0)
+            throw new MarshalException("The local expiration time should not be negative");
     }
 }

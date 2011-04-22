@@ -21,32 +21,34 @@ package org.apache.cassandra.db.filter;
  */
 
 
-import java.util.*;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
 
+import org.apache.commons.collections.IteratorUtils;
+import org.apache.commons.collections.iterators.ReverseListIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.commons.collections.comparators.ReverseComparator;
-import org.apache.commons.collections.iterators.ReverseListIterator;
-import org.apache.commons.collections.IteratorUtils;
 
-import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SSTableSliceIterator;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.marshal.AbstractType;
 
 public class SliceQueryFilter implements IFilter
 {
     private static Logger logger = LoggerFactory.getLogger(SliceQueryFilter.class);
 
-    public final byte[] start;
-    public final byte[] finish;
+    public final ByteBuffer start;
+    public final ByteBuffer finish;
     public final boolean reversed;
     public final int count;
 
-    public SliceQueryFilter(byte[] start, byte[] finish, boolean reversed, int count)
+    public SliceQueryFilter(ByteBuffer start, ByteBuffer finish, boolean reversed, int count)
     {
         this.start = start;
         this.finish = finish;
@@ -64,9 +66,9 @@ public class SliceQueryFilter implements IFilter
         return new SSTableSliceIterator(sstable, key, start, finish, reversed);
     }
     
-    public IColumnIterator getSSTableColumnIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key)
+    public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key)
     {
-        return new SSTableSliceIterator(metadata, file, key, start, finish, reversed);
+        return new SSTableSliceIterator(sstable, file, key, start, finish, reversed);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)
@@ -86,7 +88,7 @@ public class SliceQueryFilter implements IFilter
         }
 
         // iterate until we get to the "real" start column
-        Comparator<byte[]> comparator = reversed ? superColumn.getComparator().getReverseComparator() : superColumn.getComparator();
+        Comparator<ByteBuffer> comparator = reversed ? superColumn.getComparator().reverseComparator : superColumn.getComparator();
         while (subcolumns.hasNext())
         {
             IColumn column = subcolumns.next();
@@ -103,7 +105,7 @@ public class SliceQueryFilter implements IFilter
 
     public Comparator<IColumn> getColumnComparator(AbstractType comparator)
     {
-        return reversed ? new ReverseComparator(QueryFilter.getColumnComparator(comparator)) : QueryFilter.getColumnComparator(comparator);
+        return reversed ? comparator.columnReverseComparator : comparator.columnComparator;
     }
 
     public void collectReducedColumns(IColumnContainer container, Iterator<IColumn> reducedColumns, int gcBefore)
@@ -121,13 +123,13 @@ public class SliceQueryFilter implements IFilter
                 logger.debug(String.format("collecting %s of %s: %s",
                                            liveColumns, count, column.getString(comparator)));
 
-            if (finish.length > 0
+            if (finish.remaining() > 0
                 && ((!reversed && comparator.compare(column.name(), finish) > 0))
                     || (reversed && comparator.compare(column.name(), finish) < 0))
                 break;
-
+ 
             // only count live columns towards the `count` criteria
-            if (!column.isMarkedForDelete()
+            if (column.isLive() 
                 && (!container.isMarkedForDelete()
                     || column.mostRecentLiveChangeAt() > container.getMarkedForDeleteAt()))
             {
@@ -138,5 +140,14 @@ public class SliceQueryFilter implements IFilter
             if (QueryFilter.isRelevant(column, container, gcBefore))
                 container.addColumn(column);
         }
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(" +
+               "start=" + start +
+               ", finish=" + finish +
+               ", reversed=" + reversed +
+               ", count=" + count + "]";
     }
 }

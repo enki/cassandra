@@ -1,20 +1,16 @@
 package org.apache.cassandra.db.migration;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.db.DefsTable;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -34,7 +30,8 @@ import java.util.List;
  * limitations under the License.
  */
 
-
+/** Deprecated until we can figure out how to rename on a live node without complicating flushing and compaction. */
+@Deprecated
 public class RenameColumnFamily extends Migration
 {
     private String tableName;
@@ -56,7 +53,7 @@ public class RenameColumnFamily extends Migration
         
         KSMetaData ksm = DatabaseDescriptor.getTableDefinition(tableName);
         if (ksm == null)
-            throw new ConfigurationException("Keyspace does not already exist.");
+            throw new ConfigurationException("No such keyspace: " + tableName);
         if (!ksm.cfMetaData().containsKey(oldName))
             throw new ConfigurationException("CF is not defined in that keyspace.");
         if (ksm.cfMetaData().containsKey(newName))
@@ -79,10 +76,9 @@ public class RenameColumnFamily extends Migration
         assert newCfs.size() == ksm.cfMetaData().size() - 1;
         CFMetaData newCfm = CFMetaData.rename(oldCfm, newName);
         newCfs.add(newCfm);
-        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
+        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, newCfs.toArray(new CFMetaData[newCfs.size()]));
     }
 
-    @Override
     public void applyModels() throws IOException
     {
         // leave it up to operators to ensure there are no writes going on durng the file rename. Just know that
@@ -127,5 +123,11 @@ public class RenameColumnFamily extends Migration
         cfId = rcf.cfid;
         oldName = rcf.old_cfname.toString();
         newName = rcf.new_cfname.toString();
+    }
+
+    @Override
+    public String toString()
+    {
+        return String.format("Rename column family (%d) %s.%s to %s.%s", cfId, tableName, oldName, tableName, newName);
     }
 }

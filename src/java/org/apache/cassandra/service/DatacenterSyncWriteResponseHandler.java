@@ -30,19 +30,19 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.collect.Multimap;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.locator.AbstractNetworkTopologySnitch;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.thrift.ConsistencyLevel;
 import org.apache.cassandra.thrift.UnavailableException;
-
-import com.google.common.collect.Multimap;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
- * This class blocks for a quorum of responses _in all datacenters_ (CL.DCQUORUMSYNC).
+ * This class blocks for a quorum of responses _in all datacenters_ (CL.EACH_QUORUM).
  */
 public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHandler
 {
@@ -61,9 +61,9 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
     {
         // Response is been managed by the map so make it 1 for the superclass.
         super(writeEndpoints, hintedEndpoints, consistencyLevel);
-        assert consistencyLevel == ConsistencyLevel.DCQUORUM;
+        assert consistencyLevel == ConsistencyLevel.EACH_QUORUM;
 
-        strategy = (NetworkTopologyStrategy) StorageService.instance.getReplicationStrategy(table);
+        strategy = (NetworkTopologyStrategy) Table.open(table).getReplicationStrategy();
 
         for (String dc : strategy.getDatacenters())
         {
@@ -102,10 +102,12 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
             dcEndpoints.put(dc, new AtomicInteger());
         for (InetAddress destination : hintedEndpoints.keySet())
         {
-            assert writeEndpoints.contains(destination);
-            // figure out the destination dc
-            String destinationDC = snitch.getDatacenter(destination);
-            dcEndpoints.get(destinationDC).incrementAndGet();
+            if (writeEndpoints.contains(destination))
+            {
+                // figure out the destination dc
+                String destinationDC = snitch.getDatacenter(destination);
+                dcEndpoints.get(destinationDC).incrementAndGet();
+            }
         }
 
         // Throw exception if any of the DC doesn't have livenodes to accept write.
@@ -114,5 +116,10 @@ public class DatacenterSyncWriteResponseHandler extends AbstractWriteResponseHan
         	if (dcEndpoints.get(dc).get() != responses.get(dc).get())
                 throw new UnavailableException();
         }
+    }
+
+    public boolean isLatencyForSnitch()
+    {
+        return false;
     }
 }

@@ -18,18 +18,13 @@
 
 package org.apache.cassandra.db;
 
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
-import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.io.ICompactSerializer;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.FBUtilities;
-
-import org.apache.commons.lang.ArrayUtils;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 
 /*
@@ -51,19 +46,21 @@ private static ICompactSerializer<ReadResponse> serializer_;
         return serializer_;
     }
     
-	private Row row_;
-	private byte[] digest_ = ArrayUtils.EMPTY_BYTE_ARRAY;
-    private boolean isDigestQuery_ = false;
+	private final Row row_;
+	private final ByteBuffer digest_;
 
-	public ReadResponse(byte[] digest )
+	public ReadResponse(ByteBuffer digest )
     {
         assert digest != null;
 		digest_= digest;
+        row_ = null;
 	}
 
 	public ReadResponse(Row row)
     {
+        assert row != null;
 		row_ = row;
+        digest_ = null;
 	}
 
 	public Row row() 
@@ -71,51 +68,51 @@ private static ICompactSerializer<ReadResponse> serializer_;
 		return row_;
     }
         
-	public byte[] digest() 
+	public ByteBuffer digest() 
     {
 		return digest_;
 	}
 
 	public boolean isDigestQuery()
     {
-    	return isDigestQuery_;
-    }
-    
-    public void setIsDigestQuery(boolean isDigestQuery)
-    {
-    	isDigestQuery_ = isDigestQuery;
+    	return digest_ != null;
     }
 }
 
 class ReadResponseSerializer implements ICompactSerializer<ReadResponse>
 {
-	public void serialize(ReadResponse rm, DataOutputStream dos) throws IOException
+	public void serialize(ReadResponse rm, DataOutputStream dos, int version) throws IOException
 	{
-        dos.writeInt(rm.digest().length);
-        dos.write(rm.digest());
+        dos.writeInt(rm.isDigestQuery() ? rm.digest().remaining() : 0);
+        ByteBuffer buffer = rm.isDigestQuery() ? rm.digest() : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+        ByteBufferUtil.write(buffer, dos);
         dos.writeBoolean(rm.isDigestQuery());
-        
-        if( !rm.isDigestQuery() && rm.row() != null )
-        {            
-            Row.serializer().serialize(rm.row(), dos);
-        }				
-	}
+
+        if (!rm.isDigestQuery())
+        {
+            Row.serializer().serialize(rm.row(), dos, version);
+        }
+    }
 	
-    public ReadResponse deserialize(DataInputStream dis) throws IOException
+    public ReadResponse deserialize(DataInputStream dis, int version) throws IOException
     {
+        byte[] digest = null;
         int digestSize = dis.readInt();
-        byte[] digest = new byte[digestSize];
-        dis.read(digest, 0 , digestSize);
+        if (digestSize > 0)
+        {
+            digest = new byte[digestSize];
+            dis.readFully(digest, 0, digestSize);
+        }
         boolean isDigest = dis.readBoolean();
-        
+        assert isDigest == digestSize > 0;
+
         Row row = null;
         if (!isDigest)
         {
-            row = Row.serializer().deserialize(dis);
+            // This is coming from a remote host
+            row = Row.serializer().deserialize(dis, version, true);
         }
 
-        ReadResponse rmsg = isDigest ? new ReadResponse(digest) : new ReadResponse(row);
-        rmsg.setIsDigestQuery(isDigest);
-    	return rmsg;
+        return isDigest ? new ReadResponse(ByteBuffer.wrap(digest)) : new ReadResponse(row);
     } 
 }

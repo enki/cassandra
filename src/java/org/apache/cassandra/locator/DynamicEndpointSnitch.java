@@ -18,43 +18,46 @@
 
 package org.apache.cassandra.locator;
 
+import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.*;
-import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import java.lang.management.ManagementFactory;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
-import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.AbstractStatsDeque;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.config.DatabaseDescriptor;
 
 /**
  * A dynamic snitch that sorts endpoints by latency with an adapted phi failure detector
  */
 public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILatencySubscriber, DynamicEndpointSnitchMBean
 {
-    private static int UPDATES_PER_INTERVAL = 10000;
-    private static int UPDATE_INTERVAL_IN_MS = DatabaseDescriptor.getDynamicUpdateInterval();
-    private static int RESET_INTERVAL_IN_MS = DatabaseDescriptor.getDynamicResetInterval();
-    private static double BADNESS_THRESHOLD = DatabaseDescriptor.getDynamicBadnessThreshold();
-    private static int WINDOW_SIZE = 100;
+    private static final int UPDATES_PER_INTERVAL = 10000;
+    private static final int WINDOW_SIZE = 100;
+
+    private int UPDATE_INTERVAL_IN_MS = DatabaseDescriptor.getDynamicUpdateInterval();
+    private int RESET_INTERVAL_IN_MS = DatabaseDescriptor.getDynamicResetInterval();
+    private double BADNESS_THRESHOLD = DatabaseDescriptor.getDynamicBadnessThreshold();
+    private String mbeanName;
     private boolean registered = false;
 
-    private ConcurrentHashMap<InetAddress, Double> scores = new ConcurrentHashMap();
-    private ConcurrentHashMap<InetAddress, AdaptiveLatencyTracker> windows = new ConcurrentHashMap();
-    private AtomicInteger intervalupdates = new AtomicInteger(0);
-    public IEndpointSnitch subsnitch;
+    private final ConcurrentHashMap<InetAddress, Double> scores = new ConcurrentHashMap<InetAddress, Double>();
+    private final ConcurrentHashMap<InetAddress, AdaptiveLatencyTracker> windows = new ConcurrentHashMap<InetAddress, AdaptiveLatencyTracker>();
+    private final AtomicInteger intervalupdates = new AtomicInteger(0);
+
+    public final IEndpointSnitch subsnitch;
 
     public DynamicEndpointSnitch(IEndpointSnitch snitch)
     {
+        mbeanName = "org.apache.cassandra.db:type=DynamicEndpointSnitch,instance="+hashCode();
         subsnitch = snitch;
         Runnable update = new Runnable()
         {
@@ -74,11 +77,15 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
         };
         StorageService.scheduledTasks.scheduleWithFixedDelay(update, UPDATE_INTERVAL_IN_MS, UPDATE_INTERVAL_IN_MS, TimeUnit.MILLISECONDS);
         StorageService.scheduledTasks.scheduleWithFixedDelay(reset, RESET_INTERVAL_IN_MS, RESET_INTERVAL_IN_MS, TimeUnit.MILLISECONDS);
+        registerMBean();
+   }
 
+    private void registerMBean()
+    {
         MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
         try
         {
-            mbs.registerMBean(this, new ObjectName("org.apache.cassandra.db:type=DynamicEndpointSnitch"));
+            mbs.registerMBean(this, new ObjectName(mbeanName));
         }
         catch (Exception e)
         {
@@ -86,19 +93,23 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
         }
     }
 
-    public ArrayList<InetAddress> getCachedEndpoints(Token t)
+    public void unregisterMBean()
     {
-        return subsnitch.getCachedEndpoints(t);
+        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+        try
+        {
+            mbs.unregisterMBean(new ObjectName(mbeanName));
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 
-    public void cacheEndpoint(Token t, ArrayList<InetAddress> addr)
+    @Override
+    public void gossiperStarting()
     {
-        subsnitch.cacheEndpoint(t, addr);
-    }
-
-    public void clearEndpointCache()
-    {
-        subsnitch.clearEndpointCache();
+        subsnitch.gossiperStarting();
     }
 
     public String getRack(InetAddress endpoint)
@@ -194,12 +205,13 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
 
     private void updateScores() // this is expensive
     {
+        if (!StorageService.instance.isInitialized()) 
+            return;
         if (!registered)
         {
-       	    ILatencyPublisher handler = (ILatencyPublisher)MessagingService.instance.getVerbHandler(StorageService.Verb.READ_RESPONSE);
-            if (handler != null)
+            if (MessagingService.instance() != null)
             {
-                handler.register(this);
+                MessagingService.instance().register(this);
                 registered = true;
             }
 
@@ -223,19 +235,50 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
     {
         return scores;
     }
+
+    public int getUpdateInterval()
+    {
+        return UPDATE_INTERVAL_IN_MS;
+    }
+    public int getResetInterval()
+    {
+        return RESET_INTERVAL_IN_MS;
+    }
+    public double getBadnessThreshold()
+    {
+        return BADNESS_THRESHOLD;
+    }
+    public String getSubsnitchClassName()
+    {
+        return subsnitch.getClass().getName();
+    }
+
+    public List<Double> dumpTimings(String hostname) throws UnknownHostException
+    {
+        InetAddress host = InetAddress.getByName(hostname);
+        ArrayList<Double> timings = new ArrayList<Double>();
+        AdaptiveLatencyTracker window = windows.get(host);
+        if (window != null)
+        {
+            for (double time: window)
+            {
+                timings.add(time);
+            }
+        }
+        return timings;
+    }
+
 }
 
 /** a threadsafe version of BoundedStatsDeque+ArrivalWindow with modification for arbitrary times **/
 class AdaptiveLatencyTracker extends AbstractStatsDeque
 {
-    private LinkedBlockingDeque latencies;
-    private final int size;                                   
-    private static double SENTINEL_COMPARE = 0.0001; // arbitrary; as long as it is the same across hosts it doesn't matter
+    private final LinkedBlockingDeque<Double> latencies;
+    private static final double SENTINEL_COMPARE = 0.0001; // arbitrary; as long as it is the same across hosts it doesn't matter
 
     AdaptiveLatencyTracker(int size)
     {
-        this.size = size;
-        latencies = new LinkedBlockingDeque(size);
+        latencies = new LinkedBlockingDeque<Double>(size);
     }
 
     public void add(double i)

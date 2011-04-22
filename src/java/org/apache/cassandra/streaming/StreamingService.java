@@ -18,22 +18,18 @@
 
 package org.apache.cassandra.streaming;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+
 
 public class StreamingService implements StreamingServiceMBean
 {
-    private static final Logger logger = LoggerFactory.getLogger(StreamingService.class);
     public static final String MBEAN_OBJECT_NAME = "org.apache.cassandra.net:type=StreamingService";
     public static final StreamingService instance = new StreamingService();
 
@@ -56,19 +52,19 @@ public class StreamingService implements StreamingServiceMBean
         sb.append("Receiving from:\n");
         for (InetAddress source : StreamInSession.getSources())
         {
-            sb.append(String.format(" %s:\n", source.getHostAddress()));
+            sb.append(String.format(" %s:%n", source.getHostAddress()));
             for (PendingFile pf : StreamInSession.getIncomingFiles(source))
             {
-                sb.append(String.format("  %s\n", pf.toString()));
+                sb.append(String.format("  %s%n", pf.toString()));
             }
         }
-        sb.append("Sending to:\n");
+        sb.append("Sending to:%n");
         for (InetAddress dest : StreamOutSession.getDestinations())
         {
-            sb.append(String.format(" %s:\n", dest.getHostAddress()));
+            sb.append(String.format(" %s:%n", dest.getHostAddress()));
             for (PendingFile pf : StreamOutSession.getOutgoingFiles(dest))
             {
-                sb.append(String.format("  %s\n", pf.toString()));
+                sb.append(String.format("  %s%n", pf.toString()));
             }
         }
         return sb.toString();

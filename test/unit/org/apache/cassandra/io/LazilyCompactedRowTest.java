@@ -21,24 +21,34 @@ package org.apache.cassandra.io;
  */
 
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.IOException;
-import java.util.Arrays;
+import static junit.framework.Assert.assertEquals;
+
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
 import java.util.concurrent.ExecutionException;
 
-import org.junit.Test;
-
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.CompactionManager;
+import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.RowMutation;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.util.MappedFileDataInput;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
 
-import static junit.framework.Assert.assertEquals;
+import org.junit.Test;
 
 
 public class LazilyCompactedRowTest extends CleanupHelper
@@ -46,8 +56,9 @@ public class LazilyCompactedRowTest extends CleanupHelper
     private void assertBytes(ColumnFamilyStore cfs, int gcBefore, boolean major) throws IOException
     {
         Collection<SSTableReader> sstables = cfs.getSSTables();
-        CompactionIterator ci1 = new CompactionIterator(cfs, sstables, gcBefore, major);
-        LazyCompactionIterator ci2 = new LazyCompactionIterator(cfs, sstables, gcBefore, major);
+        CompactionController controller = new CompactionController(cfs, sstables, major, gcBefore, false);
+        CompactionIterator ci1 = new PreCompactingIterator(sstables, controller);
+        CompactionIterator ci2 = new LazyCompactionIterator(sstables, controller);
 
         while (true)
         {
@@ -63,8 +74,18 @@ public class LazilyCompactedRowTest extends CleanupHelper
             DataOutputBuffer out2 = new DataOutputBuffer();
             row1.write(out1);
             row2.write(out2);
-            DataInputStream in1 = new DataInputStream(new ByteArrayInputStream(out1.getData(), 0, out1.getLength()));
-            DataInputStream in2 = new DataInputStream(new ByteArrayInputStream(out2.getData(), 0, out2.getLength()));
+
+            File tmpFile1 = File.createTempFile("lcrt1", null);
+            File tmpFile2 = File.createTempFile("lcrt2", null);
+
+            tmpFile1.deleteOnExit();
+            tmpFile2.deleteOnExit();
+
+            new FileOutputStream(tmpFile1).write(out1.getData()); // writing data from row1
+            new FileOutputStream(tmpFile2).write(out2.getData()); // writing data from row2
+
+            MappedFileDataInput in1 = new MappedFileDataInput(new FileInputStream(tmpFile1), tmpFile1.getAbsolutePath(), 0);
+            MappedFileDataInput in2 = new MappedFileDataInput(new FileInputStream(tmpFile2), tmpFile2.getAbsolutePath(), 0);
 
             // key isn't part of what CompactedRow writes, that's done by SSTW.append
 
@@ -74,17 +95,18 @@ public class LazilyCompactedRowTest extends CleanupHelper
             assertEquals(out1.getLength(), rowSize1 + 8);
             assertEquals(out2.getLength(), rowSize2 + 8);
             // bloom filter
-            IndexHelper.defreezeBloomFilter(in1);
-            IndexHelper.defreezeBloomFilter(in2);
+            IndexHelper.defreezeBloomFilter(in1, rowSize1, false);
+            IndexHelper.defreezeBloomFilter(in2, rowSize2, false);
             // index
             int indexSize1 = in1.readInt();
             int indexSize2 = in2.readInt();
             assertEquals(indexSize1, indexSize2);
-            byte[] bytes1 = new byte[indexSize1];
-            byte[] bytes2 = new byte[indexSize2];
-            in1.readFully(bytes1);
-            in2.readFully(bytes2);
-            assert Arrays.equals(bytes1, bytes2);
+
+            ByteBuffer bytes1 = in1.readBytes(indexSize1);
+            ByteBuffer bytes2 = in2.readBytes(indexSize2);
+
+            assert bytes1.equals(bytes2);
+
             // cf metadata
             ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
             ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
@@ -106,74 +128,104 @@ public class LazilyCompactedRowTest extends CleanupHelper
             assert in2.available() == 0;
         }
     }
+    
+    private void assertDigest(ColumnFamilyStore cfs, int gcBefore, boolean major) throws IOException, NoSuchAlgorithmException
+    {
+        Collection<SSTableReader> sstables = cfs.getSSTables();
+        CompactionController controller = new CompactionController(cfs, sstables, major, gcBefore, false);
+        CompactionIterator ci1 = new PreCompactingIterator(sstables, controller);
+        CompactionIterator ci2 = new LazyCompactionIterator(sstables, controller);
+
+        while (true)
+        {
+            if (!ci1.hasNext())
+            {
+                assert !ci2.hasNext();
+                break;
+            }
+
+            AbstractCompactedRow row1 = ci1.next();
+            AbstractCompactedRow row2 = ci2.next();
+            MessageDigest digest1 = MessageDigest.getInstance("MD5");
+            MessageDigest digest2 = MessageDigest.getInstance("MD5");
+
+            row1.update(digest1);
+            row2.update(digest2);
+
+            assert MessageDigest.isEqual(digest1.digest(), digest2.digest());
+        }
+    }
 
     @Test
-    public void testOneRow() throws IOException, ExecutionException, InterruptedException
+    public void testOneRow() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
     {
         CompactionManager.instance.disableAutoCompaction();
 
         Table table = Table.open("Keyspace1");
         ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
 
-        byte[] key = "k".getBytes();
+        ByteBuffer key = ByteBufferUtil.bytes("k");
         RowMutation rm = new RowMutation("Keyspace1", key);
-        rm.add(new QueryPath("Standard1", null, "c".getBytes()), new byte[0], 0);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
         cfs.forceBlockingFlush();
 
         assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
     }
 
     @Test
-    public void testOneRowTwoColumns() throws IOException, ExecutionException, InterruptedException
+    public void testOneRowTwoColumns() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
     {
         CompactionManager.instance.disableAutoCompaction();
 
         Table table = Table.open("Keyspace1");
         ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
 
-        byte[] key = "k".getBytes();
+        ByteBuffer key = ByteBufferUtil.bytes("k");
         RowMutation rm = new RowMutation("Keyspace1", key);
-        rm.add(new QueryPath("Standard1", null, "c".getBytes()), new byte[0], 0);
-        rm.add(new QueryPath("Standard1", null, "d".getBytes()), new byte[0], 0);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("d")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
         cfs.forceBlockingFlush();
 
         assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
     }
 
     @Test
-    public void testTwoRows() throws IOException, ExecutionException, InterruptedException
+    public void testOneRowManyColumns() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
     {
         CompactionManager.instance.disableAutoCompaction();
 
         Table table = Table.open("Keyspace1");
         ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
 
-        byte[] key = "k".getBytes();
+        ByteBuffer key = ByteBuffer.wrap("k".getBytes());
         RowMutation rm = new RowMutation("Keyspace1", key);
-        rm.add(new QueryPath("Standard1", null, "c".getBytes()), new byte[0], 0);
+        for (int i = 0; i < 1000; i++)
+            rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
-        cfs.forceBlockingFlush();
-
-        rm.apply();
+        DataOutputBuffer out = new DataOutputBuffer();
+        RowMutation.serializer().serialize(rm, out, MessagingService.version_);
+        assert out.getLength() > DatabaseDescriptor.getColumnIndexSize();
         cfs.forceBlockingFlush();
 
         assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
     }
 
     @Test
-    public void testTwoRowsTwoColumns() throws IOException, ExecutionException, InterruptedException
+    public void testTwoRows() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
     {
         CompactionManager.instance.disableAutoCompaction();
 
         Table table = Table.open("Keyspace1");
         ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
 
-        byte[] key = "k".getBytes();
+        ByteBuffer key = ByteBufferUtil.bytes("k");
         RowMutation rm = new RowMutation("Keyspace1", key);
-        rm.add(new QueryPath("Standard1", null, "c".getBytes()), new byte[0], 0);
-        rm.add(new QueryPath("Standard1", null, "d".getBytes()), new byte[0], 0);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
         cfs.forceBlockingFlush();
 
@@ -181,10 +233,33 @@ public class LazilyCompactedRowTest extends CleanupHelper
         cfs.forceBlockingFlush();
 
         assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
     }
 
     @Test
-    public void testManyRows() throws IOException, ExecutionException, InterruptedException
+    public void testTwoRowsTwoColumns() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
+    {
+        CompactionManager.instance.disableAutoCompaction();
+
+        Table table = Table.open("Keyspace1");
+        ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
+
+        ByteBuffer key = ByteBufferUtil.bytes("k");
+        RowMutation rm = new RowMutation("Keyspace1", key);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes("d")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
+    }
+
+    @Test
+    public void testManyRows() throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException
     {
         CompactionManager.instance.disableAutoCompaction();
 
@@ -194,31 +269,65 @@ public class LazilyCompactedRowTest extends CleanupHelper
         final int ROWS_PER_SSTABLE = 10;
         for (int j = 0; j < (DatabaseDescriptor.getIndexInterval() * 3) / ROWS_PER_SSTABLE; j++) {
             for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
-                byte[] key = String.valueOf(i % 2).getBytes();
+                ByteBuffer key = ByteBufferUtil.bytes(String.valueOf(i % 2));
                 RowMutation rm = new RowMutation("Keyspace1", key);
-                rm.add(new QueryPath("Standard1", null, String.valueOf(i / 2).getBytes()), new byte[0], j * ROWS_PER_SSTABLE + i);
+                rm.add(new QueryPath("Standard1", null, ByteBufferUtil.bytes(String.valueOf(i / 2))), ByteBufferUtil.EMPTY_BYTE_BUFFER, j * ROWS_PER_SSTABLE + i);
                 rm.apply();
             }
             cfs.forceBlockingFlush();
         }
 
         assertBytes(cfs, Integer.MAX_VALUE, true);
+        assertDigest(cfs, Integer.MAX_VALUE, true);
     }
+
+    @Test
+    public void testTwoRowSuperColumn() throws IOException, ExecutionException, InterruptedException
+    {
+        CompactionManager.instance.disableAutoCompaction();
+
+        Table table = Table.open("Keyspace4");
+        ColumnFamilyStore cfs = table.getColumnFamilyStore("Super5");
+
+        ByteBuffer key = ByteBufferUtil.bytes("k");
+        RowMutation rm = new RowMutation("Keyspace4", key);
+        ByteBuffer scKey = ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress())));
+        rm.add(new QueryPath("Super5", scKey , ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        assertBytes(cfs, Integer.MAX_VALUE, true);
+    }
+
 
     private static class LazyCompactionIterator extends CompactionIterator
     {
-        private final ColumnFamilyStore cfStore;
-
-        public LazyCompactionIterator(ColumnFamilyStore cfStore, Iterable<SSTableReader> sstables, int gcBefore, boolean major) throws IOException
+        public LazyCompactionIterator(Iterable<SSTableReader> sstables, CompactionController controller) throws IOException
         {
-            super(cfStore, sstables, gcBefore, major);
-            this.cfStore = cfStore;
+            super(CompactionType.UNKNOWN, sstables, controller);
         }
 
         @Override
         protected AbstractCompactedRow getCompactedRow()
         {
-            return new LazilyCompactedRow(cfStore, rows, true, Integer.MAX_VALUE);
+            return new LazilyCompactedRow(controller, rows);
+        }
+    }
+
+    private static class PreCompactingIterator extends CompactionIterator
+    {
+        public PreCompactingIterator(Iterable<SSTableReader> sstables, CompactionController controller) throws IOException
+        {
+            super(CompactionType.UNKNOWN, sstables, controller);
+        }
+
+        @Override
+        protected AbstractCompactedRow getCompactedRow()
+        {
+            return new PrecompactedRow(controller, rows);
         }
     }
 }

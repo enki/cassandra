@@ -21,29 +21,31 @@ package org.apache.cassandra.db.filter;
  */
 
 
-import java.util.*;
+import java.nio.ByteBuffer;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.SortedSet;
 
-import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SSTableNamesIterator;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.FBUtilities;
 
 public class NamesQueryFilter implements IFilter
 {
-    public final SortedSet<byte[]> columns;
+    public final SortedSet<ByteBuffer> columns;
 
-    public NamesQueryFilter(SortedSet<byte[]> columns)
+    public NamesQueryFilter(SortedSet<ByteBuffer> columns)
     {
         this.columns = columns;
     }
 
-    public NamesQueryFilter(byte[] column)
+    public NamesQueryFilter(ByteBuffer column)
     {
-        this(FBUtilities.getSingleColumnSet(column));
+        this(FBUtilities.singleton(column));
     }
 
     public IColumnIterator getMemtableColumnIterator(ColumnFamily cf, DecoratedKey key, AbstractType comparator)
@@ -56,9 +58,9 @@ public class NamesQueryFilter implements IFilter
         return new SSTableNamesIterator(sstable, key, columns);
     }
     
-    public IColumnIterator getSSTableColumnIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key)
+    public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key)
     {
-        return new SSTableNamesIterator(metadata, file, key, columns);
+        return new SSTableNamesIterator(sstable, file, key, columns);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)
@@ -85,6 +87,6 @@ public class NamesQueryFilter implements IFilter
 
     public Comparator<IColumn> getColumnComparator(AbstractType comparator)
     {
-        return QueryFilter.getColumnComparator(comparator);
+        return comparator.columnComparator;
     }
 }

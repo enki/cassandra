@@ -19,16 +19,20 @@
 package org.apache.cassandra.service;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 
+import com.google.common.base.Charsets;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TProtocol;
@@ -45,10 +49,8 @@ import static org.junit.Assert.assertNotNull;
  *
  * Tests connect to localhost:9160 when the embedded server is running.
  *
- * @author Ran Tavory (rantav@gmail.com)
- *
  */
-public class EmbeddedCassandraServiceTest
+public class EmbeddedCassandraServiceTest extends CleanupHelper
 {
 
     private static EmbeddedCassandraService cassandra;
@@ -63,50 +65,36 @@ public class EmbeddedCassandraServiceTest
     @BeforeClass
     public static void setup() throws TTransportException, IOException, InterruptedException, ConfigurationException
     {
-
-        // Manually load tables from the test configuration file.
-        for (KSMetaData table : DatabaseDescriptor.readTablesFromYaml())
-        {
-            for (CFMetaData cfm : table.cfMetaData().values())
-                CFMetaData.map(cfm);
-            DatabaseDescriptor.setTableDefinition(table, DatabaseDescriptor.getDefsVersion());
-        }
-
         cassandra = new EmbeddedCassandraService();
-        cassandra.init();
-
-        // spawn cassandra in a new thread
-        Thread t = new Thread(cassandra);
-        t.setDaemon(true);
-        t.start();
+        cassandra.start();
     }
 
     @Test
-    public void testEmbeddedCassandraService() throws AuthenticationException, AuthorizationException,
-    UnsupportedEncodingException, InvalidRequestException,
-            UnavailableException, TimedOutException, TException, NotFoundException
+    public void testEmbeddedCassandraService()
+    throws AuthenticationException, AuthorizationException, InvalidRequestException, UnavailableException, TimedOutException, TException, NotFoundException, CharacterCodingException
     {
         Cassandra.Client client = getClient();
         client.set_keyspace("Keyspace1");
 
-        byte[] key_user_id = "1".getBytes();
-
+        ByteBuffer key_user_id = ByteBufferUtil.bytes("1");
+        
         long timestamp = System.currentTimeMillis();
         ColumnPath cp = new ColumnPath("Standard1");
         ColumnParent par = new ColumnParent("Standard1");
-        cp.setColumn("name".getBytes("utf-8"));
+        cp.column = ByteBufferUtil.bytes("name");
 
         // insert
-        client.insert(key_user_id, par, new Column("name".getBytes("utf-8"),
-                "Ran".getBytes("UTF-8"), timestamp), ConsistencyLevel.ONE);
+        client.insert(key_user_id,
+                      par,
+                      new Column(ByteBufferUtil.bytes("name")).setValue(ByteBufferUtil.bytes("Ran")).setTimestamp(timestamp),
+                      ConsistencyLevel.ONE);
 
         // read
-        ColumnOrSuperColumn got = client.get(key_user_id, cp,
-                ConsistencyLevel.ONE);
+        ColumnOrSuperColumn got = client.get(key_user_id, cp, ConsistencyLevel.ONE);
 
         // assert
         assertNotNull("Got a null ColumnOrSuperColumn", got);
-        assertEquals("Ran", new String(got.getColumn().getValue(), "utf-8"));
+        assertEquals("Ran", ByteBufferUtil.string(got.getColumn().value));
     }
 
     /**

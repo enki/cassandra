@@ -23,16 +23,16 @@ package org.apache.cassandra.db.columniterator;
 
 import java.io.IOError;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  *  A Column Iterator over SSTable
@@ -43,7 +43,7 @@ public class SSTableSliceIterator implements IColumnIterator
     private IColumnIterator reader;
     private DecoratedKey key;
 
-    public SSTableSliceIterator(SSTableReader sstable, DecoratedKey key, byte[] startColumn, byte[] finishColumn, boolean reversed)
+    public SSTableSliceIterator(SSTableReader sstable, DecoratedKey key, ByteBuffer startColumn, ByteBuffer finishColumn, boolean reversed)
     {
         this.key = key;
         fileToClose = sstable.getFileDataInput(this.key, DatabaseDescriptor.getSlicedReadBufferSizeInKB() * 1024);
@@ -54,7 +54,7 @@ public class SSTableSliceIterator implements IColumnIterator
         {
             DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
                                                              sstable.descriptor,
-                                                             FBUtilities.readShortByteArray(fileToClose));
+                                                             ByteBufferUtil.readWithShortLength(fileToClose));
             assert keyInDisk.equals(key)
                    : String.format("%s != %s in %s", keyInDisk, key, fileToClose.getPath());
             SSTableReader.readRowSize(fileToClose, sstable.descriptor);
@@ -64,7 +64,7 @@ public class SSTableSliceIterator implements IColumnIterator
             throw new IOError(e);
         }
 
-        reader = createReader(sstable.metadata, fileToClose, startColumn, finishColumn, reversed);
+        reader = createReader(sstable, fileToClose, startColumn, finishColumn, reversed);
     }
 
     /**
@@ -79,18 +79,18 @@ public class SSTableSliceIterator implements IColumnIterator
      * @param finishColumn The end of the slice
      * @param reversed Results are returned in reverse order iff reversed is true.
      */
-    public SSTableSliceIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key, byte[] startColumn, byte[] finishColumn, boolean reversed)
+    public SSTableSliceIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, ByteBuffer startColumn, ByteBuffer finishColumn, boolean reversed)
     {
         this.key = key;
         fileToClose = null;
-        reader = createReader(metadata, file, startColumn, finishColumn, reversed);
+        reader = createReader(sstable, file, startColumn, finishColumn, reversed);
     }
 
-    private static IColumnIterator createReader(CFMetaData metadata, FileDataInput file, byte[] startColumn, byte[] finishColumn, boolean reversed)
+    private static IColumnIterator createReader(SSTableReader sstable, FileDataInput file, ByteBuffer startColumn, ByteBuffer finishColumn, boolean reversed)
     {
-        return startColumn.length == 0 && !reversed
-                 ? new SimpleSliceReader(metadata, file, finishColumn)
-                 : new IndexedSliceReader(metadata, file, startColumn, finishColumn, reversed);
+        return startColumn.remaining() == 0 && !reversed
+                 ? new SimpleSliceReader(sstable, file, finishColumn)
+                 : new IndexedSliceReader(sstable, file, startColumn, finishColumn, reversed);
     }
 
     public DecoratedKey getKey()
@@ -98,7 +98,7 @@ public class SSTableSliceIterator implements IColumnIterator
         return key;
     }
 
-    public ColumnFamily getColumnFamily() throws IOException
+    public ColumnFamily getColumnFamily()
     {
         return reader == null ? null : reader.getColumnFamily();
     }

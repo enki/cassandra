@@ -23,6 +23,7 @@ package org.apache.cassandra.db.columniterator;
 
 import java.io.IOError;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import com.google.common.collect.AbstractIterator;
 
@@ -39,24 +40,24 @@ import org.apache.cassandra.io.util.FileMark;
 class SimpleSliceReader extends AbstractIterator<IColumn> implements IColumnIterator
 {
     private final FileDataInput file;
-    private final byte[] finishColumn;
+    private final ByteBuffer finishColumn;
     private final AbstractType comparator;
     private final ColumnFamily emptyColumnFamily;
     private final int columns;
     private int i;
     private FileMark mark;
 
-    public SimpleSliceReader(CFMetaData metadata, FileDataInput input, byte[] finishColumn)
+    public SimpleSliceReader(SSTableReader sstable, FileDataInput input, ByteBuffer finishColumn)
     {
         this.file = input;
         this.finishColumn = finishColumn;
-        comparator = metadata.comparator;
+        comparator = sstable.metadata.comparator;
         try
         {
             IndexHelper.skipBloomFilter(file);
             IndexHelper.skipIndex(file);
 
-            emptyColumnFamily = ColumnFamily.serializer().deserializeFromSSTableNoColumns(ColumnFamily.create(metadata), file);
+            emptyColumnFamily = ColumnFamily.serializer().deserializeFromSSTableNoColumns(ColumnFamily.create(sstable.metadata), file);
             columns = file.readInt();
             mark = file.mark();
         }
@@ -81,14 +82,14 @@ class SimpleSliceReader extends AbstractIterator<IColumn> implements IColumnIter
         {
             throw new RuntimeException("error reading " + i + " of " + columns, e);
         }
-        if (finishColumn.length > 0 && comparator.compare(column.name(), finishColumn) > 0)
+        if (finishColumn.remaining() > 0 && comparator.compare(column.name(), finishColumn) > 0)
             return endOfData();
 
         mark = file.mark();
         return column;
     }
 
-    public ColumnFamily getColumnFamily() throws IOException
+    public ColumnFamily getColumnFamily()
     {
         return emptyColumnFamily;
     }

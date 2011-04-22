@@ -34,8 +34,9 @@ public class Config
     
     public Boolean auto_bootstrap = false;
     public Boolean hinted_handoff_enabled = true;
+    public Integer max_hint_window_in_ms = Integer.MAX_VALUE;
     
-    public String[] seeds;
+    public SeedProviderDef seed_provider;
     public DiskAccessMode disk_access_mode = DiskAccessMode.auto;
     
     /* Address where to run the job tracker */
@@ -53,9 +54,11 @@ public class Config
     
     public Integer concurrent_reads = 8;
     public Integer concurrent_writes = 32;
+    public Integer concurrent_replicates = 32;
     
     public Integer memtable_flush_writers = null; // will get set to the length of data dirs in DatabaseDescriptor
-    
+    public Integer memtable_total_space_in_mb;
+
     public Integer sliced_buffer_size_in_kb = 64;
     
     public Integer storage_port = 7000;
@@ -64,6 +67,8 @@ public class Config
     public String rpc_address;
     public Integer rpc_port = 9160;
     public Boolean rpc_keepalive = true;
+    public Integer rpc_min_threads = 16;
+    public Integer rpc_max_threads = Integer.MAX_VALUE;
     public Integer rpc_send_buff_size_in_bytes;
     public Integer rpc_recv_buff_size_in_bytes;
 
@@ -77,6 +82,8 @@ public class Config
     /* if the size of columns or super-columns are more than this, indexing will kick in */
     public Integer column_index_size_in_kb = 64;
     public Integer in_memory_compaction_limit_in_mb = 256;
+    public Boolean compaction_multithreading = true;
+    public Integer compaction_throughput_mb_per_sec = 16;
     
     public String[] data_file_directories;
 
@@ -99,10 +106,19 @@ public class Config
     public RequestSchedulerId request_scheduler_id;
     public RequestSchedulerOptions request_scheduler_options;
 
+    public EncryptionOptions encryption_options;
+
     public Integer index_interval = 128;
 
-    public List<RawKeyspace> keyspaces;
-    
+    public Double flush_largest_memtables_at = 1.0;
+    public Double reduce_cache_sizes_at = 1.0;
+    public double reduce_cache_capacity_to = 0.6;
+    public int hinted_handoff_throttle_delay_in_ms = 0;
+    public boolean compaction_preheat_key_cache = true;
+
+    public boolean incremental_backups = false;
+    public int memtable_flush_queue_size = 4;
+
     public static enum CommitLogSync {
         periodic,
         batch

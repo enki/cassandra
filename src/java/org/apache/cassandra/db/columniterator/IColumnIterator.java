@@ -21,21 +21,19 @@ package org.apache.cassandra.db.columniterator;
  */
 
 
-import java.util.Iterator;
 import java.io.IOException;
+import java.util.Iterator;
 
+import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.db.ColumnFamily;
 
 public interface IColumnIterator extends Iterator<IColumn>
 {
     /**
-     *  returns the CF of the column being iterated.  Do not modify the returned CF; clone first.
-     *  The CF is only guaranteed to be available after a call to next() or hasNext().
-     * @throws IOException 
+     * @return An empty CF holding metadata for the row being iterated.
      */
-    public abstract ColumnFamily getColumnFamily() throws IOException;
+    public abstract ColumnFamily getColumnFamily();
 
     /**
      * @return the current row key

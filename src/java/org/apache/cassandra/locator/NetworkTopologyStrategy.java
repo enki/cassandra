@@ -25,14 +25,16 @@ import java.net.InetAddress;
 import java.util.*;
 import java.util.Map.Entry;
 
+import com.google.common.collect.Multimap;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.Multimap;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.*;
 import org.apache.cassandra.thrift.ConsistencyLevel;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * This Replication Strategy takes a property file that gives the intended
@@ -62,12 +64,11 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
         if (configOptions != null)
         {
             for (Entry entry : configOptions.entrySet())
-            {
-                newDatacenters.put((String) entry.getKey(), Integer.parseInt((String) entry.getValue()));
-            }
+                newDatacenters.put((String) entry.getKey(), Integer.valueOf((String) entry.getValue()));
         }
 
         datacenters = Collections.unmodifiableMap(newDatacenters);
+        logger.debug("Configured datacenter replicas are {}", FBUtilities.toString(datacenters));
     }
 
     public List<InetAddress> calculateNaturalEndpoints(Token searchToken, TokenMetadata tokenMetadata)
@@ -116,6 +117,9 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
             if (dcEndpoints.size() < dcReplicas)
                 throw new IllegalStateException(String.format("datacenter (%s) has no more endpoints, (%s) replicas still needed",
                                                               dcName, dcReplicas - dcEndpoints.size()));
+            if (logger.isDebugEnabled())
+                logger.debug("{} endpoints in datacenter {} for token {} ",
+                             new Object[] { StringUtils.join(dcEndpoints, ","), dcName, searchToken});
             endpoints.addAll(dcEndpoints);
         }
 
@@ -140,38 +144,16 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
         return datacenters.keySet();
     }
 
-    /**
-     * This method will generate the QRH object and returns. If the Consistency
-     * level is DCQUORUM then it will return a DCQRH with a map of local rep
-     * factor alone. If the consistency level is DCQUORUMSYNC then it will
-     * return a DCQRH with a map of all the DC rep factor.
-     */
-    @Override
-    public IWriteResponseHandler getWriteResponseHandler(Collection<InetAddress> writeEndpoints, Multimap<InetAddress, InetAddress> hintedEndpoints, ConsistencyLevel consistency_level)
+    public void validateOptions() throws ConfigurationException
     {
-        if (consistency_level == ConsistencyLevel.DCQUORUM)
+        for (Entry<String,String> e : this.configOptions.entrySet())
         {
-            // block for in this context will be localnodes block.
-            return DatacenterWriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistency_level, table);
+            int rf = Integer.parseInt(e.getValue());
+            if (rf < 0)
+            {
+                throw new ConfigurationException("Replication factor for NTS must be non-negative. dc: " +e.getKey()+", rf: "+rf);
+            }
         }
-        else if (consistency_level == ConsistencyLevel.DCQUORUMSYNC)
-        {
-            return DatacenterSyncWriteResponseHandler.create(writeEndpoints, hintedEndpoints, consistency_level, table);
-        }
-        return super.getWriteResponseHandler(writeEndpoints, hintedEndpoints, consistency_level);
-    }
 
-    /**
-     * This method will generate the WRH object and returns. If the Consistency
-     * level is DCQUORUM/DCQUORUMSYNC then it will return a DCQRH.
-     */
-    @Override
-    public QuorumResponseHandler getQuorumResponseHandler(IResponseResolver responseResolver, ConsistencyLevel consistencyLevel)
-    {
-        if (consistencyLevel.equals(ConsistencyLevel.DCQUORUM) || consistencyLevel.equals(ConsistencyLevel.DCQUORUMSYNC))
-        {
-            return new DatacenterQuorumResponseHandler(responseResolver, consistencyLevel, table);
-        }
-        return super.getQuorumResponseHandler(responseResolver, consistencyLevel);
     }
 }

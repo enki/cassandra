@@ -18,7 +18,7 @@
 @echo off
 if "%OS%" == "Windows_NT" setlocal
 
-if NOT DEFINED CASSANDRA_HOME set CASSANDRA_HOME=%CD%
+if NOT DEFINED CASSANDRA_HOME set CASSANDRA_HOME=%~dp0..
 if NOT DEFINED JAVA_HOME goto err
 
 REM Ensure that any user defined CLASSPATH variables are not used on startup
@@ -33,8 +33,8 @@ set CLASSPATH=%CLASSPATH%;%1
 goto :eof
 
 :okClasspath
-REM Include the build\classes directory so it works in development
-set CASSANDRA_CLASSPATH=%CLASSPATH%;"%CASSANDRA_HOME%\build\classes"
+REM Include the build\classes\main directory so it works in development
+set CASSANDRA_CLASSPATH=%CLASSPATH%;"%CASSANDRA_HOME%\build\classes\main";"%CASSANDRA_HOME%\build\classes\thrift"
 goto runCli
 
 :runCli

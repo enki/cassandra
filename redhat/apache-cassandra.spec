@@ -2,23 +2,29 @@
 
 %global username cassandra
 
+%define relname %{name}-%{version}-%{release}
+
 Name:           apache-cassandra
 Version:        0.7.0
-Release:        1%{?dist}
+Release:        rc3
 Summary:        Cassandra is a highly scalable, eventually consistent, distributed, structured key-value store.
 
 Group:          Development/Libraries
-License:        BSD
+License:        Apache Software License
 URL:            http://cassandra.apache.org/
-Source0:        http://www.ibiblio.org/pub/mirrors/apache/%{username}/%{version}/%{name}-%{version}-src.tar.gz
-BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+Source0:        http://www.ibiblio.org/pub/mirrors/apache/%{username}/%{version}/%{relname}-src.tar.gz
+BuildRoot:      %{_tmppath}/%{relname}-root-%(%{__id_u} -n)
 
 BuildRequires: java-devel
 BuildRequires: jpackage-utils
 BuildRequires: ant
 BuildRequires: ant-nodeps
 
+Conflicts:     cassandra
+Obsoletes:     cassandra07
+
 Requires:      java >= 1.6.0
+Requires:      jna  >= 3.2.7
 Requires:      jpackage-utils
 Requires(pre): user(cassandra)
 Requires(pre): group(cassandra)
@@ -34,10 +40,10 @@ and the data model from Google's BigTable. Like Dynamo, Cassandra is
 eventually consistent. Like BigTable, Cassandra provides a ColumnFamily-based
 data model richer than typical key/value systems.
 
-For more information see http://incubator.apache.org/cassandra
+For more information see http://cassandra.apache.org/
 
 %prep
-%setup -q -n %{name}-%{version}-src
+%setup -q -n %{relname}-src
 
 %build
 ant clean jar -Drelease=true
@@ -50,19 +56,26 @@ mkdir -p %{buildroot}/usr/share/%{username}/lib
 mkdir -p %{buildroot}/usr/share/%{username}/default.conf
 mkdir -p %{buildroot}/etc/%{username}/default.conf
 mkdir -p %{buildroot}/etc/rc.d/init.d/
+mkdir -p %{buildroot}/etc/security/limits.d/
+mkdir -p %{buildroot}/etc/default/
 mkdir -p %{buildroot}/usr/sbin
 mkdir -p %{buildroot}/usr/bin
 cp -p conf/* %{buildroot}/etc/%{username}/default.conf
 cp -p conf/* %{buildroot}/usr/share/%{username}/default.conf
-cp -p contrib/redhat/%{username} %{buildroot}/etc/rc.d/init.d/
+cp -p redhat/%{username} %{buildroot}/etc/rc.d/init.d/
+cp -p redhat/%{username}.conf %{buildroot}/etc/security/limits.d/
+cp -p redhat/default %{buildroot}/etc/default/%{username}
 cp -p lib/*.jar %{buildroot}/usr/share/%{username}/lib
-mv bin/cassandra.in.sh %{buildroot}/usr/share/%{username}
+mv redhat/cassandra.in.sh %{buildroot}/usr/share/%{username}
+rm bin/cassandra.in.sh
 mv bin/cassandra %{buildroot}/usr/sbin
 rm bin/*.bat 
 cp -p bin/* %{buildroot}/usr/bin
-cp build/%{name}-%{version}.jar %{buildroot}/usr/share/%{username}/lib
+# Handle the case of interim SNAPHOST builds
+cp build/%{relname}*jar %{buildroot}/usr/share/%{username}/lib
 mkdir -p %{buildroot}/var/lib/%{username}/commitlog
 mkdir -p %{buildroot}/var/lib/%{username}/data
+mkdir -p %{buildroot}/var/lib/%{username}/saved_caches
 mkdir -p %{buildroot}/var/run/%{username}
 mkdir -p %{buildroot}/var/log/%{username}
 
@@ -87,6 +100,8 @@ fi
 %attr(755,root,root) %{_bindir}/*
 %attr(755,root,root) %{_sbindir}/cassandra
 %attr(755,root,root) /etc/rc.d/init.d/%{username}
+%attr(755,root,root) /etc/default/%{username}
+%attr(755,root,root) /etc/security/limits.d/%{username}.conf
 %attr(755,%{username},%{username}) /usr/share/%{username}*
 %attr(755,%{username},%{username}) %config(noreplace) /%{_sysconfdir}/%{username}
 %attr(755,%{username},%{username}) %config(noreplace) /var/lib/%{username}/*

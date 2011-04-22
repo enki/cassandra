@@ -25,15 +25,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Multimap;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.thrift.ConsistencyLevel;
-import org.apache.cassandra.thrift.UnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.thrift.ConsistencyLevel;
+import org.apache.cassandra.thrift.UnavailableException;
+
 /**
- * Handles blocking writes for ONE, ANY, QUORUM, and ALL consistency levels.
+ * Handles blocking writes for ONE, ANY, TWO, THREE, QUORUM, and ALL consistency levels.
  */
 public class WriteResponseHandler extends AbstractWriteResponseHandler
 {
@@ -73,30 +74,23 @@ public class WriteResponseHandler extends AbstractWriteResponseHandler
 
     protected int determineBlockFor(String table)
     {
-        int blockFor = 0;
         switch (consistencyLevel)
         {
             case ONE:
-                blockFor = 1;
-                break;
+                return 1;
             case ANY:
-                blockFor = 1;
-                break;
+                return 1;
+            case TWO:
+                return 2;
+            case THREE:
+                return 3;
             case QUORUM:
-                blockFor = (writeEndpoints.size() / 2) + 1;
-                break;
+                return (writeEndpoints.size() / 2) + 1;
             case ALL:
-                blockFor = writeEndpoints.size();
-                break;
+                return writeEndpoints.size();
             default:
                 throw new UnsupportedOperationException("invalid consistency level: " + consistencyLevel.toString());
         }
-        // at most one node per range can bootstrap at a time, and these will be added to the write until
-        // bootstrap finishes (at which point we no longer need to write to the old ones).
-        assert 1 <= blockFor && blockFor <= 2 * DatabaseDescriptor.getReplicationFactor(table)
-            : String.format("invalid response count %d for replication factor %d",
-                            blockFor, DatabaseDescriptor.getReplicationFactor(table));
-        return blockFor;
     }
 
     public void assureSufficientLiveNodes() throws UnavailableException
@@ -106,6 +100,7 @@ public class WriteResponseHandler extends AbstractWriteResponseHandler
             // ensure there are blockFor distinct living nodes (hints are ok).
             if (hintedEndpoints.keySet().size() < responses.get())
                 throw new UnavailableException();
+            return;
         }
 
         // count destinations that are part of the desired target set
@@ -119,5 +114,10 @@ public class WriteResponseHandler extends AbstractWriteResponseHandler
         {
             throw new UnavailableException();
         }
+    }
+
+    public boolean isLatencyForSnitch()
+    {
+        return false;
     }
 }

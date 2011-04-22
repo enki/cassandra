@@ -26,12 +26,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import com.google.common.collect.*;
+import org.apache.cassandra.utils.Pair;
 import org.apache.commons.lang.StringUtils;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.*;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.StorageService;
@@ -51,22 +51,26 @@ public class TokenMetadata
     // for any nodes that boot simultaneously between same two nodes. For this we cannot simply make pending ranges a <tt>Multimap</tt>,
     // since that would make us unable to notice the real problem of two nodes trying to boot using the same token.
     // In order to do this properly, we need to know what tokens are booting at any time.
-    private BiMap<Token, InetAddress> bootstrapTokens;
+    private BiMap<Token, InetAddress> bootstrapTokens = HashBiMap.create();
 
     // we will need to know at all times what nodes are leaving and calculate ranges accordingly.
     // An anonymous pending ranges list is not enough, as that does not tell which node is leaving
     // and/or if the ranges are there because of bootstrap or leave operation.
     // (See CASSANDRA-603 for more detail + examples).
-    private Set<InetAddress> leavingEndpoints;
+    private Set<InetAddress> leavingEndpoints = new HashSet<InetAddress>();
 
-    private ConcurrentMap<String, Multimap<Range, InetAddress>> pendingRanges;
+    private ConcurrentMap<String, Multimap<Range, InetAddress>> pendingRanges = new ConcurrentHashMap<String, Multimap<Range, InetAddress>>();
+
+    // nodes which are migrating to the new tokens in the ring
+    private Set<Pair<Token, InetAddress>> movingEndpoints = new HashSet<Pair<Token, InetAddress>>();
+
 
     /* Use this lock for manipulating the token map */
     private final ReadWriteLock lock = new ReentrantReadWriteLock(true);
     private ArrayList<Token> sortedTokens;
 
     /* list of subscribers that are notified when the tokenToEndpointMap changed */
-    private final CopyOnWriteArrayList<AbstractReplicationStrategy> subscribers;
+    private final CopyOnWriteArrayList<AbstractReplicationStrategy> subscribers = new CopyOnWriteArrayList<AbstractReplicationStrategy>();
 
     public TokenMetadata()
     {
@@ -78,11 +82,7 @@ public class TokenMetadata
         if (tokenToEndpointMap == null)
             tokenToEndpointMap = HashBiMap.create();
         this.tokenToEndpointMap = tokenToEndpointMap;
-        bootstrapTokens = HashBiMap.create();
-        leavingEndpoints = new HashSet<InetAddress>();
-        pendingRanges = new ConcurrentHashMap<String, Multimap<Range, InetAddress>>();
         sortedTokens = sortTokens();
-        subscribers = new CopyOnWriteArrayList<AbstractReplicationStrategy>();
     }
 
     private ArrayList<Token> sortTokens()
@@ -121,7 +121,8 @@ public class TokenMetadata
                 sortedTokens = sortTokens();
             }
             leavingEndpoints.remove(endpoint);
-            fireTokenToEndpointMapChanged();
+            removeFromMoving(endpoint); // also removing this endpoint from moving
+            invalidateCaches();
         }
         finally
         {
@@ -186,6 +187,27 @@ public class TokenMetadata
         }
     }
 
+    /**
+     * Add a new moving endpoint
+     * @param token token which is node moving to
+     * @param endpoint address of the moving node
+     */
+    public void addMovingEndpoint(Token token, InetAddress endpoint)
+    {
+        assert endpoint != null;
+
+        lock.writeLock().lock();
+
+        try
+        {
+            movingEndpoints.add(new Pair<Token, InetAddress>(token, endpoint));
+        }
+        finally
+        {
+            lock.writeLock().unlock();
+        }
+    }
+
     public void removeEndpoint(InetAddress endpoint)
     {
         assert endpoint != null;
@@ -197,7 +219,35 @@ public class TokenMetadata
             tokenToEndpointMap.inverse().remove(endpoint);
             leavingEndpoints.remove(endpoint);
             sortedTokens = sortTokens();
-            fireTokenToEndpointMapChanged();
+            invalidateCaches();
+        }
+        finally
+        {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Remove pair of token/address from moving endpoints
+     * @param endpoint address of the moving node
+     */
+    public void removeFromMoving(InetAddress endpoint)
+    {
+        assert endpoint != null;
+
+        lock.writeLock().lock();
+        try
+        {
+            for (Pair<Token, InetAddress> pair : movingEndpoints)
+            {
+                if (pair.right.equals(endpoint))
+                {
+                    movingEndpoints.remove(pair);
+                    break;
+                }
+            }
+
+            invalidateCaches();
         }
         finally
         {
@@ -251,6 +301,28 @@ public class TokenMetadata
         }
     }
 
+    public boolean isMoving(InetAddress endpoint)
+    {
+        assert endpoint != null;
+
+        lock.readLock().lock();
+
+        try
+        {
+            for (Pair<Token, InetAddress> pair : movingEndpoints)
+            {
+                if (pair.right.equals(endpoint))
+                    return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
+    }
+
     /**
      * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
      * bootstrap tokens and leaving endpoints are not included in the copy.
@@ -271,6 +343,8 @@ public class TokenMetadata
     /**
      * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
      * current leave operations have finished.
+     *
+     * @return new token metadata
      */
     public TokenMetadata cloneAfterAllLeft()
     {
@@ -278,9 +352,40 @@ public class TokenMetadata
         try
         {
             TokenMetadata allLeftMetadata = cloneOnlyTokenMap();
+
             for (InetAddress endpoint : leavingEndpoints)
                 allLeftMetadata.removeEndpoint(endpoint);
+
             return allLeftMetadata;
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
+     * current leave and move operations have finished.
+     *
+     * @return new token metadata
+     */
+    public TokenMetadata cloneAfterAllSettled()
+    {
+        lock.readLock().lock();
+
+        try
+        {
+            TokenMetadata metadata = cloneOnlyTokenMap();
+
+            for (InetAddress endpoint : leavingEndpoints)
+                metadata.removeEndpoint(endpoint);
+
+
+            for (Pair<Token, InetAddress> pair : movingEndpoints)
+                metadata.updateNormalToken(pair.left, pair.right);
+
+            return metadata;
         }
         finally
         {
@@ -324,13 +429,15 @@ public class TokenMetadata
         }
     }
 
-    private synchronized Multimap<Range, InetAddress> getPendingRangesMM(String table)
+    private Multimap<Range, InetAddress> getPendingRangesMM(String table)
     {
         Multimap<Range, InetAddress> map = pendingRanges.get(table);
         if (map == null)
         {
-             map = HashMultimap.create();
-            pendingRanges.put(table, map);
+            map = HashMultimap.create();
+            Multimap<Range, InetAddress> priorMap = pendingRanges.putIfAbsent(table, map);
+            if (priorMap != null)
+                map = priorMap;
         }
         return map;
     }
@@ -387,6 +494,15 @@ public class TokenMetadata
         return leavingEndpoints;
     }
 
+    /**
+     * Endpoints which are migrating to the new tokens
+     * @return set of addresses of moving endpoints
+     */
+    public Set<Pair<Token, InetAddress>> getMovingEndpoints()
+    {
+        return movingEndpoints;
+    }
+
     public static int firstTokenIndex(final ArrayList ring, Token start, boolean insertMin)
     {
         assert ring.size() > 0;
@@ -413,6 +529,10 @@ public class TokenMetadata
      */
     public static Iterator<Token> ringIterator(final ArrayList<Token> ring, Token start, boolean includeMin)
     {
+        if (ring.isEmpty())
+            return includeMin ? Iterators.singletonIterator(StorageService.getPartitioner().getMinimumToken())
+                              : Iterators.<Token>emptyIterator();
+
         final boolean insertMin = (includeMin && !ring.get(0).equals(StorageService.getPartitioner().getMinimumToken())) ? true : false;
         final int startIndex = firstTokenIndex(ring, start, insertMin);
         return new AbstractIterator<Token>()
@@ -450,7 +570,7 @@ public class TokenMetadata
         tokenToEndpointMap.clear();
         leavingEndpoints.clear();
         pendingRanges.clear();
-        fireTokenToEndpointMapChanged();
+        invalidateCaches();
     }
 
     public String toString()
@@ -527,7 +647,7 @@ public class TokenMetadata
         return sb.toString();
     }
 
-    protected void fireTokenToEndpointMapChanged()
+    public void invalidateCaches()
     {
         for (AbstractReplicationStrategy subscriber : subscribers)
         {
@@ -538,6 +658,11 @@ public class TokenMetadata
     public void register(AbstractReplicationStrategy subscriber)
     {
         subscribers.add(subscriber);
+    }
+
+    public void unregister(AbstractReplicationStrategy subscriber)
+    {
+        subscribers.remove(subscriber);
     }
 
     /**
@@ -552,12 +677,13 @@ public class TokenMetadata
      */
     public Collection<InetAddress> getWriteEndpoints(Token token, String table, Collection<InetAddress> naturalEndpoints)
     {
-        if (getPendingRanges(table).isEmpty())
+        Map<Range, Collection<InetAddress>> ranges = getPendingRanges(table);
+        if (ranges.isEmpty())
             return naturalEndpoints;
 
-        List<InetAddress> endpoints = new ArrayList<InetAddress>(naturalEndpoints);
+        Set<InetAddress> endpoints = new HashSet<InetAddress>(naturalEndpoints);
 
-        for (Map.Entry<Range, Collection<InetAddress>> entry : getPendingRanges(table).entrySet())
+        for (Map.Entry<Range, Collection<InetAddress>> entry : ranges.entrySet())
         {
             if (entry.getKey().contains(token))
             {

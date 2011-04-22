@@ -18,13 +18,14 @@
 */
 package org.apache.cassandra.dht;
 
+import java.nio.ByteBuffer;
+
 import org.junit.Test;
 
 import org.apache.cassandra.utils.FBUtilities;
 
 public class CollatingOrderPreservingPartitionerTest extends PartitionerTestCase<BytesToken>
 {
-    @Override
     public void initPartitioner()
     {
         partitioner = new CollatingOrderPreservingPartitioner();
@@ -37,7 +38,7 @@ public class CollatingOrderPreservingPartitionerTest extends PartitionerTestCase
     public void testTokenFactoryStringsNonUTF()
     {
         Token.TokenFactory factory = this.partitioner.getTokenFactory();
-        BytesToken tok = new BytesToken((byte)0xFF, (byte)0xFF);
+        BytesToken tok = new BytesToken(new byte[]{(byte)0xFF, (byte)0xFF});
         assert tok.compareTo(factory.fromString(factory.toString(tok))) == 0;
     }
 

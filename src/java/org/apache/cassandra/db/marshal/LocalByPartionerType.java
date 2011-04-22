@@ -19,12 +19,17 @@
 
 package org.apache.cassandra.db.marshal;
 
+import java.nio.ByteBuffer;
+
+import org.apache.commons.lang.NotImplementedException;
+
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /** for sorting columns representing row keys in the row ordering as determined by a partitioner.
  * Not intended for user-defined CFs, and will in fact error out if used with such. */
-public class LocalByPartionerType<T extends Token> extends AbstractType
+public class LocalByPartionerType<T extends Token> extends AbstractType<ByteBuffer>
 {
     private final IPartitioner<T> partitioner;
 
@@ -33,13 +38,43 @@ public class LocalByPartionerType<T extends Token> extends AbstractType
         this.partitioner = partitioner;
     }
 
-    public String getString(byte[] bytes)
+    public ByteBuffer compose(ByteBuffer bytes)
     {
-        return null;
+        throw new UnsupportedOperationException("You can't do this with a local partitioner.");
     }
 
-    public int compare(byte[] o1, byte[] o2)
+    public ByteBuffer decompose(ByteBuffer bytes)
+    {
+        throw new UnsupportedOperationException("You can't do this with a local partitioner.");
+    }
+
+    public String getString(ByteBuffer bytes)
+    {
+        return ByteBufferUtil.bytesToHex(bytes);
+    }
+
+    public String toString(ByteBuffer bb)
+    {
+        return getString(bb);
+    }
+
+    public ByteBuffer fromString(String source)
+    {
+        throw new NotImplementedException();
+    }
+
+    public int compare(ByteBuffer o1, ByteBuffer o2)
     {
         return partitioner.decorateKey(o1).compareTo(partitioner.decorateKey(o2));
+    }
+
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        throw new IllegalStateException("You shouldn't be validating this.");
+    }
+
+    public Class<ByteBuffer> getType()
+    {
+        return ByteBuffer.class;
     }
 }

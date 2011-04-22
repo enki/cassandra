@@ -22,21 +22,25 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.CounterColumn;
+import org.apache.cassandra.db.ExpiringColumn;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.io.sstable.SSTableUtils.tempSSTableFile;
-import static org.apache.cassandra.utils.FBUtilities.bytesToHex;
-import static org.apache.cassandra.utils.FBUtilities.hexToBytes;
+import static org.apache.cassandra.utils.ByteBufferUtil.bytesToHex;
+import static org.apache.cassandra.utils.ByteBufferUtil.hexToBytes;
 import static org.junit.Assert.assertTrue;
 
 import org.apache.cassandra.Util;
@@ -51,7 +55,7 @@ public class SSTableExportTest extends SchemaLoader
 {
     public String asHex(String str)
     {
-        return bytesToHex(str.getBytes());
+        return bytesToHex(ByteBufferUtil.bytes(str));
     }
 
     @Test
@@ -62,12 +66,12 @@ public class SSTableExportTest extends SchemaLoader
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
         
         // Add rowA
-        cfamily.addColumn(new QueryPath("Standard1", null, "colA".getBytes()), "valA".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("colA")), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
         
         // Add rowB
-        cfamily.addColumn(new QueryPath("Standard1", null, "colB".getBytes()), "valB".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("colB")), ByteBufferUtil.bytes("valB"), System.currentTimeMillis());
         writer.append(Util.dk("rowB"), cfamily);
         cfamily.clear();
      
@@ -88,23 +92,26 @@ public class SSTableExportTest extends SchemaLoader
     }
 
     @Test
-    public void testExportSimpleCf() throws IOException    {
+    public void testExportSimpleCf() throws IOException
+    {
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
         ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
         
+        int nowInSec = (int)(System.currentTimeMillis() / 1000) + 42; //live for 42 seconds
         // Add rowA
-        cfamily.addColumn(new QueryPath("Standard1", null, "colA".getBytes()), "valA".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("colA")), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
+        cfamily.addColumn(null, new ExpiringColumn(ByteBufferUtil.bytes("colExp"), ByteBufferUtil.bytes("valExp"), System.currentTimeMillis(), 42, nowInSec));
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
         
         // Add rowB
-        cfamily.addColumn(new QueryPath("Standard1", null, "colB".getBytes()), "valB".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("colB")), ByteBufferUtil.bytes("valB"), System.currentTimeMillis());
         writer.append(Util.dk("rowB"), cfamily);
         cfamily.clear();
 
         // Add rowExclude
-        cfamily.addColumn(new QueryPath("Standard1", null, "colX".getBytes()), "valX".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("colX")), ByteBufferUtil.bytes("valX"), System.currentTimeMillis());
         writer.append(Util.dk("rowExclude"), cfamily);
         cfamily.clear();
 
@@ -118,11 +125,15 @@ public class SSTableExportTest extends SchemaLoader
         
         JSONArray rowA = (JSONArray)json.get(asHex("rowA"));
         JSONArray colA = (JSONArray)rowA.get(0);
-        assert Arrays.equals(hexToBytes((String)colA.get(1)), "valA".getBytes());
+        assert hexToBytes((String)colA.get(1)).equals(ByteBufferUtil.bytes("valA"));
+
+        JSONArray colExp = (JSONArray)rowA.get(1);
+        assert ((Long)colExp.get(4)) == 42;
+        assert ((Long)colExp.get(5)) == nowInSec;
         
         JSONArray rowB = (JSONArray)json.get(asHex("rowB"));
         JSONArray colB = (JSONArray)rowB.get(0);
-        assert !(Boolean)colB.get(3);
+        assert colB.size() == 3;
 
         JSONArray rowExclude = (JSONArray)json.get(asHex("rowExclude"));
         assert rowExclude == null;
@@ -136,17 +147,17 @@ public class SSTableExportTest extends SchemaLoader
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
         
         // Add rowA
-        cfamily.addColumn(new QueryPath("Super4", "superA".getBytes(), "colA".getBytes()), "valA".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Super4", ByteBufferUtil.bytes("superA"), ByteBufferUtil.bytes("colA")), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
         
         // Add rowB
-        cfamily.addColumn(new QueryPath("Super4", "superB".getBytes(), "colB".getBytes()), "valB".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Super4", ByteBufferUtil.bytes("superB"), ByteBufferUtil.bytes("colB")), ByteBufferUtil.bytes("valB"), System.currentTimeMillis());
         writer.append(Util.dk("rowB"), cfamily);
         cfamily.clear();
 
         // Add rowExclude
-        cfamily.addColumn(new QueryPath("Super4", "superX".getBytes(), "colX".getBytes()), "valX".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Super4", ByteBufferUtil.bytes("superX"), ByteBufferUtil.bytes("colX")), ByteBufferUtil.bytes("valX"), System.currentTimeMillis());
         writer.append(Util.dk("rowExclude"), cfamily);
         cfamily.clear();
 
@@ -159,12 +170,12 @@ public class SSTableExportTest extends SchemaLoader
         JSONObject json = (JSONObject)JSONValue.parse(new FileReader(tempJson));
         
         JSONObject rowA = (JSONObject)json.get(asHex("rowA"));
-        JSONObject superA = (JSONObject)rowA.get(cfamily.getComparator().getString("superA".getBytes()));
+        JSONObject superA = (JSONObject)rowA.get(cfamily.getComparator().getString(ByteBufferUtil.bytes("superA")));
         JSONArray subColumns = (JSONArray)superA.get("subColumns");
         JSONArray colA = (JSONArray)subColumns.get(0);
         JSONObject rowExclude = (JSONObject)json.get(asHex("rowExclude"));
-        assert Arrays.equals(hexToBytes((String)colA.get(1)), "valA".getBytes());
-        assert !(Boolean)colA.get(3);
+        assert hexToBytes((String)colA.get(1)).equals(ByteBufferUtil.bytes("valA"));
+        assert colA.size() == 3;
         assert rowExclude == null;
     }
     
@@ -176,12 +187,12 @@ public class SSTableExportTest extends SchemaLoader
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
         
         // Add rowA
-        cfamily.addColumn(new QueryPath("Standard1", null, "name".getBytes()), "val".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("name")), ByteBufferUtil.bytes("val"), System.currentTimeMillis());
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
 
         // Add rowExclude
-        cfamily.addColumn(new QueryPath("Standard1", null, "name".getBytes()), "val".getBytes(), 1);
+        cfamily.addColumn(new QueryPath("Standard1", null, ByteBufferUtil.bytes("name")), ByteBufferUtil.bytes("val"), System.currentTimeMillis());
         writer.append(Util.dk("rowExclude"), cfamily);
         cfamily.clear();
 
@@ -196,13 +207,40 @@ public class SSTableExportTest extends SchemaLoader
         SSTableImport.importJson(tempJson.getPath(), "Keyspace1", "Standard1", tempSS2.getPath());
 
         reader = SSTableReader.open(Descriptor.fromFilename(tempSS2.getPath()));
-        QueryFilter qf = QueryFilter.getNamesFilter(Util.dk("rowA"), new QueryPath("Standard1", null, null), "name".getBytes());
+        QueryFilter qf = QueryFilter.getNamesFilter(Util.dk("rowA"), new QueryPath("Standard1", null, null), ByteBufferUtil.bytes("name"));
         ColumnFamily cf = qf.getSSTableColumnIterator(reader).getColumnFamily();
         assertTrue(cf != null);
-        assertTrue(Arrays.equals(cf.getColumn("name".getBytes()).value(), hexToBytes("76616c")));
+        assertTrue(cf.getColumn(ByteBufferUtil.bytes("name")).value().equals(hexToBytes("76616c")));
 
-        qf = QueryFilter.getNamesFilter(Util.dk("rowExclude"), new QueryPath("Standard1", null, null), "name".getBytes());
+        qf = QueryFilter.getNamesFilter(Util.dk("rowExclude"), new QueryPath("Standard1", null, null), ByteBufferUtil.bytes("name"));
         cf = qf.getSSTableColumnIterator(reader).getColumnFamily();
         assert cf == null;
+    }
+
+    @Test
+    public void testExportCounterCf() throws IOException
+    {
+        File tempSS = tempSSTableFile("Keyspace1", "Counter1");
+        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Counter1");
+        SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
+
+        // Add rowA
+        cfamily.addColumn(null, new CounterColumn(ByteBufferUtil.bytes("colA"), 42, System.currentTimeMillis()));
+        writer.append(Util.dk("rowA"), cfamily);
+        cfamily.clear();
+
+        SSTableReader reader = writer.closeAndOpenReader();
+
+        // Export to JSON and verify
+        File tempJson = File.createTempFile("Counter1", ".json");
+        SSTableExport.export(reader, new PrintStream(tempJson.getPath()), new String[0]);
+
+        JSONObject json = (JSONObject)JSONValue.parse(new FileReader(tempJson));
+
+        JSONArray rowA = (JSONArray)json.get(asHex("rowA"));
+        JSONArray colA = (JSONArray)rowA.get(0);
+        assert hexToBytes((String)colA.get(0)).equals(ByteBufferUtil.bytes("colA"));
+        assert ((String) colA.get(3)).equals("c");
+        assert (Long) colA.get(4) == Long.MIN_VALUE;
     }
 }

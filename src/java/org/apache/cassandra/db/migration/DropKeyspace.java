@@ -18,71 +18,79 @@
 
 package org.apache.cassandra.db.migration;
 
+import java.io.IOException;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.CompactionManager;
 import org.apache.cassandra.db.HintedHandOffManager;
-import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.IOException;
 
 public class DropKeyspace extends Migration
 {
     private String name;
-    private boolean blockOnFileDeletion;
     
     /** Required no-arg constructor */
     protected DropKeyspace() { /* pass */ }
     
-    public DropKeyspace(String name, boolean blockOnFileDeletion) throws ConfigurationException, IOException
+    public DropKeyspace(String name) throws ConfigurationException, IOException
     {
         super(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress()), DatabaseDescriptor.getDefsVersion());
         this.name = name;
-        this.blockOnFileDeletion = blockOnFileDeletion;
         KSMetaData ksm = DatabaseDescriptor.getTableDefinition(name);
         if (ksm == null)
             throw new ConfigurationException("Keyspace does not exist.");
         rm = makeDefinitionMutation(null, ksm, newVersion);
     }
 
-    @Override
-    public void beforeApplyModels()
-    {
-        if (!clientMode)
-            Table.open(name).snapshot(null);
-    }
-
-    @Override
     public void applyModels() throws IOException
     {
-        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(name);
-        // remove the table from the static instances.
-        Table table = Table.clear(ksm.name);
-        if (table == null)
-            throw new IOException("Table is not active. " + ksm.name);
-        
-        // remove all cfs from the table instance.
-        for (CFMetaData cfm : ksm.cfMetaData().values())
+        String snapshotName = Table.getTimestampedSnapshotName(null);
+        CompactionManager.instance.getCompactionLock().lock();
+        try
         {
-            CFMetaData.purge(cfm);
+            KSMetaData ksm = DatabaseDescriptor.getTableDefinition(name);
+
+            // remove all cfs from the table instance.
+            for (CFMetaData cfm : ksm.cfMetaData().values())
+            {
+                ColumnFamilyStore cfs = Table.open(ksm.name).getColumnFamilyStore(cfm.cfName);
+                CFMetaData.purge(cfm);
+                if (!clientMode)
+                {
+                    cfs.snapshot(snapshotName);
+                    cfs.flushLock.lock();
+                    try
+                    {
+                        Table.open(ksm.name).dropCf(cfm.cfId);
+                    }
+                    finally
+                    {
+                        cfs.flushLock.unlock();
+                    }
+                }
+            }
+                            
+            // remove the table from the static instances.
+            Table table = Table.clear(ksm.name);
+            assert table != null;
+            // reset defs.
+            DatabaseDescriptor.clearTableDefinition(ksm, newVersion);
+            
             if (!clientMode)
             {
-                table.dropCf(cfm.cfId);
+                // clear up any local hinted data for this keyspace.
+                HintedHandOffManager.renameHints(name, null);
             }
         }
-                        
-        // reset defs.
-        DatabaseDescriptor.clearTableDefinition(ksm, newVersion);
-        
-        if (!clientMode)
+        finally
         {
-            // clear up any local hinted data for this keyspace.
-            HintedHandOffManager.renameHints(name, null);
+            CompactionManager.instance.getCompactionLock().unlock();
         }
     }
     
@@ -90,7 +98,6 @@ public class DropKeyspace extends Migration
     {
         org.apache.cassandra.db.migration.avro.DropKeyspace dks = new org.apache.cassandra.db.migration.avro.DropKeyspace();
         dks.ksname = new org.apache.avro.util.Utf8(name);
-        dks.block_on_deletion = blockOnFileDeletion;
         mi.migration = dks;
     }
 
@@ -98,6 +105,11 @@ public class DropKeyspace extends Migration
     {
         org.apache.cassandra.db.migration.avro.DropKeyspace dks = (org.apache.cassandra.db.migration.avro.DropKeyspace)mi.migration;
         name = dks.ksname.toString();
-        blockOnFileDeletion = dks.block_on_deletion;
+    }
+    
+    @Override
+    public String toString()
+    {
+        return "Drop keyspace: " + name;
     }
 }

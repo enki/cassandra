@@ -26,26 +26,31 @@ import java.io.DataInputStream;
 import java.io.IOError;
 import java.io.IOException;
 
-import org.apache.cassandra.net.IVerbHandler;
-import org.apache.cassandra.net.Message;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.net.IVerbHandler;
+import org.apache.cassandra.net.Message;
 
 public class StreamReplyVerbHandler implements IVerbHandler
 {
     private static Logger logger = LoggerFactory.getLogger(StreamReplyVerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         byte[] body = message.getMessageBody();
         ByteArrayInputStream bufIn = new ByteArrayInputStream(body);
 
         try
         {
-            StreamReply reply = StreamReply.serializer.deserialize(new DataInputStream(bufIn));
+            StreamReply reply = StreamReply.serializer.deserialize(new DataInputStream(bufIn), message.getVersion());
             logger.debug("Received StreamReply {}", reply);
             StreamOutSession session = StreamOutSession.get(message.getFrom(), reply.sessionId);
+            if (session == null)
+            {
+                logger.debug("Received stream action " + reply.action + " for an unknown session from " + message.getFrom());
+                return;
+            }
 
             switch (reply.action)
             {

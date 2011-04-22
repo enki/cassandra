@@ -1,13 +1,14 @@
 package org.apache.cassandra.db.migration;
 
+import java.io.IOException;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.IOException;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -50,7 +51,7 @@ public class UpdateKeyspace extends Migration
         oldKsm = DatabaseDescriptor.getKSMetaData(ksm.name);
         if (oldKsm == null)
             throw new ConfigurationException(ksm.name + " cannot be updated because it doesn't exist.");
-        this.newKsm = new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, oldKsm.cfMetaData().values().toArray(new CFMetaData[]{}));
+        this.newKsm = new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, oldKsm.cfMetaData().values().toArray(new CFMetaData[]{}));
         rm = makeDefinitionMutation(newKsm, oldKsm, newVersion);
     }
     
@@ -58,6 +59,18 @@ public class UpdateKeyspace extends Migration
     {
         DatabaseDescriptor.clearTableDefinition(oldKsm, newVersion);
         DatabaseDescriptor.setTableDefinition(newKsm, newVersion);
+
+
+        Table table = Table.open(newKsm.name);
+        try
+        {
+            table.createReplicationStrategy(newKsm);
+        }
+        catch (ConfigurationException e)
+        {
+            throw new IOException(e);
+        }
+
         logger.info("Keyspace updated. Please perform any manual operations.");
     }
 
@@ -74,5 +87,11 @@ public class UpdateKeyspace extends Migration
         org.apache.cassandra.db.migration.avro.UpdateKeyspace uks = (org.apache.cassandra.db.migration.avro.UpdateKeyspace)mi.migration;
         newKsm = KSMetaData.inflate(uks.newKs);
         oldKsm = KSMetaData.inflate(uks.oldKs);
+    }
+
+    @Override
+    public String toString()
+    {
+        return String.format("Update keyspace %s to %s", oldKsm.toString(), newKsm.toString());
     }
 }

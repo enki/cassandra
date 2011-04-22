@@ -19,13 +19,17 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
-import java.util.*;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.utils.BloomFilter;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileMark;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.*;
 
 /**
  * Provides helper to serialize, deserialize and use column indexes.
@@ -38,33 +42,34 @@ public class IndexHelper
      * @param in the data input from which the bloom filter should be skipped
      * @throws IOException
      */
-    public static void skipBloomFilter(DataInput in) throws IOException
+    public static void skipBloomFilter(FileDataInput in) throws IOException
     {
         /* size of the bloom filter */
         int size = in.readInt();
         /* skip the serialized bloom filter */
-        int skipped = in.skipBytes(size);
-        if (skipped != size)
-            throw new EOFException("attempted to skip " + size + " bytes but only skipped " + skipped);
+        FileUtils.skipBytesFully(in, size);
     }
 
 	/**
 	 * Skip the index
 	 * @param file the data input from which the index should be skipped
-	 * @throws IOException
+	 * @throws IOException if an I/O error occurs.
 	 */
-	public static void skipIndex(DataInput file) throws IOException
+	public static void skipIndex(FileDataInput file) throws IOException
 	{
         /* read only the column index list */
         int columnIndexSize = file.readInt();
         /* skip the column index data */
-        if (file.skipBytes(columnIndexSize) != columnIndexSize)
-            throw new EOFException();
+        FileUtils.skipBytesFully(file, columnIndexSize);
 	}
     
     /**
      * Deserialize the index into a structure and return it
-     * @throws IOException
+     *
+     * @param in - input source
+     *
+     * @return ArrayList<IndexInfo> - list of de-serialized indexes
+     * @throws IOException if an I/O error occurs.
      */
 	public static ArrayList<IndexInfo> deserializeIndex(FileDataInput in) throws IOException
 	{
@@ -82,54 +87,88 @@ public class IndexHelper
         return indexList;
 	}
 
+    public static Filter defreezeBloomFilter(FileDataInput file, boolean usesOldBloomFilter) throws IOException
+    {
+        return defreezeBloomFilter(file, Integer.MAX_VALUE, usesOldBloomFilter);
+    }
+
     /**
-     * Defreeze the bloom filter.
+     * De-freeze the bloom filter.
+     *
+     * @param file - source file
+     * @param maxSize - sanity check: if filter claimes to be larger than this it is bogus
+     * @param useOldBuffer - do we need to reuse old buffer?
      *
      * @return bloom filter summarizing the column information
-     * @throws java.io.IOException
+     * @throws java.io.IOException if an I/O error occurs.
+     * Guarantees that file's current position will be just after the bloom filter, even if
+     * the filter cannot be deserialized, UNLESS EOFException is thrown.
      */
-    public static BloomFilter defreezeBloomFilter(DataInput file) throws IOException
+    public static Filter defreezeBloomFilter(FileDataInput file, long maxSize, boolean useOldBuffer) throws IOException
     {
         int size = file.readInt();
-        byte[] bytes = new byte[size];
-        file.readFully(bytes);
-        
-        ByteArrayInputStream bufIn = new ByteArrayInputStream(bytes);
-        return BloomFilter.serializer().deserialize(new DataInputStream(bufIn));
+        if (size > maxSize || size <= 0)
+            throw new EOFException("bloom filter claims to be " + size + " bytes, longer than entire row size " + maxSize);
+        ByteBuffer bytes = file.readBytes(size);
+
+        DataInputStream stream = new DataInputStream(ByteBufferUtil.inputStream(bytes));
+        return useOldBuffer
+                ? LegacyBloomFilter.serializer().deserialize(stream, 0) // version means nothing there.
+                : BloomFilter.serializer().deserialize(stream);
     }
 
     /**
-     * the index of the IndexInfo in which @name will be found.
-     * If the index is @indexList.size(), the @name appears nowhere.
+     * The index of the IndexInfo in which a scan starting with @name should begin.
+     *
+     * @param name
+     *         name of the index
+     *
+     * @param indexList
+     *          list of the indexInfo objects
+     *
+     * @param comparator
+     *          comparator type
+     *
+     * @param reversed
+     *          is name reversed
+     *
+     * @return int index
      */
-    public static int indexFor(byte[] name, List<IndexInfo> indexList, AbstractType comparator, boolean reversed)
+    public static int indexFor(ByteBuffer name, List<IndexInfo> indexList, AbstractType comparator, boolean reversed)
     {
-        if (name.length == 0 && reversed)
+        if (name.remaining() == 0 && reversed)
             return indexList.size() - 1;
         IndexInfo target = new IndexInfo(name, name, 0, 0);
-        int index = Collections.binarySearch(indexList, target, getComparator(comparator));
-        return index < 0 ? -1 * (index + 1) : index;
+        /*
+        Take the example from the unit test, and say your index looks like this:
+        [0..5][10..15][20..25]
+        and you look for the slice [13..17].
+
+        When doing forward slice, we we doing a binary search comparing 13 (the start of the query)
+        to the lastName part of the index slot. You'll end up with the "first" slot, going from left to right,
+        that may contain the start.
+
+        When doing a reverse slice, we do the same thing, only using as a start column the end of the query,
+        i.e. 17 in this example, compared to the firstName part of the index slots.  bsearch will give us the
+        first slot where firstName > start ([20..25] here), so we subtract an extra one to get the slot just before.
+        */
+        int index = Collections.binarySearch(indexList, target, getComparator(comparator, reversed));
+        return index < 0 ? -index - (reversed ? 2 : 1) : index;
     }
 
-    public static Comparator<IndexInfo> getComparator(final AbstractType nameComparator)
+    public static Comparator<IndexInfo> getComparator(final AbstractType nameComparator, boolean reversed)
     {
-        return new Comparator<IndexInfo>()
-        {
-            public int compare(IndexInfo o1, IndexInfo o2)
-            {
-                return nameComparator.compare(o1.lastName, o2.lastName);
-            }
-        };
+        return reversed ? nameComparator.indexReverseComparator : nameComparator.indexComparator;
     }
 
     public static class IndexInfo
     {
         public final long width;
-        public final byte[] lastName;
-        public final byte[] firstName;
+        public final ByteBuffer lastName;
+        public final ByteBuffer firstName;
         public final long offset;
 
-        public IndexInfo(byte[] firstName, byte[] lastName, long offset, long width)
+        public IndexInfo(ByteBuffer firstName, ByteBuffer lastName, long offset, long width)
         {
             this.firstName = firstName;
             this.lastName = lastName;
@@ -139,20 +178,20 @@ public class IndexHelper
 
         public void serialize(DataOutput dos) throws IOException
         {
-            FBUtilities.writeShortByteArray(firstName, dos);
-            FBUtilities.writeShortByteArray(lastName, dos);
+            ByteBufferUtil.writeWithShortLength(firstName, dos);
+            ByteBufferUtil.writeWithShortLength(lastName, dos);
             dos.writeLong(offset);
             dos.writeLong(width);
         }
 
         public int serializedSize()
         {
-            return 2 + firstName.length + 2 + lastName.length + 8 + 8;
+            return 2 + firstName.remaining() + 2 + lastName.remaining() + 8 + 8;
         }
 
         public static IndexInfo deserialize(FileDataInput dis) throws IOException
         {
-            return new IndexInfo(FBUtilities.readShortByteArray(dis), FBUtilities.readShortByteArray(dis), dis.readLong(), dis.readLong());
+            return new IndexInfo(ByteBufferUtil.readWithShortLength(dis), ByteBufferUtil.readWithShortLength(dis), dis.readLong(), dis.readLong());
         }
     }
 }

@@ -23,11 +23,9 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.io.ICompactSerializer;
-import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessageProducer;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -37,7 +35,7 @@ import org.apache.cassandra.utils.FBUtilities;
  * @author rantav@gmail.com
  *
  */
-public class Truncation
+public class Truncation implements MessageProducer
 {
     private static ICompactSerializer<Truncation> serializer;
 
@@ -69,12 +67,12 @@ public class Truncation
         Table.open(keyspace).getColumnFamilyStore(columnFamily).truncate();
     }
 
-    public Message makeTruncationMessage() throws IOException
+    public Message getMessage(Integer version) throws IOException
     {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(bos);
-        serializer().serialize(this, dos);
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.TRUNCATE, bos.toByteArray());
+        serializer().serialize(this, dos, version);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.TRUNCATE, bos.toByteArray(), version);
     }
 
     public String toString()
@@ -85,13 +83,13 @@ public class Truncation
 
 class TruncationSerializer implements ICompactSerializer<Truncation>
 {
-    public void serialize(Truncation t, DataOutputStream dos) throws IOException
+    public void serialize(Truncation t, DataOutputStream dos, int version) throws IOException
     {
         dos.writeUTF(t.keyspace);
         dos.writeUTF(t.columnFamily);
     }
 
-    public Truncation deserialize(DataInputStream dis) throws IOException
+    public Truncation deserialize(DataInputStream dis, int version) throws IOException
     {
         String keyspace = dis.readUTF();
         String columnFamily = dis.readUTF();

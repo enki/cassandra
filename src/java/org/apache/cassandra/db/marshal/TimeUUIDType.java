@@ -21,65 +21,188 @@ package org.apache.cassandra.db.marshal;
  */
 
 
+import java.nio.ByteBuffer;
+import java.text.ParseException;
 import java.util.UUID;
-import org.apache.cassandra.utils.FBUtilities;
+import java.util.regex.Pattern;
 
-public class TimeUUIDType extends AbstractType
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
+import org.apache.commons.lang.time.DateUtils;
+
+public class TimeUUIDType extends AbstractType<UUID>
 {
     public static final TimeUUIDType instance = new TimeUUIDType();
 
+    static final Pattern regexPattern = Pattern.compile("[A-Fa-f0-9]{8}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{12}");
+    static final String[] iso8601Patterns = new String[] {
+        "yyyy-MM-dd HH:mm",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd HH:mmZ",
+        "yyyy-MM-dd HH:mm:ssZ",
+        "yyyy-MM-dd'T'HH:mm",
+        "yyyy-MM-dd'T'HH:mmZ",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ssZ",
+        "yyyy-MM-dd",
+        "yyyy-MM-ddZ"
+    };
+
     TimeUUIDType() {} // singleton
 
-    public int compare(byte[] o1, byte[] o2)
+    public UUID compose(ByteBuffer bytes)
     {
-        if (o1.length == 0)
+        return UUIDGen.getUUID(bytes);
+    }
+
+    public ByteBuffer decompose(UUID value)
+    {
+        return ByteBuffer.wrap(UUIDGen.decompose(value));
+    }
+
+    public int compare(ByteBuffer o1, ByteBuffer o2)
+    {
+        if (o1.remaining() == 0)
         {
-            return o2.length == 0 ? 0 : -1;
+            return o2.remaining() == 0 ? 0 : -1;
         }
-        if (o2.length == 0)
+        if (o2.remaining() == 0)
         {
             return 1;
         }
         int res = compareTimestampBytes(o1, o2);
         if (res != 0)
             return res;
-        return FBUtilities.compareByteArrays(o1, o2);
+        return o1.compareTo(o2);
     }
 
-    private static int compareTimestampBytes(byte[] o1, byte[] o2)
+    private static int compareTimestampBytes(ByteBuffer o1, ByteBuffer o2)
     {
-        int d = (o1[6] & 0xF) - (o2[6] & 0xF);
+        int o1Pos = o1.position();
+        int o2Pos = o2.position();
+
+        int d = (o1.get(o1Pos+6) & 0xF) - (o2.get(o2Pos+6) & 0xF);
         if (d != 0) return d;
-        d = (o1[7] & 0xFF) - (o2[7] & 0xFF);
+
+        d = (o1.get(o1Pos+7) & 0xFF) - (o2.get(o2Pos+7) & 0xFF);
         if (d != 0) return d;
-        d = (o1[4] & 0xFF) - (o2[4] & 0xFF);
+
+        d = (o1.get(o1Pos+4) & 0xFF) - (o2.get(o2Pos+4) & 0xFF);
         if (d != 0) return d;
-        d = (o1[5] & 0xFF) - (o2[5] & 0xFF);
+
+        d = (o1.get(o1Pos+5) & 0xFF) - (o2.get(o2Pos+5) & 0xFF);
         if (d != 0) return d;
-        d = (o1[0] & 0xFF) - (o2[0] & 0xFF);
+
+        d = (o1.get(o1Pos) & 0xFF) - (o2.get(o2Pos) & 0xFF);
         if (d != 0) return d;
-        d = (o1[1] & 0xFF) - (o2[1] & 0xFF);
+
+        d = (o1.get(o1Pos+1) & 0xFF) - (o2.get(o2Pos+1) & 0xFF);
         if (d != 0) return d;
-        d = (o1[2] & 0xFF) - (o2[2] & 0xFF);
+
+        d = (o1.get(o1Pos+2) & 0xFF) - (o2.get(o2Pos+2) & 0xFF);
         if (d != 0) return d;
-        return (o1[3] & 0xFF) - (o2[3] & 0xFF);
+
+        return (o1.get(o1Pos+3) & 0xFF) - (o2.get(o2Pos+3) & 0xFF);
     }
 
-    public String getString(byte[] bytes)
+    public String getString(ByteBuffer bytes)
     {
-        if (bytes.length == 0)
+        if (bytes.remaining() == 0)
         {
             return "";
         }
-        if (bytes.length != 16)
+        if (bytes.remaining() != 16)
         {
             throw new MarshalException("UUIDs must be exactly 16 bytes");
         }
-        UUID uuid = LexicalUUIDType.getUUID(bytes);
+        UUID uuid = UUIDGen.getUUID(bytes);
         if (uuid.version() != 1)
         {
             throw new MarshalException("TimeUUID only makes sense with version 1 UUIDs");
         }
         return uuid.toString();
+    }
+
+    public String toString(UUID uuid)
+    {
+        return uuid.toString();
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+        
+        ByteBuffer idBytes = null;
+        
+        // ffffffff-ffff-ffff-ffff-ffffffffff
+        if (regexPattern.matcher(source).matches())
+        {
+            UUID uuid = null;
+            try
+            {
+                uuid = UUID.fromString(source);
+                idBytes = decompose(uuid);
+            }
+            catch (IllegalArgumentException e)
+            {
+                throw new MarshalException(String.format("unable to make UUID from '%s'", source), e);
+            }
+            
+            if (uuid.version() != 1)
+                throw new MarshalException("TimeUUID supports only version 1 UUIDs");
+        }
+        else if (source.toLowerCase().equals("now"))
+        {
+            idBytes = ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress())));
+        }
+        // Milliseconds since epoch?
+        else if (source.matches("^\\d+$"))
+        {
+            try
+            {
+                idBytes = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes(Long.parseLong(source)));
+            }
+            catch (NumberFormatException e)
+            {
+                throw new MarshalException(String.format("unable to make version 1 UUID from '%s'", source), e);
+            }
+        }
+        // Last chance, attempt to parse as date-time string
+        else
+        {
+            try
+            {
+                long timestamp = DateUtils.parseDate(source, iso8601Patterns).getTime();
+                idBytes = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes(timestamp));
+            }
+            catch (ParseException e1)
+            {
+                throw new MarshalException(String.format("unable to coerce '%s' to version 1 UUID", source), e1);
+            }
+        }
+            
+        return idBytes;
+    }
+
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        if (bytes.remaining() != 16 && bytes.remaining() != 0)
+            throw new MarshalException(String.format("TimeUUID should be 16 or 0 bytes (%d)", bytes.remaining()));
+        ByteBuffer slice = bytes.slice();
+        // version is bits 4-7 of byte 6.
+        if (bytes.remaining() > 0)
+        {
+            slice.position(6);
+            if ((slice.get() & 0xf0) != 0x10)
+                throw new MarshalException("Invalid version for TimeUUID type.");
+        }
+    }
+
+    public Class<UUID> getType()
+    {
+        return UUID.class;
     }
 }

@@ -21,31 +21,24 @@ package org.apache.cassandra.db;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.Collection;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class Row
 {
-    private static Logger logger_ = LoggerFactory.getLogger(Row.class);
     private static RowSerializer serializer = new RowSerializer();
 
-    static RowSerializer serializer()
+    public static RowSerializer serializer()
     {
         return serializer;
     }
 
-    public final DecoratedKey key;
+    public final DecoratedKey<?> key;
     public final ColumnFamily cf;
 
-    public Row(DecoratedKey key, ColumnFamily cf)
+    public Row(DecoratedKey<?> key, ColumnFamily cf)
     {
         assert key != null;
         // cf may be null, indicating no data
@@ -65,15 +58,20 @@ public class Row
 
 class RowSerializer implements ICompactSerializer<Row>
 {
-    public void serialize(Row row, DataOutputStream dos) throws IOException
+    public void serialize(Row row, DataOutputStream dos, int version) throws IOException
     {
-        FBUtilities.writeShortByteArray(row.key.key, dos);
+        ByteBufferUtil.writeWithShortLength(row.key.key, dos);
         ColumnFamily.serializer().serialize(row.cf, dos);
     }
 
-    public Row deserialize(DataInputStream dis) throws IOException
+    public Row deserialize(DataInputStream dis, int version, boolean fromRemote) throws IOException
     {
-        return new Row(StorageService.getPartitioner().decorateKey(FBUtilities.readShortByteArray(dis)),
-                       ColumnFamily.serializer().deserialize(dis));
+        return new Row(StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(dis)),
+                       ColumnFamily.serializer().deserialize(dis, false, fromRemote));
+    }
+
+    public Row deserialize(DataInputStream dis, int version) throws IOException
+    {
+        return deserialize(dis, version, false);
     }
 }

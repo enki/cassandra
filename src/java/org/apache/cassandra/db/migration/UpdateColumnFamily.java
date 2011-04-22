@@ -1,16 +1,13 @@
 package org.apache.cassandra.db.migration;
 
+import java.io.IOException;
+
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.migration.avro.ColumnDef;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -33,84 +30,78 @@ import java.util.Map;
 /** todo: doesn't work with secondary indices yet. See CASSANDRA-1415. */
 public class UpdateColumnFamily extends Migration
 {
-    private CFMetaData oldCfm;
-    private CFMetaData newCfm;
+    // does not point to a CFM stored in DatabaseDescriptor.
+    private CFMetaData metadata;
     
     protected UpdateColumnFamily() { }
     
     /** assumes validation has already happened. That is, replacing oldCfm with newCfm is neither illegal or totally whackass. */
-    public UpdateColumnFamily(CFMetaData oldCfm, CFMetaData newCfm) throws ConfigurationException, IOException
+    public UpdateColumnFamily(org.apache.cassandra.db.migration.avro.CfDef cf_def) throws ConfigurationException, IOException
     {
         super(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress()), DatabaseDescriptor.getDefsVersion());
         
-        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(newCfm.tableName);
+        KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cf_def.keyspace.toString());
         if (ksm == null)
-            throw new ConfigurationException("Keyspace does not already exist.");
+            throw new ConfigurationException("No such keyspace: " + cf_def.keyspace.toString());
+        if (cf_def.column_metadata != null)
+        {
+            for (ColumnDef entry : cf_def.column_metadata)
+            {
+                if (entry.index_name != null && !Migration.isLegalName(entry.index_name.toString()))
+                    throw new ConfigurationException("Invalid index name: " + entry.index_name);
+            }
+        }
+
+        CFMetaData oldCfm = DatabaseDescriptor.getCFMetaData(CFMetaData.getId(cf_def.keyspace.toString(), cf_def.name.toString()));
         
-        this.oldCfm = oldCfm;
-        this.newCfm = newCfm;
+        // create a copy of the old CF meta data. Apply new settings on top of it.
+        this.metadata = CFMetaData.inflate(oldCfm.deflate());
+        this.metadata.apply(cf_def);
         
-        // clone ksm but include the new cf def.
-        KSMetaData newKsm = makeNewKeyspaceDefinition(ksm);
-        rm = Migration.makeDefinitionMutation(newKsm, null, newVersion);
-    }
-    
-    private KSMetaData makeNewKeyspaceDefinition(KSMetaData ksm)
-    {
-        List<CFMetaData> newCfs = new ArrayList<CFMetaData>(ksm.cfMetaData().values());
-        newCfs.remove(oldCfm);
-        newCfs.add(newCfm);
-        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.replicationFactor, newCfs.toArray(new CFMetaData[newCfs.size()]));
-    }
-    
-    public void beforeApplyModels()
-    {
-        if (clientMode)
-            return;
-        ColumnFamilyStore cfs = Table.open(oldCfm.tableName).getColumnFamilyStore(oldCfm.cfName);
-        cfs.snapshot(Table.getTimestampedSnapshotName(null));
+        // create a copy of the old KS meta data. Use it to create a RowMutation that gets applied to schema and migrations.
+        KSMetaData newKsMeta = KSMetaData.inflate(ksm.deflate());
+        newKsMeta.cfMetaData().get(cf_def.name.toString()).apply(cf_def);
+        rm = Migration.makeDefinitionMutation(newKsMeta, null, newVersion);
     }
 
     void applyModels() throws IOException
     {
-        logger.debug("Updating " + oldCfm + " to " + newCfm);
-        KSMetaData newKsm = makeNewKeyspaceDefinition(DatabaseDescriptor.getTableDefinition(newCfm.tableName));
-        DatabaseDescriptor.setTableDefinition(newKsm, newVersion);
-        
+        logger.debug("Updating " + DatabaseDescriptor.getCFMetaData(metadata.cfId) + " to " + metadata);
+        // apply the meta update.
+        try 
+        {
+            DatabaseDescriptor.getCFMetaData(metadata.cfId).apply(CFMetaData.convertToAvro(metadata));
+        } 
+        catch (ConfigurationException ex) 
+        {
+            throw new IOException(ex);
+        }
+        DatabaseDescriptor.setTableDefinition(null, newVersion);
+
         if (!clientMode)
         {
-            Table table = Table.open(oldCfm.tableName);
-            ColumnFamilyStore oldCfs = table.getColumnFamilyStore(oldCfm.cfName);
-            table.reloadCf(newCfm.cfId);
-
-            // clean up obsolete index data files
-            for (Map.Entry<byte[], ColumnDefinition> entry : oldCfm.column_metadata.entrySet())
-            {
-                byte[] column = entry.getKey();
-                ColumnDefinition def = entry.getValue();
-                if (def.index_type != null
-                    && (!newCfm.column_metadata.containsKey(column) || newCfm.column_metadata.get(column).index_type == null))
-                {
-                    ColumnFamilyStore indexCfs = oldCfs.getIndexedColumnFamilyStore(column);
-                    SystemTable.setIndexRemoved(table.name, indexCfs.columnFamily);
-                    indexCfs.removeAllSSTables();
-                }
-            }
+            Table table = Table.open(metadata.ksName);
+            ColumnFamilyStore oldCfs = table.getColumnFamilyStore(metadata.cfName);
+            oldCfs.reload();
         }
     }
 
     public void subdeflate(org.apache.cassandra.db.migration.avro.Migration mi)
     {
         org.apache.cassandra.db.migration.avro.UpdateColumnFamily update = new org.apache.cassandra.db.migration.avro.UpdateColumnFamily();
-        update.newCf = newCfm.deflate();
-        update.oldCf = oldCfm.deflate();
+        update.metadata = metadata.deflate();
         mi.migration = update;
     }
 
     public void subinflate(org.apache.cassandra.db.migration.avro.Migration mi)
     {
         org.apache.cassandra.db.migration.avro.UpdateColumnFamily update = (org.apache.cassandra.db.migration.avro.UpdateColumnFamily)mi.migration;
-        newCfm = CFMetaData.inflate(update.newCf);
-        oldCfm = CFMetaData.inflate(update.oldCf);
+        metadata = CFMetaData.inflate(update.metadata);
+    }
+
+    @Override
+    public String toString()
+    {
+        return String.format("Update column family to %s", metadata.toString());
     }
 }

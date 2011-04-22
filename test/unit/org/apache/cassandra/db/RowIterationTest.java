@@ -20,6 +20,7 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.ArrayList;
@@ -35,6 +36,8 @@ import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.utils.FBUtilities;
 import static junit.framework.Assert.assertEquals;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
 
 public class RowIterationTest extends CleanupHelper
 {
@@ -52,11 +55,58 @@ public class RowIterationTest extends CleanupHelper
         for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
             DecoratedKey key = Util.dk(String.valueOf(i));
             RowMutation rm = new RowMutation(TABLE1, key.key);
-            rm.add(new QueryPath("Super3", "sc".getBytes(), String.valueOf(i).getBytes()), new byte[ROWS_PER_SSTABLE * 10 - i * 2], i);
+            rm.add(new QueryPath("Super3", ByteBufferUtil.bytes("sc"), ByteBufferUtil.bytes(String.valueOf(i))), ByteBuffer.wrap(new byte[ROWS_PER_SSTABLE * 10 - i * 2]), i);
             rm.apply();
             inserted.add(key);
         }
         store.forceBlockingFlush();
         assertEquals(inserted.toString(), inserted.size(), Util.getRangeSlice(store).size());
+    }
+
+    @Test
+    public void testRowIterationDeletionTime() throws IOException, ExecutionException, InterruptedException
+    {
+        Table table = Table.open(TABLE1);
+        String CF_NAME = "Standard3";
+        ColumnFamilyStore store = table.getColumnFamilyStore(CF_NAME);
+        DecoratedKey key = Util.dk("key");
+
+        // Delete row in first sstable
+        RowMutation rm = new RowMutation(TABLE1, key.key);
+        rm.delete(new QueryPath(CF_NAME, null, null), 0);
+        rm.add(new QueryPath(CF_NAME, null, ByteBufferUtil.bytes("c")), ByteBufferUtil.bytes("values"), 0L);
+        int tstamp1 = rm.getColumnFamilies().iterator().next().getLocalDeletionTime();
+        rm.apply();
+        store.forceBlockingFlush();
+
+        // Delete row in second sstable with higher timestamp
+        rm = new RowMutation(TABLE1, key.key);
+        rm.delete(new QueryPath(CF_NAME, null, null), 1);
+        rm.add(new QueryPath(CF_NAME, null, ByteBufferUtil.bytes("c")), ByteBufferUtil.bytes("values"), 1L);
+        int tstamp2 = rm.getColumnFamilies().iterator().next().getLocalDeletionTime();
+        rm.apply();
+        store.forceBlockingFlush();
+
+        ColumnFamily cf = Util.getRangeSlice(store).iterator().next().cf;
+        assert cf.getMarkedForDeleteAt() == 1L;
+        assert cf.getLocalDeletionTime() == tstamp2;
+    }
+
+    @Test
+    public void testRowIterationDeletion() throws IOException, ExecutionException, InterruptedException
+    {
+        Table table = Table.open(TABLE1);
+        String CF_NAME = "Standard3";
+        ColumnFamilyStore store = table.getColumnFamilyStore(CF_NAME);
+        DecoratedKey key = Util.dk("key");
+
+        // Delete a row in first sstable
+        RowMutation rm = new RowMutation(TABLE1, key.key);
+        rm.delete(new QueryPath(CF_NAME, null, null), 0);
+        rm.apply();
+        store.forceBlockingFlush();
+
+        ColumnFamily cf = Util.getRangeSlice(store).iterator().next().cf;
+        assert cf != null;
     }
 }

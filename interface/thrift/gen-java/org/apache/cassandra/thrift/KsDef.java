@@ -37,36 +37,37 @@ import java.util.HashSet;
 import java.util.EnumSet;
 import java.util.Collections;
 import java.util.BitSet;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.thrift.*;
-import org.apache.thrift.async.*;
-import org.apache.thrift.meta_data.*;
-import org.apache.thrift.transport.*;
-import org.apache.thrift.protocol.*;
+public class KsDef implements org.apache.thrift.TBase<KsDef, KsDef._Fields>, java.io.Serializable, Cloneable {
+  private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("KsDef");
 
-public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable, Cloneable {
-  private static final TStruct STRUCT_DESC = new TStruct("KsDef");
-
-  private static final TField NAME_FIELD_DESC = new TField("name", TType.STRING, (short)1);
-  private static final TField STRATEGY_CLASS_FIELD_DESC = new TField("strategy_class", TType.STRING, (short)2);
-  private static final TField STRATEGY_OPTIONS_FIELD_DESC = new TField("strategy_options", TType.MAP, (short)3);
-  private static final TField REPLICATION_FACTOR_FIELD_DESC = new TField("replication_factor", TType.I32, (short)4);
-  private static final TField CF_DEFS_FIELD_DESC = new TField("cf_defs", TType.LIST, (short)5);
+  private static final org.apache.thrift.protocol.TField NAME_FIELD_DESC = new org.apache.thrift.protocol.TField("name", org.apache.thrift.protocol.TType.STRING, (short)1);
+  private static final org.apache.thrift.protocol.TField STRATEGY_CLASS_FIELD_DESC = new org.apache.thrift.protocol.TField("strategy_class", org.apache.thrift.protocol.TType.STRING, (short)2);
+  private static final org.apache.thrift.protocol.TField STRATEGY_OPTIONS_FIELD_DESC = new org.apache.thrift.protocol.TField("strategy_options", org.apache.thrift.protocol.TType.MAP, (short)3);
+  private static final org.apache.thrift.protocol.TField REPLICATION_FACTOR_FIELD_DESC = new org.apache.thrift.protocol.TField("replication_factor", org.apache.thrift.protocol.TType.I32, (short)4);
+  private static final org.apache.thrift.protocol.TField CF_DEFS_FIELD_DESC = new org.apache.thrift.protocol.TField("cf_defs", org.apache.thrift.protocol.TType.LIST, (short)5);
 
   public String name;
   public String strategy_class;
   public Map<String,String> strategy_options;
+  /**
+   * @deprecated
+   */
   public int replication_factor;
   public List<CfDef> cf_defs;
 
   /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
-  public enum _Fields implements TFieldIdEnum {
+  public enum _Fields implements org.apache.thrift.TFieldIdEnum {
     NAME((short)1, "name"),
     STRATEGY_CLASS((short)2, "strategy_class"),
     STRATEGY_OPTIONS((short)3, "strategy_options"),
+    /**
+     * @deprecated
+     */
     REPLICATION_FACTOR((short)4, "replication_factor"),
     CF_DEFS((short)5, "cf_defs");
 
@@ -136,24 +137,24 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
   private static final int __REPLICATION_FACTOR_ISSET_ID = 0;
   private BitSet __isset_bit_vector = new BitSet(1);
 
-  public static final Map<_Fields, FieldMetaData> metaDataMap;
+  public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
   static {
-    Map<_Fields, FieldMetaData> tmpMap = new EnumMap<_Fields, FieldMetaData>(_Fields.class);
-    tmpMap.put(_Fields.NAME, new FieldMetaData("name", TFieldRequirementType.REQUIRED, 
-        new FieldValueMetaData(TType.STRING)));
-    tmpMap.put(_Fields.STRATEGY_CLASS, new FieldMetaData("strategy_class", TFieldRequirementType.REQUIRED, 
-        new FieldValueMetaData(TType.STRING)));
-    tmpMap.put(_Fields.STRATEGY_OPTIONS, new FieldMetaData("strategy_options", TFieldRequirementType.OPTIONAL, 
-        new MapMetaData(TType.MAP, 
-            new FieldValueMetaData(TType.STRING), 
-            new FieldValueMetaData(TType.STRING))));
-    tmpMap.put(_Fields.REPLICATION_FACTOR, new FieldMetaData("replication_factor", TFieldRequirementType.REQUIRED, 
-        new FieldValueMetaData(TType.I32)));
-    tmpMap.put(_Fields.CF_DEFS, new FieldMetaData("cf_defs", TFieldRequirementType.REQUIRED, 
-        new ListMetaData(TType.LIST, 
-            new StructMetaData(TType.STRUCT, CfDef.class))));
+    Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+    tmpMap.put(_Fields.NAME, new org.apache.thrift.meta_data.FieldMetaData("name", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+        new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING)));
+    tmpMap.put(_Fields.STRATEGY_CLASS, new org.apache.thrift.meta_data.FieldMetaData("strategy_class", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+        new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING)));
+    tmpMap.put(_Fields.STRATEGY_OPTIONS, new org.apache.thrift.meta_data.FieldMetaData("strategy_options", org.apache.thrift.TFieldRequirementType.OPTIONAL, 
+        new org.apache.thrift.meta_data.MapMetaData(org.apache.thrift.protocol.TType.MAP, 
+            new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING), 
+            new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING))));
+    tmpMap.put(_Fields.REPLICATION_FACTOR, new org.apache.thrift.meta_data.FieldMetaData("replication_factor", org.apache.thrift.TFieldRequirementType.OPTIONAL, 
+        new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.I32)));
+    tmpMap.put(_Fields.CF_DEFS, new org.apache.thrift.meta_data.FieldMetaData("cf_defs", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+        new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+            new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, CfDef.class))));
     metaDataMap = Collections.unmodifiableMap(tmpMap);
-    FieldMetaData.addStructMetaDataMap(KsDef.class, metaDataMap);
+    org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(KsDef.class, metaDataMap);
   }
 
   public KsDef() {
@@ -162,14 +163,11 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
   public KsDef(
     String name,
     String strategy_class,
-    int replication_factor,
     List<CfDef> cf_defs)
   {
     this();
     this.name = name;
     this.strategy_class = strategy_class;
-    this.replication_factor = replication_factor;
-    setReplication_factorIsSet(true);
     this.cf_defs = cf_defs;
   }
 
@@ -214,9 +212,14 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     return new KsDef(this);
   }
 
-  @Deprecated
-  public KsDef clone() {
-    return new KsDef(this);
+  @Override
+  public void clear() {
+    this.name = null;
+    this.strategy_class = null;
+    this.strategy_options = null;
+    setReplication_factorIsSet(false);
+    this.replication_factor = 0;
+    this.cf_defs = null;
   }
 
   public String getName() {
@@ -232,7 +235,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     this.name = null;
   }
 
-  /** Returns true if field name is set (has been asigned a value) and false otherwise */
+  /** Returns true if field name is set (has been assigned a value) and false otherwise */
   public boolean isSetName() {
     return this.name != null;
   }
@@ -256,7 +259,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     this.strategy_class = null;
   }
 
-  /** Returns true if field strategy_class is set (has been asigned a value) and false otherwise */
+  /** Returns true if field strategy_class is set (has been assigned a value) and false otherwise */
   public boolean isSetStrategy_class() {
     return this.strategy_class != null;
   }
@@ -291,7 +294,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     this.strategy_options = null;
   }
 
-  /** Returns true if field strategy_options is set (has been asigned a value) and false otherwise */
+  /** Returns true if field strategy_options is set (has been assigned a value) and false otherwise */
   public boolean isSetStrategy_options() {
     return this.strategy_options != null;
   }
@@ -302,10 +305,16 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     }
   }
 
+  /**
+   * @deprecated
+   */
   public int getReplication_factor() {
     return this.replication_factor;
   }
 
+  /**
+   * @deprecated
+   */
   public KsDef setReplication_factor(int replication_factor) {
     this.replication_factor = replication_factor;
     setReplication_factorIsSet(true);
@@ -316,7 +325,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     __isset_bit_vector.clear(__REPLICATION_FACTOR_ISSET_ID);
   }
 
-  /** Returns true if field replication_factor is set (has been asigned a value) and false otherwise */
+  /** Returns true if field replication_factor is set (has been assigned a value) and false otherwise */
   public boolean isSetReplication_factor() {
     return __isset_bit_vector.get(__REPLICATION_FACTOR_ISSET_ID);
   }
@@ -353,7 +362,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     this.cf_defs = null;
   }
 
-  /** Returns true if field cf_defs is set (has been asigned a value) and false otherwise */
+  /** Returns true if field cf_defs is set (has been assigned a value) and false otherwise */
   public boolean isSetCf_defs() {
     return this.cf_defs != null;
   }
@@ -409,10 +418,6 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     }
   }
 
-  public void setFieldValue(int fieldID, Object value) {
-    setFieldValue(_Fields.findByThriftIdOrThrow(fieldID), value);
-  }
-
   public Object getFieldValue(_Fields field) {
     switch (field) {
     case NAME:
@@ -434,12 +439,12 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     throw new IllegalStateException();
   }
 
-  public Object getFieldValue(int fieldId) {
-    return getFieldValue(_Fields.findByThriftIdOrThrow(fieldId));
-  }
-
-  /** Returns true if field corresponding to fieldID is set (has been asigned a value) and false otherwise */
+  /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
   public boolean isSet(_Fields field) {
+    if (field == null) {
+      throw new IllegalArgumentException();
+    }
+
     switch (field) {
     case NAME:
       return isSetName();
@@ -453,10 +458,6 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
       return isSetCf_defs();
     }
     throw new IllegalStateException();
-  }
-
-  public boolean isSet(int fieldID) {
-    return isSet(_Fields.findByThriftIdOrThrow(fieldID));
   }
 
   @Override
@@ -499,8 +500,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
         return false;
     }
 
-    boolean this_present_replication_factor = true;
-    boolean that_present_replication_factor = true;
+    boolean this_present_replication_factor = true && this.isSetReplication_factor();
+    boolean that_present_replication_factor = true && that.isSetReplication_factor();
     if (this_present_replication_factor || that_present_replication_factor) {
       if (!(this_present_replication_factor && that_present_replication_factor))
         return false;
@@ -539,7 +540,7 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (present_strategy_options)
       builder.append(strategy_options);
 
-    boolean present_replication_factor = true;
+    boolean present_replication_factor = true && (isSetReplication_factor());
     builder.append(present_replication_factor);
     if (present_replication_factor)
       builder.append(replication_factor);
@@ -564,7 +565,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetName()) {      lastComparison = TBaseHelper.compareTo(this.name, typedOther.name);
+    if (isSetName()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.name, typedOther.name);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -573,7 +575,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetStrategy_class()) {      lastComparison = TBaseHelper.compareTo(this.strategy_class, typedOther.strategy_class);
+    if (isSetStrategy_class()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.strategy_class, typedOther.strategy_class);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -582,7 +585,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetStrategy_options()) {      lastComparison = TBaseHelper.compareTo(this.strategy_options, typedOther.strategy_options);
+    if (isSetStrategy_options()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.strategy_options, typedOther.strategy_options);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -591,7 +595,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetReplication_factor()) {      lastComparison = TBaseHelper.compareTo(this.replication_factor, typedOther.replication_factor);
+    if (isSetReplication_factor()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.replication_factor, typedOther.replication_factor);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -600,7 +605,8 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     if (lastComparison != 0) {
       return lastComparison;
     }
-    if (isSetCf_defs()) {      lastComparison = TBaseHelper.compareTo(this.cf_defs, typedOther.cf_defs);
+    if (isSetCf_defs()) {
+      lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.cf_defs, typedOther.cf_defs);
       if (lastComparison != 0) {
         return lastComparison;
       }
@@ -608,90 +614,91 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     return 0;
   }
 
-  public void read(TProtocol iprot) throws TException {
-    TField field;
+  public _Fields fieldForId(int fieldId) {
+    return _Fields.findByThriftId(fieldId);
+  }
+
+  public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+    org.apache.thrift.protocol.TField field;
     iprot.readStructBegin();
     while (true)
     {
       field = iprot.readFieldBegin();
-      if (field.type == TType.STOP) { 
+      if (field.type == org.apache.thrift.protocol.TType.STOP) { 
         break;
       }
       switch (field.id) {
         case 1: // NAME
-          if (field.type == TType.STRING) {
+          if (field.type == org.apache.thrift.protocol.TType.STRING) {
             this.name = iprot.readString();
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         case 2: // STRATEGY_CLASS
-          if (field.type == TType.STRING) {
+          if (field.type == org.apache.thrift.protocol.TType.STRING) {
             this.strategy_class = iprot.readString();
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         case 3: // STRATEGY_OPTIONS
-          if (field.type == TType.MAP) {
+          if (field.type == org.apache.thrift.protocol.TType.MAP) {
             {
-              TMap _map29 = iprot.readMapBegin();
-              this.strategy_options = new HashMap<String,String>(2*_map29.size);
-              for (int _i30 = 0; _i30 < _map29.size; ++_i30)
+              org.apache.thrift.protocol.TMap _map33 = iprot.readMapBegin();
+              this.strategy_options = new HashMap<String,String>(2*_map33.size);
+              for (int _i34 = 0; _i34 < _map33.size; ++_i34)
               {
-                String _key31;
-                String _val32;
-                _key31 = iprot.readString();
-                _val32 = iprot.readString();
-                this.strategy_options.put(_key31, _val32);
+                String _key35;
+                String _val36;
+                _key35 = iprot.readString();
+                _val36 = iprot.readString();
+                this.strategy_options.put(_key35, _val36);
               }
               iprot.readMapEnd();
             }
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         case 4: // REPLICATION_FACTOR
-          if (field.type == TType.I32) {
+          if (field.type == org.apache.thrift.protocol.TType.I32) {
             this.replication_factor = iprot.readI32();
             setReplication_factorIsSet(true);
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         case 5: // CF_DEFS
-          if (field.type == TType.LIST) {
+          if (field.type == org.apache.thrift.protocol.TType.LIST) {
             {
-              TList _list33 = iprot.readListBegin();
-              this.cf_defs = new ArrayList<CfDef>(_list33.size);
-              for (int _i34 = 0; _i34 < _list33.size; ++_i34)
+              org.apache.thrift.protocol.TList _list37 = iprot.readListBegin();
+              this.cf_defs = new ArrayList<CfDef>(_list37.size);
+              for (int _i38 = 0; _i38 < _list37.size; ++_i38)
               {
-                CfDef _elem35;
-                _elem35 = new CfDef();
-                _elem35.read(iprot);
-                this.cf_defs.add(_elem35);
+                CfDef _elem39;
+                _elem39 = new CfDef();
+                _elem39.read(iprot);
+                this.cf_defs.add(_elem39);
               }
               iprot.readListEnd();
             }
           } else { 
-            TProtocolUtil.skip(iprot, field.type);
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
           }
           break;
         default:
-          TProtocolUtil.skip(iprot, field.type);
+          org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
       }
       iprot.readFieldEnd();
     }
     iprot.readStructEnd();
 
     // check for required fields of primitive type, which can't be checked in the validate method
-    if (!isSetReplication_factor()) {
-      throw new TProtocolException("Required field 'replication_factor' was not found in serialized data! Struct: " + toString());
-    }
     validate();
   }
 
-  public void write(TProtocol oprot) throws TException {
+  public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
     validate();
 
     oprot.writeStructBegin(STRUCT_DESC);
@@ -709,27 +716,29 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
       if (isSetStrategy_options()) {
         oprot.writeFieldBegin(STRATEGY_OPTIONS_FIELD_DESC);
         {
-          oprot.writeMapBegin(new TMap(TType.STRING, TType.STRING, this.strategy_options.size()));
-          for (Map.Entry<String, String> _iter36 : this.strategy_options.entrySet())
+          oprot.writeMapBegin(new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.STRING, this.strategy_options.size()));
+          for (Map.Entry<String, String> _iter40 : this.strategy_options.entrySet())
           {
-            oprot.writeString(_iter36.getKey());
-            oprot.writeString(_iter36.getValue());
+            oprot.writeString(_iter40.getKey());
+            oprot.writeString(_iter40.getValue());
           }
           oprot.writeMapEnd();
         }
         oprot.writeFieldEnd();
       }
     }
-    oprot.writeFieldBegin(REPLICATION_FACTOR_FIELD_DESC);
-    oprot.writeI32(this.replication_factor);
-    oprot.writeFieldEnd();
+    if (isSetReplication_factor()) {
+      oprot.writeFieldBegin(REPLICATION_FACTOR_FIELD_DESC);
+      oprot.writeI32(this.replication_factor);
+      oprot.writeFieldEnd();
+    }
     if (this.cf_defs != null) {
       oprot.writeFieldBegin(CF_DEFS_FIELD_DESC);
       {
-        oprot.writeListBegin(new TList(TType.STRUCT, this.cf_defs.size()));
-        for (CfDef _iter37 : this.cf_defs)
+        oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRUCT, this.cf_defs.size()));
+        for (CfDef _iter41 : this.cf_defs)
         {
-          _iter37.write(oprot);
+          _iter41.write(oprot);
         }
         oprot.writeListEnd();
       }
@@ -769,10 +778,12 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
       }
       first = false;
     }
-    if (!first) sb.append(", ");
-    sb.append("replication_factor:");
-    sb.append(this.replication_factor);
-    first = false;
+    if (isSetReplication_factor()) {
+      if (!first) sb.append(", ");
+      sb.append("replication_factor:");
+      sb.append(this.replication_factor);
+      first = false;
+    }
     if (!first) sb.append(", ");
     sb.append("cf_defs:");
     if (this.cf_defs == null) {
@@ -785,17 +796,34 @@ public class KsDef implements TBase<KsDef, KsDef._Fields>, java.io.Serializable,
     return sb.toString();
   }
 
-  public void validate() throws TException {
+  public void validate() throws org.apache.thrift.TException {
     // check for required fields
     if (name == null) {
-      throw new TProtocolException("Required field 'name' was not present! Struct: " + toString());
+      throw new org.apache.thrift.protocol.TProtocolException("Required field 'name' was not present! Struct: " + toString());
     }
     if (strategy_class == null) {
-      throw new TProtocolException("Required field 'strategy_class' was not present! Struct: " + toString());
+      throw new org.apache.thrift.protocol.TProtocolException("Required field 'strategy_class' was not present! Struct: " + toString());
     }
-    // alas, we cannot check 'replication_factor' because it's a primitive and you chose the non-beans generator.
     if (cf_defs == null) {
-      throw new TProtocolException("Required field 'cf_defs' was not present! Struct: " + toString());
+      throw new org.apache.thrift.protocol.TProtocolException("Required field 'cf_defs' was not present! Struct: " + toString());
+    }
+  }
+
+  private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+    try {
+      write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+    } catch (org.apache.thrift.TException te) {
+      throw new java.io.IOException(te);
+    }
+  }
+
+  private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+    try {
+      // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
+      __isset_bit_vector = new BitSet(1);
+      read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+    } catch (org.apache.thrift.TException te) {
+      throw new java.io.IOException(te);
     }
   }
 

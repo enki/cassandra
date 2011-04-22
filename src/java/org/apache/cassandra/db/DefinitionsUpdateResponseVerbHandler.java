@@ -18,6 +18,14 @@
 
 package org.apache.cassandra.db;
 
+import java.io.IOError;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.ConfigurationException;
@@ -28,21 +36,13 @@ import org.apache.cassandra.net.Message;
 import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.WrappedRunnable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.ByteArrayInputStream;
-import java.io.IOError;
-import java.io.IOException;
-import java.util.Collection;
-import java.util.UUID;
 
 public class DefinitionsUpdateResponseVerbHandler implements IVerbHandler
 {
     private static final Logger logger = LoggerFactory.getLogger(DefinitionsUpdateResponseVerbHandler.class);
 
     /** someone sent me their data definitions */
-    public void doVerb(final Message message)
+    public void doVerb(final Message message, String id)
     {
         try
         {
@@ -51,14 +51,13 @@ public class DefinitionsUpdateResponseVerbHandler implements IVerbHandler
             Collection<Column> cols = MigrationManager.makeColumns(message);
             for (Column col : cols)
             {
-                final UUID version = UUIDGen.makeType1UUID(col.name());
+                final UUID version = UUIDGen.getUUID(col.name());
                 if (version.timestamp() > DatabaseDescriptor.getDefsVersion().timestamp())
                 {
-                    final Migration m = Migration.deserialize(col.value());
+                    final Migration m = Migration.deserialize(col.value(), message.getVersion());
                     assert m.getVersion().equals(version);
                     StageManager.getStage(Stage.MIGRATION).submit(new WrappedRunnable()
                     {
-                        @Override
                         protected void runMayThrow() throws Exception
                         {
                             // check to make sure the current version is before this one.
@@ -72,6 +71,8 @@ public class DefinitionsUpdateResponseVerbHandler implements IVerbHandler
                                 try
                                 {
                                     m.apply();
+                                    // update gossip, but don't contact nodes directly
+                                    m.passiveAnnounce();
                                 }
                                 catch (ConfigurationException ex)
                                 {

@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
+import org.apache.cassandra.net.MessagingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +35,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.RowMutation;
 import org.apache.cassandra.io.util.BufferedRandomAccessFile;
-import org.apache.cassandra.io.util.DataOutputBuffer;
 
 public class CommitLogSegment
 {
@@ -52,6 +52,7 @@ public class CommitLogSegment
         try
         {
             logWriter = createWriter(logFile);
+
             writeHeader();
         }
         catch (IOException e)
@@ -72,10 +73,10 @@ public class CommitLogSegment
 
     private static BufferedRandomAccessFile createWriter(String file) throws IOException
     {
-        return new BufferedRandomAccessFile(file, "rw", 128 * 1024);
+        return new BufferedRandomAccessFile(new File(file), "rw", 128 * 1024, true);
     }
 
-    public CommitLogSegment.CommitLogContext write(RowMutation rowMutation, Object serializedRow) throws IOException
+    public CommitLogSegment.CommitLogContext write(RowMutation rowMutation) throws IOException
     {
         long currentPosition = -1L;
         try
@@ -106,23 +107,13 @@ public class CommitLogSegment
             }
 
             // write mutation, w/ checksum on the size and data
-            byte[] bytes;
             Checksum checksum = new CRC32();
-            if (serializedRow instanceof DataOutputBuffer)
-            {
-                bytes = ((DataOutputBuffer) serializedRow).getData();
-            }
-            else
-            {
-                assert serializedRow instanceof byte[];
-                bytes = (byte[]) serializedRow;
-            }
-
-            checksum.update(bytes.length);
-            logWriter.writeInt(bytes.length);
+            byte[] serializedRow = rowMutation.getSerializedBuffer(MessagingService.version_);
+            checksum.update(serializedRow.length);
+            logWriter.writeInt(serializedRow.length);
             logWriter.writeLong(checksum.getValue());
-            logWriter.write(bytes);
-            checksum.update(bytes, 0, bytes.length);
+            logWriter.write(serializedRow);
+            checksum.update(serializedRow, 0, serializedRow.length);
             logWriter.writeLong(checksum.getValue());
 
             return cLogCtx;

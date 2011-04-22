@@ -18,15 +18,16 @@
 
 package org.apache.cassandra.dht;
 
-import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.Random;
+import java.util.*;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
@@ -36,21 +37,21 @@ public class OrderPreservingPartitioner implements IPartitioner<StringToken>
 
     public static final BigInteger CHAR_MASK = new BigInteger("65535");
 
-    public DecoratedKey<StringToken> decorateKey(byte[] key)
+    public DecoratedKey<StringToken> decorateKey(ByteBuffer key)
     {
         return new DecoratedKey<StringToken>(getToken(key), key);
     }
     
-    public DecoratedKey<StringToken> convertFromDiskFormat(byte[] key)
+    public DecoratedKey<StringToken> convertFromDiskFormat(ByteBuffer key)
     {
         return new DecoratedKey<StringToken>(getToken(key), key);
     }
 
-    public StringToken midpoint(StringToken ltoken, StringToken rtoken)
+    public StringToken midpoint(Token ltoken, Token rtoken)
     {
-        int sigchars = Math.max(ltoken.token.length(), rtoken.token.length());
-        BigInteger left = bigForString(ltoken.token, sigchars);
-        BigInteger right = bigForString(rtoken.token, sigchars);
+        int sigchars = Math.max(((StringToken)ltoken).token.length(), ((StringToken)rtoken).token.length());
+        BigInteger left = bigForString(((StringToken)ltoken).token, sigchars);
+        BigInteger right = bigForString(((StringToken)rtoken).token, sigchars);
 
         Pair<BigInteger,Boolean> midpair = FBUtilities.midpoint(left, right, 16*sigchars);
         return new StringToken(stringForBig(midpair.left, sigchars, midpair.right));
@@ -111,26 +112,20 @@ public class OrderPreservingPartitioner implements IPartitioner<StringToken>
         return new StringToken(buffer.toString());
     }
 
-    private final Token.TokenFactory<String> tokenFactory = new Token.TokenFactory<String>() {
-        public byte[] toByteArray(Token<String> stringToken)
+    private final Token.TokenFactory<String> tokenFactory = new Token.TokenFactory<String>()
+    {
+        public ByteBuffer toByteArray(Token<String> stringToken)
         {
-            try
-            {
-                return stringToken.token.getBytes("UTF-8");
-            }
-            catch (UnsupportedEncodingException e)
-            {
-                throw new RuntimeException(e);
-            }
+            return ByteBufferUtil.bytes(stringToken.token);
         }
 
-        public Token<String> fromByteArray(byte[] bytes)
+        public Token<String> fromByteArray(ByteBuffer bytes)
         {
             try
             {
-                return new StringToken(new String(bytes, "UTF-8"));
+                return new StringToken(ByteBufferUtil.string(bytes));
             }
-            catch (UnsupportedEncodingException e)
+            catch (CharacterCodingException e)
             {
                 throw new RuntimeException(e);
             }
@@ -157,17 +152,54 @@ public class OrderPreservingPartitioner implements IPartitioner<StringToken>
         return true;
     }
 
-    public StringToken getToken(byte[] key)
+    public StringToken getToken(ByteBuffer key)
     {
         String skey;
         try
         {
-            skey = FBUtilities.decodeToUTF8(key);
+            skey = ByteBufferUtil.string(key);
         }
         catch (CharacterCodingException e)
         {
             throw new RuntimeException("The provided key was not UTF8 encoded.", e);
         }
         return new StringToken(skey);
+    }
+
+    public Map<Token, Float> describeOwnership(List<Token> sortedTokens)
+    {
+        // allTokens will contain the count and be returned, sorted_ranges is shorthand for token<->token math.
+        Map<Token, Float> allTokens = new HashMap<Token, Float>();
+        List<Range> sortedRanges = new ArrayList<Range>();
+
+        // this initializes the counts to 0 and calcs the ranges in order.
+        Token lastToken = sortedTokens.get(sortedTokens.size() - 1);
+        for (Token node : sortedTokens)
+        {
+            allTokens.put(node, new Float(0.0));
+            sortedRanges.add(new Range(lastToken, node));
+            lastToken = node;
+        }
+
+        for (String ks : DatabaseDescriptor.getTables())
+        {
+            for (CFMetaData cfmd : DatabaseDescriptor.getKSMetaData(ks).cfMetaData().values())
+            {
+                for (Range r : sortedRanges)
+                {
+                    // Looping over every KS:CF:Range, get the splits size and add it to the count
+                    allTokens.put(r.right, allTokens.get(r.right) + StorageService.instance.getSplits(ks, cfmd.cfName, r, 1).size());
+                }
+            }
+        }
+
+        // Sum every count up and divide count/total for the fractional ownership.
+        Float total = new Float(0.0);
+        for (Float f : allTokens.values())
+            total += f;
+        for (Map.Entry<Token, Float> row : allTokens.entrySet())
+            allTokens.put(row.getKey(), row.getValue() / total);
+
+        return allTokens;
     }
 }

@@ -18,28 +18,37 @@
 */
 package org.apache.cassandra.dht;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 public class BytesToken extends Token<byte[]>
 {
-    public BytesToken(byte... token)
+    static final long serialVersionUID = -2630749093733680626L;
+
+    public BytesToken(ByteBuffer token)
+    {
+        this(ByteBufferUtil.getArray(token));
+    }
+
+    public BytesToken(byte[] token)
     {
         super(token);
     }
-    
+
     @Override
     public String toString()
     {
         return "Token(bytes[" + FBUtilities.bytesToHex(token) + "])";
     }
 
-    @Override
     public int compareTo(Token<byte[]> o)
-    {
-        return FBUtilities.compareByteArrays(token, o.token);
+    {   
+        return FBUtilities.compareUnsigned(token, o.token, 0, 0, token.length, o.token.length);
     }
+    
 
     @Override
     public int hashCode()
@@ -56,7 +65,7 @@ public class BytesToken extends Token<byte[]>
         if (!(obj instanceof BytesToken))
             return false;
         BytesToken other = (BytesToken) obj;
+           
         return Arrays.equals(token, other.token);
     }
-
 }

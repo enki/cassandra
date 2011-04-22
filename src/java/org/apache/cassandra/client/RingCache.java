@@ -17,30 +17,29 @@
  */
 package org.apache.cassandra.client;
 
-import java.util.*;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.Multimap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.locator.AbstractReplicationStrategy;
-import org.apache.cassandra.locator.TokenMetadata;
-
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
-
 import org.apache.cassandra.thrift.Cassandra;
 import org.apache.cassandra.thrift.InvalidRequestException;
 import org.apache.cassandra.thrift.TokenRange;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.thrift.TException;
-import org.apache.thrift.protocol.TBinaryProtocol;
+import org.apache.cassandra.thrift.TBinaryProtocol;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
-
-import com.google.common.collect.Multimap;
-import com.google.common.collect.ArrayListMultimap;
 
 /**
  * A class for caching the ring map at the client. For usage example, see
@@ -53,12 +52,12 @@ public class RingCache
 
     private final Set<String> seeds_ = new HashSet<String>();
     private final int port_;
-    private final IPartitioner partitioner_;
+    private final IPartitioner<?> partitioner_;
     private final String keyspace;
 
     private Multimap<Range, InetAddress> rangeMap;
 
-    public RingCache(String keyspace, IPartitioner partitioner, String addresses, int port) throws IOException
+    public RingCache(String keyspace, IPartitioner<?> partitioner, String addresses, int port) throws IOException
     {
         for (String seed : addresses.split(","))
             seeds_.add(seed);
@@ -114,18 +113,17 @@ public class RingCache
     }
 
     /** ListMultimap promises to return a List for get(K) */
-    @SuppressWarnings(value="unchecked")
     public List<InetAddress> getEndpoint(Range range)
     {
         return (List<InetAddress>) rangeMap.get(range);
     }
 
-    public List<InetAddress> getEndpoint(byte[] key)
+    public List<InetAddress> getEndpoint(ByteBuffer key)
     {
         return getEndpoint(getRange(key));
     }
 
-    public Range getRange(byte[] key)
+    public Range getRange(ByteBuffer key)
     {
         // TODO: naive linear search of the token map
         Token<?> t = partitioner_.getToken(key);

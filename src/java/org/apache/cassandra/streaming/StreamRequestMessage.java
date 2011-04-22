@@ -27,13 +27,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.CompactEndpointSerializationHelper;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessageProducer;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -44,7 +44,7 @@ import org.apache.cassandra.utils.FBUtilities;
 * 
 * If a file is specified, ranges and table will not. vice-versa should hold as well.
 */
-class StreamRequestMessage
+class StreamRequestMessage implements MessageProducer
 {
     private static ICompactSerializer<StreamRequestMessage> serializer_;
     static
@@ -66,13 +66,15 @@ class StreamRequestMessage
     // if these are specified, file shoud not be.
     protected final Collection<Range> ranges;
     protected final String table;
+    protected final OperationType type;
 
-    StreamRequestMessage(InetAddress target, Collection<Range> ranges, String table, long sessionId)
+    StreamRequestMessage(InetAddress target, Collection<Range> ranges, String table, long sessionId, OperationType type)
     {
         this.target = target;
         this.ranges = ranges;
         this.table = table;
         this.sessionId = sessionId;
+        this.type = type;
         file = null;
     }
 
@@ -81,23 +83,24 @@ class StreamRequestMessage
         this.target = target;
         this.file = file;
         this.sessionId = sessionId;
+        this.type = file.type;
         ranges = null;
         table = null;
     }
     
-    Message makeMessage()
+    public Message getMessage(Integer version)
     {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(bos);
         try
         {
-            StreamRequestMessage.serializer().serialize(this, dos);
+            StreamRequestMessage.serializer().serialize(this, dos, version);
         }
         catch (IOException e)
         {
             throw new IOError(e);
         }
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.STREAM_REQUEST, bos.toByteArray() );
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.STREAM_REQUEST, bos.toByteArray(), version);
     }
 
     public String toString()
@@ -114,6 +117,7 @@ class StreamRequestMessage
                 sb.append(range);
                 sb.append(" ");
             }
+            sb.append(type);
         }
         else
         {
@@ -124,14 +128,14 @@ class StreamRequestMessage
 
     private static class StreamRequestMessageSerializer implements ICompactSerializer<StreamRequestMessage>
     {
-        public void serialize(StreamRequestMessage srm, DataOutputStream dos) throws IOException
+        public void serialize(StreamRequestMessage srm, DataOutputStream dos, int version) throws IOException
         {
             dos.writeLong(srm.sessionId);
             CompactEndpointSerializationHelper.serialize(srm.target, dos);
             if (srm.file != null)
             {
                 dos.writeBoolean(true);
-                PendingFile.serializer().serialize(srm.file, dos);
+                PendingFile.serializer().serialize(srm.file, dos, version);
             }
             else
             {
@@ -142,17 +146,19 @@ class StreamRequestMessage
                 {
                     AbstractBounds.serializer().serialize(range, dos);
                 }
+                if (version > MessagingService.VERSION_07)
+                    dos.writeUTF(srm.type.name());
             }
         }
 
-        public StreamRequestMessage deserialize(DataInputStream dis) throws IOException
+        public StreamRequestMessage deserialize(DataInputStream dis, int version) throws IOException
         {
             long sessionId = dis.readLong();
             InetAddress target = CompactEndpointSerializationHelper.deserialize(dis);
             boolean singleFile = dis.readBoolean();
             if (singleFile)
             {
-                PendingFile file = PendingFile.serializer().deserialize(dis);
+                PendingFile file = PendingFile.serializer().deserialize(dis, version);
                 return new StreamRequestMessage(target, file, sessionId);
             }
             else
@@ -164,7 +170,10 @@ class StreamRequestMessage
                 {
                     ranges.add((Range) AbstractBounds.serializer().deserialize(dis));
                 }
-                return new StreamRequestMessage(target, ranges, table, sessionId);
+                OperationType type = OperationType.RESTORE_REPLICA_COUNT;
+                if (version > MessagingService.VERSION_07)
+                    type = OperationType.valueOf(dis.readUTF());
+                return new StreamRequestMessage(target, ranges, table, sessionId, type);
             }
         }
     }

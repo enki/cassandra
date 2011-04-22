@@ -18,17 +18,17 @@
 
 package org.apache.cassandra.db;
 
+import java.util.UUID;
+
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.service.MigrationManager;
-
-import java.util.UUID;
 
 public class DefinitionsAnnounceVerbHandler implements IVerbHandler
 {
     
     /** someone is announcing their schema version. */
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         UUID theirVersion = UUID.fromString(new String(message.getMessageBody()));
         MigrationManager.rectify(theirVersion, message.getFrom());

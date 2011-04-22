@@ -18,19 +18,16 @@
 
 package org.apache.cassandra.utils;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.*;
-import java.net.*;
-import java.security.*;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.security.SecureRandom;
+import java.util.Random;
 
 public class GuidGenerator {
-    private static Logger logger_ = LoggerFactory.getLogger(GuidGenerator.class);
     private static Random myRand;
     private static SecureRandom mySecureRand;
     private static String s_id;
-    private static SafeMessageDigest md5 = null;
 
     static {
         if (System.getProperty("java.security.egd") == null) {
@@ -45,23 +42,15 @@ public class GuidGenerator {
         catch (UnknownHostException e) {
             throw new AssertionError(e);
         }
-
-        try {
-            MessageDigest myMd5 = MessageDigest.getInstance("MD5");
-            md5 = new SafeMessageDigest(myMd5);
-        }
-        catch (NoSuchAlgorithmException e) {
-            throw new AssertionError(e);
-        }
     }
 
-
     public static String guid() {
-        byte[] array = guidAsBytes();
+        ByteBuffer array = guidAsBytes();
         
         StringBuilder sb = new StringBuilder();
-        for (int j = 0; j < array.length; ++j) {
-            int b = array[j] & 0xFF;
+        for (int j = array.position(); j < array.limit(); ++j)
+        {
+            int b = array.get(j) & 0xFF;
             if (b < 0x10) sb.append('0');
             sb.append(Integer.toHexString(b));
         }
@@ -81,7 +70,7 @@ public class GuidGenerator {
         return convertToStandardFormat( sb.toString() );
     }
     
-    public static byte[] guidAsBytes()
+    public static ByteBuffer guidAsBytes()
     {
         StringBuilder sbValueBeforeMD5 = new StringBuilder();
         long time = System.currentTimeMillis();
@@ -94,7 +83,7 @@ public class GuidGenerator {
         				.append(Long.toString(rand));
 
         String valueBeforeMD5 = sbValueBeforeMD5.toString();
-        return md5.digest(valueBeforeMD5.getBytes());
+        return ByteBuffer.wrap(FBUtilities.threadLocalMD5Digest().digest(valueBeforeMD5.getBytes()));
     }
 
     /*

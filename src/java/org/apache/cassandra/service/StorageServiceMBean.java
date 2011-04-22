@@ -21,9 +21,9 @@ package org.apache.cassandra.service;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
@@ -41,7 +41,7 @@ public interface StorageServiceMBean
      *
      * @return set of IP addresses, as Strings
      */
-    public Set<String> getLiveNodes();
+    public List<String> getLiveNodes();
 
     /**
      * Retrieve the list of unreachable nodes in the cluster, as determined
@@ -49,21 +49,28 @@ public interface StorageServiceMBean
      *
      * @return set of IP addresses, as Strings
      */
-    public Set<String> getUnreachableNodes();
+    public List<String> getUnreachableNodes();
 
     /**
      * Retrieve the list of nodes currently bootstrapping into the ring.
      *
      * @return set of IP addresses, as Strings
      */
-    public Set<String> getJoiningNodes();
+    public List<String> getJoiningNodes();
 
     /**
      * Retrieve the list of nodes currently leaving the ring.
      *
      * @return set of IP addresses, as Strings
      */
-    public Set<String> getLeavingNodes();
+    public List<String> getLeavingNodes();
+
+    /**
+     * Retrieve the list of nodes currently moving in the ring.
+     *
+     * @return set of IP addresses, as Strings
+     */
+    public List<String> getMovingNodes();
 
     /**
      * Fetch a string representation of the token.
@@ -127,46 +134,39 @@ public interface StorageServiceMBean
      * the endpoint responsible for this key
      */
     public List<InetAddress> getNaturalEndpoints(String table, byte[] key);
+    public List<InetAddress> getNaturalEndpoints(String table, ByteBuffer key);
 
     /**
-     * Forces major compaction (all sstable files compacted)
+     * Takes the snapshot for the given tables. A snapshot name must be specified.
+     *
+     * @param tag the tag given to the snapshot; may not be null or empty
+     * @param tableNames the name of the tables to snapshot; empty means "all."
      */
-    public void forceTableCompaction() throws IOException, ExecutionException, InterruptedException;
+    public void takeSnapshot(String tag, String... tableNames) throws IOException;
+
+    /**
+     * Remove the snapshot with the given name from the given tables.
+     * If no tag is specified we will remove all snapshots.
+     */
+    public void clearSnapshot(String tag, String... tableNames) throws IOException;
 
     /**
      * Forces major compaction of a single keyspace
      */
-    public void forceTableCompaction(String tableName) throws IOException, ExecutionException, InterruptedException;
-
-    /**
-     * Trigger a cleanup of keys on all tables.
-     */
-    public void forceTableCleanup() throws IOException, ExecutionException, InterruptedException;
+    public void forceTableCompaction(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
      * Trigger a cleanup of keys on a single keyspace
      */
-    public void forceTableCleanup(String tableName) throws IOException, ExecutionException, InterruptedException;
+    public void forceTableCleanup(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
-     * Takes the snapshot for a given table.
-     * 
-     * @param tableName the name of the table.
-     * @param tag       the tag given to the snapshot (null is permissible)
+     * Scrub (deserialize + reserialize at the latest version, skipping bad rows if any) the given keyspace.
+     * If columnFamilies array is empty, all CFs are scrubbed.
+     *
+     * Scrubbed CFs will be snapshotted first.
      */
-    public void takeSnapshot(String tableName, String tag) throws IOException;
-
-    /**
-     * Takes a snapshot for every table.
-     * 
-     * @param tag the tag given to the snapshot (null is permissible)
-     */
-    public void takeAllSnapshot(String tag) throws IOException;
-
-    /**
-     * Remove all the existing snapshots.
-     */
-    public void clearSnapshot() throws IOException;
+    public void scrub(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
      * Flush all memtables for the given column families, or all columnfamilies for the given table
@@ -198,12 +198,6 @@ public interface StorageServiceMBean
     public void move(String newToken) throws IOException, InterruptedException;
 
     /**
-     * This node will unload its data onto its neighbors, and bootstrap to share the range
-     * of the most-loaded node in the ring.
-     */
-    public void loadBalance() throws IOException, InterruptedException;
-
-    /**
      * removeToken removes token (and all data associated with
      * enpoint that had it) from the ring
      */
@@ -232,18 +226,6 @@ public interface StorageServiceMBean
     public void drain() throws IOException, InterruptedException, ExecutionException;
 
     /**
-     * Introduced in 0.7 to allow nodes to load their existing yaml defined schemas.
-     * @todo: deprecate in 0.7+1, remove in 0.7+2.
-     */ 
-    public void loadSchemaFromYAML() throws ConfigurationException, IOException;
-
-    /**
-     * Introduced in 0.7 to allow schema yaml to be exported.
-     * @todo: deprecate in 0.7+1, remove in 0.7+2.
-     */
-    public String exportSchema() throws IOException;
-
-    /**
      * Truncates (deletes) the given columnFamily from the provided keyspace.
      * Calling truncate results in actual deletion of all data in the cluster
      * under the given columnFamily and it will fail unless all hosts are up.
@@ -262,4 +244,50 @@ public interface StorageServiceMBean
 
     /** save row and key caches */
     public void saveCaches() throws ExecutionException, InterruptedException;
+
+    /**
+     * given a list of tokens (representing the nodes in the cluster), returns
+     *   a mapping from "token -> %age of cluster owned by that token"
+     */
+    public Map<Token, Float> getOwnership();
+
+    public List<String> getKeyspaces();
+
+    /**
+     * Change endpointsnitch class and dynamic-ness (and dynamic attributes) at runtime
+     * @param epSnitchClassName        the canonical path name for a class implementing IEndpointSnitch
+     * @param dynamic                  boolean that decides whether dynamicsnitch is used or not
+     * @param dynamicUpdateInterval    integer, in ms (default 100)
+     * @param dynamicResetInterval     integer, in ms (default 600,000)
+     * @param dynamicBadnessThreshold  double, (default 0.0)
+     * @throws ConfigurationException  classname not found on classpath
+     */
+    public void updateSnitch(String epSnitchClassName, Boolean dynamic, Integer dynamicUpdateInterval, Integer dynamicResetInterval, Double dynamicBadnessThreshold) throws ConfigurationException;
+
+    // allows a user to forcibly 'kill' a sick node
+    public void stopGossiping();
+
+    // allows a user to recover a forcibly 'killed' node
+    public void startGossiping();
+
+    // to determine if gossip is disabled
+    public boolean isInitialized();
+
+    // allows a user to disable thrift
+    public void stopRPCServer();
+
+    // allows a user to reenable thrift
+    public void startRPCServer();
+
+    // to determine if thrift is running
+    public boolean isRPCServerRunning();
+
+    public void invalidateKeyCaches(String ks, String... cfs) throws IOException;
+    public void invalidateRowCaches(String ks, String... cfs) throws IOException;
+
+    // allows a node that have been started without joining the ring to join it
+    public void joinRing() throws IOException, org.apache.cassandra.config.ConfigurationException;
+    public boolean isJoined();
+
+    public void setCompactionThroughputMbPerSec(int value);
 }

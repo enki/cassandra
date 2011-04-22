@@ -18,52 +18,76 @@
 
 package org.apache.cassandra.db;
 
+import java.io.File;
 import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
+import java.nio.ByteBuffer;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SimpleAbstractColumnIterator;
-import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.filter.AbstractColumnIterator;
+import org.apache.cassandra.db.filter.NamesQueryFilter;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.utils.WrappedRunnable;
+import org.github.jamm.MemoryMeter;
 
 public class Memtable implements Comparable<Memtable>, IFlushable
 {
     private static final Logger logger = LoggerFactory.getLogger(Memtable.class);
 
-    private boolean isFrozen;
+    // size in memory can never be less than serialized size
+    private static final double MIN_SANE_LIVE_RATIO = 1.0;
+    // max liveratio seen w/ 1-byte columns on a 64-bit jvm was 19. If it gets higher than 64 something is probably broken.
+    private static final double MAX_SANE_LIVE_RATIO = 64.0;
+    private static final MemoryMeter meter = new MemoryMeter();
 
-    private final AtomicInteger currentThroughput = new AtomicInteger(0);
-    private final AtomicInteger currentOperations = new AtomicInteger(0);
+    // we're careful to only allow one count to run at a time because counting is slow
+    // (can be minutes, for a large memtable and a busy server), so we could keep memtables
+    // alive after they're flushed and would otherwise be GC'd.
+    private static final ExecutorService meterExecutor = new ThreadPoolExecutor(1, 1, Integer.MAX_VALUE, TimeUnit.MILLISECONDS, new SynchronousQueue<Runnable>())
+    {
+        @Override
+        protected void afterExecute(Runnable r, Throwable t)
+        {
+            super.afterExecute(r, t);
+            DebuggableThreadPoolExecutor.logExceptionsAfterExecute(r, t);
+        }
+    };
+
+    private volatile boolean isFrozen;
+    private final AtomicLong currentThroughput = new AtomicLong(0);
+    private final AtomicLong currentOperations = new AtomicLong(0);
 
     private final long creationTime;
     private final ConcurrentNavigableMap<DecoratedKey, ColumnFamily> columnFamilies = new ConcurrentSkipListMap<DecoratedKey, ColumnFamily>();
     public final ColumnFamilyStore cfs;
 
-    private final int THRESHOLD;
-    private final int THRESHOLD_COUNT;
+    private final long THRESHOLD;
+    private final long THRESHOLD_COUNT;
+    volatile static Memtable activelyMeasuring;
 
     public Memtable(ColumnFamilyStore cfs)
     {
-
         this.cfs = cfs;
         creationTime = System.currentTimeMillis();
-        this.THRESHOLD = cfs.metadata.memtableThroughputInMb * 1024 * 1024;
-        this.THRESHOLD_COUNT = (int) (cfs.metadata.memtableOperationsInMillions * 1024 * 1024);
+        THRESHOLD = cfs.getMemtableThroughputInMB() * 1024L * 1024L;
+        THRESHOLD_COUNT = (long) (cfs.getMemtableOperationsInMillions() * 1024 * 1024);
     }
 
     /**
@@ -83,12 +107,18 @@ public class Memtable implements Comparable<Memtable>, IFlushable
     		return 0;
     }
 
-    public int getCurrentThroughput()
+    public long getLiveSize()
+    {
+        // 25% fudge factor
+        return (long) (currentThroughput.get() * cfs.liveRatio * 1.25);
+    }
+
+    public long getSerializedSize()
     {
         return currentThroughput.get();
     }
-    
-    public int getCurrentOperations()
+
+    public long getOperations()
     {
         return currentOperations.get();
     }
@@ -119,10 +149,68 @@ public class Memtable implements Comparable<Memtable>, IFlushable
         resolve(key, columnFamily);
     }
 
+    public void updateLiveRatio()
+    {
+        if (!MemoryMeter.isInitialized())
+        {
+            // hack for openjdk.  we log a warning about this in the startup script too.
+            logger.warn("MemoryMeter uninitialized (jamm not specified as java agent); assuming liveRatio of 10.0.  Usually this means cassandra-env.sh disabled jamm because you are using a buggy JRE; upgrade to the Sun JRE instead");
+            cfs.liveRatio = 10.0;
+            return;
+        }
+
+        Runnable runnable = new Runnable()
+        {
+            public void run()
+            {
+                activelyMeasuring = Memtable.this;
+
+                long start = System.currentTimeMillis();
+                // ConcurrentSkipListMap has cycles, so measureDeep will have to track a reference to EACH object it visits.
+                // So to reduce the memory overhead of doing a measurement, we break it up to row-at-a-time.
+                long deepSize = meter.measure(columnFamilies);
+                int objects = 0;
+                for (Map.Entry<DecoratedKey, ColumnFamily> entry : columnFamilies.entrySet())
+                {
+                    deepSize += meter.measureDeep(entry.getKey()) + meter.measureDeep(entry.getValue());
+                    objects += entry.getValue().getColumnCount();
+                }
+                double newRatio = (double) deepSize / currentThroughput.get();
+
+                if (newRatio < MIN_SANE_LIVE_RATIO)
+                {
+                    logger.warn("setting live ratio to minimum of 1.0 instead of {}", newRatio);
+                    newRatio = MIN_SANE_LIVE_RATIO;
+                }
+                if (newRatio > MAX_SANE_LIVE_RATIO)
+                {
+                    logger.warn("setting live ratio to maximum of 64 instead of {}, newRatio");
+                    newRatio = MAX_SANE_LIVE_RATIO;
+                }
+                cfs.liveRatio = Math.max(cfs.liveRatio, newRatio);
+
+                logger.info("{} liveRatio is {} (just-counted was {}).  calculation took {}ms for {} columns",
+                            new Object[]{ cfs, cfs.liveRatio, newRatio, System.currentTimeMillis() - start, objects });
+                activelyMeasuring = null;
+            }
+        };
+
+        try
+        {
+            meterExecutor.submit(runnable);
+        }
+        catch (RejectedExecutionException e)
+        {
+            logger.debug("Meter thread is busy; skipping liveRatio update for {}", cfs);
+        }
+    }
+
     private void resolve(DecoratedKey key, ColumnFamily cf)
     {
         currentThroughput.addAndGet(cf.size());
-        currentOperations.addAndGet(cf.getColumnCount());
+        currentOperations.addAndGet((cf.getColumnCount() == 0)
+                                    ? cf.isMarkedForDelete() ? 1 : 0
+                                    : cf.getColumnCount());
 
         ColumnFamily oldCf = columnFamilies.putIfAbsent(key, cf);
         if (oldCf == null)
@@ -148,25 +236,38 @@ public class Memtable implements Comparable<Memtable>, IFlushable
     private SSTableReader writeSortedContents() throws IOException
     {
         logger.info("Writing " + this);
-        SSTableWriter writer = new SSTableWriter(cfs.getFlushPath(), columnFamilies.size(), cfs.metadata, cfs.partitioner);
+        SSTableWriter writer = cfs.createFlushWriter(columnFamilies.size(), 2 * getSerializedSize()); // 2* for keys
 
+        // (we can't clear out the map as-we-go to free up memory,
+        //  since the memtable is being used for queries in the "pending flush" category)
         for (Map.Entry<DecoratedKey, ColumnFamily> entry : columnFamilies.entrySet())
             writer.append(entry.getKey(), entry.getValue());
 
         SSTableReader ssTable = writer.closeAndOpenReader();
-        logger.info("Completed flushing " + ssTable.getFilename());
+        logger.info(String.format("Completed flushing %s (%d bytes)",
+                                  ssTable.getFilename(), new File(ssTable.getFilename()).length()));
         return ssTable;
     }
 
     public void flushAndSignal(final CountDownLatch latch, ExecutorService sorter, final ExecutorService writer)
     {
-        cfs.getMemtablesPendingFlush().add(this); // it's ok for the MT to briefly be both active and pendingFlush
-        writer.submit(new WrappedRunnable()
+        writer.execute(new WrappedRunnable()
         {
             public void runMayThrow() throws IOException
             {
-                cfs.addSSTable(writeSortedContents());
-                cfs.getMemtablesPendingFlush().remove(Memtable.this);
+                cfs.flushLock.lock();
+                try
+                {
+                    if (!cfs.isDropped())
+                    {
+                        SSTableReader sstable = writeSortedContents();
+                        cfs.replaceFlushed(Memtable.this, sstable);
+                    }
+                }
+                finally
+                {
+                    cfs.flushLock.unlock();
+                }
                 latch.countDown();
             }
         });
@@ -174,8 +275,8 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
     public String toString()
     {
-        return String.format("Memtable-%s@%s(%s bytes, %s operations)",
-                             cfs.getColumnFamilyName(), hashCode(), currentThroughput, currentOperations);
+        return String.format("Memtable-%s@%s(%s/%s serialized/live bytes, %s ops)",
+                             cfs.getColumnFamilyName(), hashCode(), currentThroughput, getLiveSize(), currentOperations);
     }
 
     /**
@@ -207,11 +308,11 @@ public class Memtable implements Comparable<Memtable>, IFlushable
         final Collection<IColumn> filteredColumns = filter.reversed ? cf.getReverseSortedColumns() : cf.getSortedColumns();
 
         // ok to not have subcolumnComparator since we won't be adding columns to this object
-        IColumn startColumn = isSuper ? new SuperColumn(filter.start, null) :  new Column(filter.start);
+        IColumn startColumn = isSuper ? new SuperColumn(filter.start, (AbstractType)null) :  new Column(filter.start);
         Comparator<IColumn> comparator = filter.getColumnComparator(typeComparator);
 
         final PeekingIterator<IColumn> filteredIter = Iterators.peekingIterator(filteredColumns.iterator());
-        if (!filter.reversed || filter.start.length != 0)
+        if (!filter.reversed || filter.start.remaining() != 0)
         {
             while (filteredIter.hasNext() && comparator.compare(filteredIter.peek(), startColumn) < 0)
             {
@@ -238,7 +339,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
             public IColumn next()
             {
-                return filteredIter.next();
+                return filteredIter.next();                
             }
         };
     }
@@ -250,8 +351,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
         return new SimpleAbstractColumnIterator()
         {
-            private Iterator<byte[]> iter = filter.columns.iterator();
-            private byte[] current;
+            private Iterator<ByteBuffer> iter = filter.columns.iterator();
 
             public ColumnFamily getColumnFamily()
             {
@@ -267,7 +367,7 @@ public class Memtable implements Comparable<Memtable>, IFlushable
             {
                 while (iter.hasNext())
                 {
-                    current = iter.next();
+                    ByteBuffer current = iter.next();
                     IColumn column = cf.getColumn(current);
                     if (column != null)
                         // clone supercolumns so caller can freely removeDeleted or otherwise mutate it
@@ -290,6 +390,6 @@ public class Memtable implements Comparable<Memtable>, IFlushable
 
     public boolean isExpired()
     {
-        return System.currentTimeMillis() > creationTime + cfs.metadata.memtableFlushAfterMins * 60 * 1000;
+        return System.currentTimeMillis() > creationTime + cfs.getMemtableFlushAfterMins() * 60 * 1000L;
     }
 }

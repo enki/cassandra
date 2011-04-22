@@ -21,37 +21,32 @@ package org.apache.cassandra.locator;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 
-import org.apache.cassandra.config.ConfigurationException;
 import org.junit.Test;
 
-import static org.junit.Assert.*;
-import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.CleanupHelper;
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.StorageServiceAccessor;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class SimpleStrategyTest extends SchemaLoader
+import static org.junit.Assert.*;
+
+public class SimpleStrategyTest extends CleanupHelper
 {
     @Test
-    public void tryBogusTable()
+    public void tryValidTable()
     {
-        AbstractReplicationStrategy rs = StorageService.instance.getReplicationStrategy("Keyspace1");
-        assertNotNull(rs);
-        try
-        {
-            rs = StorageService.instance.getReplicationStrategy("SomeBogusTableThatDoesntExist");
-            throw new AssertionError("SS.createReplicationStrategy() should have thrown a RuntimeException.");
-        }
-        catch (RuntimeException ex)
-        {
-            // This exception should be thrown.
-        }
+        assert Table.open("Keyspace1").getReplicationStrategy() != null;
     }
 
     @Test
@@ -75,7 +70,7 @@ public class SimpleStrategyTest extends SchemaLoader
         List<Token> keyTokens = new ArrayList<Token>();
         for (int i = 0; i < 5; i++) {
             endpointTokens.add(new StringToken(String.valueOf((char)('a' + i * 2))));
-            keyTokens.add(partitioner.getToken(String.valueOf((char)('a' + i * 2 + 1)).getBytes()));
+            keyTokens.add(partitioner.getToken(ByteBufferUtil.bytes(String.valueOf((char)('a' + i * 2 + 1)))));
         }
         verifyGetNaturalEndpoints(endpointTokens.toArray(new Token[0]), keyTokens.toArray(new Token[0]));
     }
@@ -101,7 +96,7 @@ public class SimpleStrategyTest extends SchemaLoader
             for (int i = 0; i < keyTokens.length; i++)
             {
                 List<InetAddress> endpoints = strategy.getNaturalEndpoints(keyTokens[i]);
-                assertEquals(DatabaseDescriptor.getReplicationFactor(table), endpoints.size());
+                assertEquals(strategy.getReplicationFactor(), endpoints.size());
                 List<InetAddress> correctEndpoints = new ArrayList<InetAddress>();
                 for (int j = 0; j < endpoints.size(); j++)
                     correctEndpoints.add(hosts.get((i + j + 1) % hosts.size()));
@@ -147,7 +142,7 @@ public class SimpleStrategyTest extends SchemaLoader
 
             StorageService.calculatePendingRanges(strategy, table);
 
-            int replicationFactor = DatabaseDescriptor.getReplicationFactor(table);
+            int replicationFactor = strategy.getReplicationFactor();
 
             for (int i = 0; i < keyTokens.length; i++)
             {
@@ -183,11 +178,12 @@ public class SimpleStrategyTest extends SchemaLoader
 
     private AbstractReplicationStrategy getStrategy(String table, TokenMetadata tmd) throws ConfigurationException
     {
+        KSMetaData ksmd =  DatabaseDescriptor.getKSMetaData(table);
         return AbstractReplicationStrategy.createReplicationStrategy(
                 table,
-                "org.apache.cassandra.locator.SimpleStrategy",
+                ksmd.strategyClass,
                 tmd,
                 new SimpleSnitch(),
-                null);
+                ksmd.strategyOptions);
     }
 }

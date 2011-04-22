@@ -23,12 +23,12 @@ import static junit.framework.Assert.assertEquals;
 import static org.apache.cassandra.Util.column;
 
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.*;
-
-import org.apache.commons.lang.ArrayUtils;
 
 import org.apache.cassandra.CleanupHelper;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.filter.IFilter;
@@ -46,6 +46,7 @@ import org.apache.cassandra.utils.FBUtilities;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class StreamingTransferTest extends CleanupHelper
 {
@@ -67,10 +68,10 @@ public class StreamingTransferTest extends CleanupHelper
         for (int i = 1; i <= 3; i++)
         {
             String key = "key" + i;
-            RowMutation rm = new RowMutation("Keyspace1", key.getBytes());
+            RowMutation rm = new RowMutation("Keyspace1", ByteBufferUtil.bytes(key));
             ColumnFamily cf = ColumnFamily.create(table.name, cfs.columnFamily);
             cf.addColumn(column(key, "v", 0));
-            cf.addColumn(new Column("birthdate".getBytes("UTF8"), FBUtilities.toByteArray((long) i), 0));
+            cf.addColumn(new Column(ByteBufferUtil.bytes("birthdate"), ByteBufferUtil.bytes((long) i), 0));
             rm.add(cf);
             rm.apply();
         }
@@ -82,33 +83,33 @@ public class StreamingTransferTest extends CleanupHelper
         // transfer the first and last key
         IPartitioner p = StorageService.getPartitioner();
         List<Range> ranges = new ArrayList<Range>();
-        ranges.add(new Range(p.getMinimumToken(), p.getToken("key1".getBytes())));
-        ranges.add(new Range(p.getToken("key2".getBytes()), p.getMinimumToken()));
+        ranges.add(new Range(p.getMinimumToken(), p.getToken(ByteBufferUtil.bytes("key1"))));
+        ranges.add(new Range(p.getToken(ByteBufferUtil.bytes("key2")), p.getMinimumToken()));
         StreamOutSession session = StreamOutSession.create(table.name, LOCAL, null);
-        StreamOut.transferSSTables(session, Arrays.asList(sstable), ranges);
+        StreamOut.transferSSTables(session, Arrays.asList(sstable), ranges, OperationType.BOOTSTRAP);
         session.await();
 
         // confirm that the SSTable was transferred and registered
         List<Row> rows = Util.getRangeSlice(cfs);
         assertEquals(2, rows.size());
-        assert Arrays.equals(rows.get(0).key.key, "key1".getBytes());
-        assert Arrays.equals(rows.get(1).key.key, "key3".getBytes());
+        assert rows.get(0).key.key.equals( ByteBufferUtil.bytes("key1"));
+        assert rows.get(1).key.key.equals( ByteBufferUtil.bytes("key3"));
         assertEquals(2, rows.get(0).cf.getColumnsMap().size());
         assertEquals(2, rows.get(1).cf.getColumnsMap().size());
-        assert rows.get(1).cf.getColumn("key3".getBytes()) != null;
+        assert rows.get(1).cf.getColumn(ByteBufferUtil.bytes("key3")) != null;
 
         // and that the index and filter were properly recovered
         assert null != cfs.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("key1"), new QueryPath(cfs.columnFamily)));
         assert null != cfs.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("key3"), new QueryPath(cfs.columnFamily)));
 
         // and that the secondary index works
-        IndexExpression expr = new IndexExpression("birthdate".getBytes("UTF8"), IndexOperator.EQ, FBUtilities.toByteArray(3L));
-        IndexClause clause = new IndexClause(Arrays.asList(expr), ArrayUtils.EMPTY_BYTE_ARRAY, 100);
+        IndexExpression expr = new IndexExpression(ByteBufferUtil.bytes("birthdate"), IndexOperator.EQ, ByteBufferUtil.bytes(3L));
+        IndexClause clause = new IndexClause(Arrays.asList(expr), ByteBufferUtil.EMPTY_BYTE_BUFFER, 100);
         IFilter filter = new IdentityQueryFilter();
         Range range = new Range(p.getMinimumToken(), p.getMinimumToken());
         rows = cfs.scan(clause, range, filter);
         assertEquals(1, rows.size());
-        assert Arrays.equals(rows.get(0).key.key, "key3".getBytes());
+        assert rows.get(0).key.key.equals( ByteBufferUtil.bytes("key3")) ;
     }
 
     @Test
@@ -119,7 +120,7 @@ public class StreamingTransferTest extends CleanupHelper
         content.add("transfer1");
         content.add("transfer2");
         content.add("transfer3");
-        SSTableReader sstable = SSTableUtils.writeSSTable(content);
+        SSTableReader sstable = SSTableUtils.prepare().write(content);
         String tablename = sstable.getTableName();
         String cfname = sstable.getColumnFamilyName();
 
@@ -127,23 +128,23 @@ public class StreamingTransferTest extends CleanupHelper
         content2.add("test");
         content2.add("test2");
         content2.add("test3");
-        SSTableReader sstable2 = SSTableUtils.writeSSTable(content2);
+        SSTableReader sstable2 = SSTableUtils.prepare().write(content2);
 
         // transfer the first and last key
         IPartitioner p = StorageService.getPartitioner();
         List<Range> ranges = new ArrayList<Range>();
-        ranges.add(new Range(p.getMinimumToken(), p.getToken("transfer1".getBytes())));
-        ranges.add(new Range(p.getToken("test2".getBytes()), p.getMinimumToken()));
+        ranges.add(new Range(p.getMinimumToken(), p.getToken(ByteBufferUtil.bytes("transfer1"))));
+        ranges.add(new Range(p.getToken(ByteBufferUtil.bytes("test2")), p.getMinimumToken()));
         StreamOutSession session = StreamOutSession.create(tablename, LOCAL, null);
-        StreamOut.transferSSTables(session, Arrays.asList(sstable, sstable2), ranges);
+        StreamOut.transferSSTables(session, Arrays.asList(sstable, sstable2), ranges, OperationType.BOOTSTRAP);
         session.await();
 
         // confirm that the SSTable was transferred and registered
         ColumnFamilyStore cfstore = Table.open(tablename).getColumnFamilyStore(cfname);
         List<Row> rows = Util.getRangeSlice(cfstore);
         assertEquals(6, rows.size());
-        assert Arrays.equals(rows.get(0).key.key, "test".getBytes());
-        assert Arrays.equals(rows.get(3).key.key, "transfer1".getBytes());
+        assert rows.get(0).key.key.equals(ByteBufferUtil.bytes("test"));
+        assert rows.get(3).key.key.equals(ByteBufferUtil.bytes("transfer1"));
         assert rows.get(0).cf.getColumnsMap().size() == 1;
         assert rows.get(3).cf.getColumnsMap().size() == 1;
 
@@ -154,5 +155,50 @@ public class StreamingTransferTest extends CleanupHelper
         // and that the index and filter were properly recovered
         assert null != cfstore.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("test"), new QueryPath("Standard1")));
         assert null != cfstore.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("transfer1"), new QueryPath("Standard1")));
+    }
+
+    @Test
+    public void testTransferOfMultipleColumnFamilies() throws Exception
+    {
+        String keyspace = "Keyspace1";
+        IPartitioner p = StorageService.getPartitioner();
+        String[] columnFamilies = new String[] { "Standard1", "Standard2", "Standard3" };
+        List<SSTableReader> ssTableReaders = new ArrayList<SSTableReader>();
+
+        // ranges to transfer
+        List<Range> ranges = new ArrayList<Range>();
+
+        for (String cf : columnFamilies)
+        {
+            Set<String> content = new HashSet<String>();
+
+            content.add("data-" + cf + "-1");
+            content.add("data-" + cf + "-2");
+            content.add("data-" + cf + "-3");
+
+            SSTableUtils.Context context = SSTableUtils.prepare().ks(keyspace).cf(cf);
+
+            ssTableReaders.add(context.write(content));
+            ranges.add(new Range(p.getMinimumToken(), p.getToken(ByteBufferUtil.bytes("data-" + cf + "-3"))));
+        }
+
+        StreamOutSession session = StreamOutSession.create(keyspace, LOCAL, null);
+        StreamOut.transferSSTables(session, ssTableReaders, ranges, OperationType.BOOTSTRAP);
+
+        session.await();
+
+        for (String cf : columnFamilies)
+        {
+            ColumnFamilyStore store = Table.open(keyspace).getColumnFamilyStore(cf);
+            List<Row> rows = Util.getRangeSlice(store);
+
+            assert rows.size() >= 3;
+
+            for (int i = 0; i < 3; i++)
+            {
+                String expectedKey = "data-" + cf + "-" + (i + 1);
+                assertEquals(p.decorateKey(ByteBufferUtil.bytes(expectedKey)), rows.get(i).key);
+            }
+        }
     }
 }

@@ -22,9 +22,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 
@@ -46,15 +48,15 @@ public class WriteResponse
     {
     	ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream( bos );
-        WriteResponse.serializer().serialize(writeResponseMessage, dos);
-        return original.getReply(FBUtilities.getLocalAddress(), bos.toByteArray());
+        WriteResponse.serializer().serialize(writeResponseMessage, dos, original.getVersion());
+        return original.getReply(FBUtilities.getLocalAddress(), bos.toByteArray(), original.getVersion());
     }
 
 	private final String table_;
-	private final byte[] key_;
+	private final ByteBuffer key_;
 	private final boolean status_;
 
-	public WriteResponse(String table, byte[] key, boolean bVal) {
+	public WriteResponse(String table, ByteBuffer key, boolean bVal) {
 		table_ = table;
 		key_ = key;
 		status_ = bVal;
@@ -65,7 +67,7 @@ public class WriteResponse
 		return table_;
 	}
 
-	public byte[] key()
+	public ByteBuffer key()
 	{
 		return key_;
 	}
@@ -77,17 +79,17 @@ public class WriteResponse
 
     public static class WriteResponseSerializer implements ICompactSerializer<WriteResponse>
     {
-        public void serialize(WriteResponse wm, DataOutputStream dos) throws IOException
+        public void serialize(WriteResponse wm, DataOutputStream dos, int version) throws IOException
         {
             dos.writeUTF(wm.table());
-            FBUtilities.writeShortByteArray(wm.key(), dos);
+            ByteBufferUtil.writeWithShortLength(wm.key(), dos);
             dos.writeBoolean(wm.isSuccess());
         }
 
-        public WriteResponse deserialize(DataInputStream dis) throws IOException
+        public WriteResponse deserialize(DataInputStream dis, int version) throws IOException
         {
             String table = dis.readUTF();
-            byte[] key = FBUtilities.readShortByteArray(dis);
+            ByteBuffer key = ByteBufferUtil.readWithShortLength(dis);
             boolean status = dis.readBoolean();
             return new WriteResponse(table, key, status);
         }

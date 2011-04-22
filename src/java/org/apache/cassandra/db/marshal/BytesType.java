@@ -21,23 +21,71 @@ package org.apache.cassandra.db.marshal;
  */
 
 
-import java.util.Arrays;
+import java.nio.ByteBuffer;
 
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
-public class BytesType extends AbstractType
+public class BytesType extends AbstractType<ByteBuffer>
 {
     public static final BytesType instance = new BytesType();
 
     BytesType() {} // singleton
-    
-    public int compare(byte[] o1, byte[] o2)
+
+    public ByteBuffer compose(ByteBuffer bytes)
     {
-        return FBUtilities.compareByteArrays(o1, o2);
+        return bytes.duplicate();
     }
 
-    public String getString(byte[] bytes)
+    public ByteBuffer decompose(ByteBuffer value)
     {
-        return FBUtilities.bytesToHex(bytes);
+        return value;
+    }
+    
+    public int compare(ByteBuffer o1, ByteBuffer o2)
+    {
+        return BytesType.bytesCompare(o1, o2);
+    }
+
+    public static int bytesCompare(ByteBuffer o1, ByteBuffer o2)
+    {
+        if(null == o1){
+            if(null == o2) return 0;
+            else return -1;
+        }
+              
+        return ByteBufferUtil.compareUnsigned(o1, o2);
+    }
+
+    public String getString(ByteBuffer bytes)
+    {
+        return ByteBufferUtil.bytesToHex(bytes);
+    }
+
+    public String toString(ByteBuffer byteBuffer)
+    {
+        return getString(byteBuffer);
+    }
+
+    public ByteBuffer fromString(String source)
+    {
+        try
+        {
+            return ByteBuffer.wrap(FBUtilities.hexToBytes(source));
+        }
+        catch (NumberFormatException e)
+        {
+            throw new MarshalException(String.format("cannot parse '%s' as hex bytes", source), e);
+        }
+    }
+
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        // all bytes are legal.
+    }
+
+    public Class<ByteBuffer> getType()
+    {
+        return ByteBuffer.class;
     }
 }

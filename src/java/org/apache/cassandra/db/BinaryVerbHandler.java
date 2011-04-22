@@ -21,33 +21,32 @@ package org.apache.cassandra.db;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class BinaryVerbHandler implements IVerbHandler
 {
     private static Logger logger_ = LoggerFactory.getLogger(BinaryVerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     { 
         byte[] bytes = message.getMessageBody();
         ByteArrayInputStream buffer = new ByteArrayInputStream(bytes);
 
         try
         {
-            RowMutationMessage rmMsg = RowMutationMessage.serializer().deserialize(new DataInputStream(buffer));
-            RowMutation rm = rmMsg.getRowMutation();
+            RowMutation rm = RowMutation.serializer().deserialize(new DataInputStream(buffer), message.getVersion());
             rm.applyBinary();
 
             WriteResponse response = new WriteResponse(rm.getTable(), rm.key(), true);
             Message responseMessage = WriteResponse.makeWriteResponseMessage(message, response);
             if (logger_.isDebugEnabled())
-              logger_.debug("binary " + rm + " applied.  Sending response to " + message.getMessageId() + "@" + message.getFrom());
-            MessagingService.instance.sendOneWay(responseMessage, message.getFrom());
+              logger_.debug("binary " + rm + " applied.  Sending response to " + id + "@" + message.getFrom());
+            MessagingService.instance().sendReply(responseMessage, id, message.getFrom());
         }
         catch (Exception e)
         {

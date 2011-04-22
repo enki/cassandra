@@ -18,8 +18,8 @@
 
 package org.apache.cassandra.locator;
 
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.HashMap;
@@ -30,6 +30,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.ResourceWatcher;
 import org.apache.cassandra.utils.WrappedRunnable;
@@ -109,15 +111,20 @@ public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
     {
         HashMap<InetAddress, String[]> reloadedMap = new HashMap<InetAddress, String[]>();
 
-        String rackPropertyFilename = FBUtilities.resourceToFile(RACK_PROPERTY_FILENAME);
         Properties properties = new Properties();
+        InputStream stream = null;
         try
         {
-            properties.load(new FileReader(rackPropertyFilename));
+            stream = getClass().getClassLoader().getResourceAsStream(RACK_PROPERTY_FILENAME);
+            properties.load(stream);
         }
         catch (IOException e)
         {
             throw new ConfigurationException("Unable to read " + RACK_PROPERTY_FILENAME, e);
+        }
+        finally
+        {
+            FileUtils.closeQuietly(stream);
         }
 
         for (Map.Entry<Object, Object> entry : properties.entrySet())
@@ -152,6 +159,6 @@ public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
 
         logger.debug("loaded network topology {}", FBUtilities.toString(reloadedMap));
         endpointMap = reloadedMap;
-        clearEndpointCache();
+        StorageService.instance.getTokenMetadata().invalidateCaches();
     }
 }

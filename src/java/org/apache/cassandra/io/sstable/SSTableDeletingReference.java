@@ -23,12 +23,15 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.DataTracker;
 import org.apache.cassandra.io.DeletionService;
 import org.apache.cassandra.service.StorageService;
 
@@ -38,13 +41,13 @@ public class SSTableDeletingReference extends PhantomReference<SSTableReader>
 
     public static final int RETRY_DELAY = 10000;
 
-    private final SSTableTracker tracker;
+    private final DataTracker tracker;
     public final Descriptor desc;
     public final Set<Component> components;
     private final long size;
     private boolean deleteOnCleanup;
 
-    SSTableDeletingReference(SSTableTracker tracker, SSTableReader referent, ReferenceQueue<? super SSTableReader> q)
+    SSTableDeletingReference(DataTracker tracker, SSTableReader referent, ReferenceQueue<? super SSTableReader> q)
     {
         super(referent, q);
         this.tracker = tracker;
@@ -65,7 +68,7 @@ public class SSTableDeletingReference extends PhantomReference<SSTableReader>
             // this is tricky because the mmapping might not have been finalized yet,
             // and delete will fail (on Windows) until it is.  additionally, we need to make sure to
             // delete the data file first, so on restart the others will be recognized as GCable
-            StorageService.scheduledTasks.schedule(new CleanupTask(), RETRY_DELAY, TimeUnit.MILLISECONDS);
+            StorageService.tasks.schedule(new CleanupTask(), RETRY_DELAY, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -81,7 +84,7 @@ public class SSTableDeletingReference extends PhantomReference<SSTableReader>
             {
                 if (attempts++ < DeletionService.MAX_RETRIES)
                 {
-                    StorageService.scheduledTasks.schedule(this, RETRY_DELAY, TimeUnit.MILLISECONDS);
+                    StorageService.tasks.schedule(this, RETRY_DELAY, TimeUnit.MILLISECONDS);
                     return;
                 }
                 else
@@ -90,9 +93,8 @@ public class SSTableDeletingReference extends PhantomReference<SSTableReader>
                     return;
                 }
             }
-            // let the remainder be cleaned up by conditionalDelete
-            components.remove(Component.DATA);
-            SSTable.conditionalDelete(desc, components);
+            // let the remainder be cleaned up by delete
+            SSTable.delete(desc, Sets.difference(components, Collections.singleton(Component.DATA)));
             tracker.spaceReclaimed(size);
         }
     }

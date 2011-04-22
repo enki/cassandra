@@ -19,11 +19,14 @@
 package org.apache.cassandra.dht;
 
 import java.io.Serializable;
+import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.commons.lang.ObjectUtils;
 
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * A representation of the range that a node is responsible for on the DHT ring.
@@ -65,7 +68,7 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
             /*
              * This is the range (a, b] where a < b. 
              */
-            return (bi.compareTo(left) > 0 && right.compareTo(bi) >= 0);
+            return ( compare(bi,left) > 0 && compare(right,bi) >= 0);
         }
     }
 
@@ -81,13 +84,13 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
         boolean thatwraps = isWrapAround(that.left, that.right);
         if (thiswraps == thatwraps)
         {
-            return left.compareTo(that.left) <= 0 && that.right.compareTo(right) <= 0;
+            return compare(left,that.left) <= 0 && compare(that.right,right) <= 0;
         }
         else if (thiswraps)
         {
             // wrapping might contain non-wrapping
             // that is contained if both its tokens are in one of our wrap segments
-            return left.compareTo(that.left) <= 0 || that.right.compareTo(right) <= 0;
+            return compare(left,that.left) <= 0 || compare(that.right,right) <= 0;
         }
         else
         {
@@ -189,6 +192,8 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
 
     public AbstractBounds createFrom(Token token)
     {
+        if (token.equals(left))
+            return null;
         return new Range(left, token);
     }
 
@@ -207,8 +212,38 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
      */
     public static boolean isWrapAround(Token left, Token right)
     {
-        return left.compareTo(right) >= 0;
+       return compare(left,right) >= 0;           
     }
+    
+    public static int compare(Token left, Token right)
+    {
+        ByteBuffer l,r;
+
+        if (left.token instanceof byte[])
+        {
+            l  = ByteBuffer.wrap((byte[]) left.token);
+        }
+        else if (left.token instanceof ByteBuffer)
+        {
+            l  = (ByteBuffer) left.token;
+        }
+        else
+        {
+            //Handles other token types
+            return left.compareTo(right);
+        }
+
+        if (right.token instanceof byte[])
+        {
+            r  = ByteBuffer.wrap((byte[]) right.token);
+        }
+        else
+        {
+            r  = (ByteBuffer) right.token;
+        }
+
+        return ByteBufferUtil.compareUnsigned(l, r);
+     }
     
     public int compareTo(Range rhs)
     {
@@ -222,9 +257,47 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
         if ( isWrapAround(rhs.left, rhs.right) )
             return 1;
         
-        return right.compareTo(rhs.right);
+        return compare(right,rhs.right);
     }
-    
+
+    /**
+     * Calculate set of the difference ranges of given two ranges
+     * (as current (A, B] and rhs is (C, D])
+     * which node will need to fetch when moving to a given new token
+     *
+     * @param rhs range to calculate difference
+     * @return set of difference ranges
+     */
+    public Set<Range> differenceToFetch(Range rhs)
+    {
+        Set<Range> difference = new HashSet<Range>();
+
+        int comparisonAC = Range.compare(left, rhs.left);
+
+        if (comparisonAC == 0) // (A, B] & (A, C]
+        {
+            if (Range.compare(right, rhs.right) < 0) // B < C
+            {
+                difference.add(new Range(right, rhs.right));
+            }
+        }
+        else if (comparisonAC > 0) // (A, B] & (C, D]  where C < A (A > C)
+        {
+            difference.add(new Range(rhs.left, left)); // first interval will be (C, A]
+
+            if (Range.compare(rhs.right, right) > 0) // D > B
+            {
+                difference.add(new Range(rhs.right, right)); // (D, B]
+            }
+        }
+        else // (A, B] & (C, D] where C > A (mean that comparisonAC < 0)
+        {
+            Token newLeft = (Range.compare(rhs.left, right) > 0) ? rhs.left : right; // C > B ? (C, D] : (B, D]
+            difference.add(new Range(newLeft, rhs.right));
+        }
+
+        return difference;
+    }
 
     public static boolean isTokenInRanges(Token token, Iterable<Range> ranges)
     {
@@ -240,13 +313,12 @@ public class Range extends AbstractBounds implements Comparable<Range>, Serializ
         return false;
     }
 
-    @Override
     public boolean equals(Object o)
     {
         if (!(o instanceof Range))
             return false;
         Range rhs = (Range)o;
-        return left.equals(rhs.left) && right.equals(rhs.right);
+        return compare(left,rhs.left) == 0 && compare(right,rhs.right) == 0;
     }
     
     public String toString()

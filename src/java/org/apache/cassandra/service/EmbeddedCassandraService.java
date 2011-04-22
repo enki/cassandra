@@ -21,18 +21,10 @@ package org.apache.cassandra.service;
  */
 
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.thrift.CassandraDaemon;
 import org.apache.thrift.transport.TTransportException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * An embedded, in-memory cassandra storage service that listens
@@ -45,35 +37,26 @@ import org.slf4j.LoggerFactory;
  * This is the implementation of https://issues.apache.org/jira/browse/CASSANDRA-740
  * <p>
  * How to use:
- * In the client code create a new thread and spawn it with its {@link Thread#start()} method.
+ * In the client code simply create a new EmbeddedCassandraService and start it.
  * Example:
  * <pre>
 
         cassandra = new EmbeddedCassandraService();
-        cassandra.init();
-
-        // spawn cassandra in a new thread
-        Thread t = new Thread(cassandra);
-        t.setDaemon(true);
-        t.start();
+        cassandra.start();
 
  * </pre>
  * @author Ran Tavory (rantav@gmail.com)
  *
  */
-public class EmbeddedCassandraService implements Runnable
+public class EmbeddedCassandraService
 {
 
     CassandraDaemon cassandraDaemon;
 
-    public void init() throws TTransportException, IOException
+    public void start() throws IOException
     {
         cassandraDaemon = new CassandraDaemon();
         cassandraDaemon.init(null);
-    }
-
-    public void run()
-    {
         cassandraDaemon.start();
     }
 }

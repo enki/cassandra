@@ -21,19 +21,17 @@ package org.apache.cassandra.db;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.util.List;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import java.net.InetAddress;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class ReadVerbHandler implements IVerbHandler
 {
@@ -47,7 +45,7 @@ public class ReadVerbHandler implements IVerbHandler
     /* We use this so that we can reuse readcontext objects */
     private static ThreadLocal<ReadVerbHandler.ReadContext> tls_ = new InheritableThreadLocal<ReadVerbHandler.ReadContext>();
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         byte[] body = message.getMessageBody();
         /* Obtain a Read Context from TLS */
@@ -66,45 +64,41 @@ public class ReadVerbHandler implements IVerbHandler
                 /* Don't service reads! */
                 throw new RuntimeException("Cannot service reads while bootstrapping!");
             }
-            ReadCommand command = ReadCommand.serializer().deserialize(new DataInputStream(readCtx.bufIn_));
+            ReadCommand command = ReadCommand.serializer().deserialize(new DataInputStream(readCtx.bufIn_), message.getVersion());
             Table table = Table.open(command.table);
             Row row = command.getRow(table);
-            ReadResponse readResponse;
-            if (command.isDigestQuery())
-            {
-                if (logger_.isDebugEnabled())
-                    logger_.debug("digest is " + FBUtilities.bytesToHex(ColumnFamily.digest(row.cf)));
-                readResponse = new ReadResponse(ColumnFamily.digest(row.cf));
-            }
-            else
-            {
-                readResponse = new ReadResponse(row);
-            }
-            readResponse.setIsDigestQuery(command.isDigestQuery());
+            ReadResponse readResponse = getResponse(command, row);
             /* serialize the ReadResponseMessage. */
             readCtx.bufOut_.reset();
 
-            ReadResponse.serializer().serialize(readResponse, readCtx.bufOut_);
+            ReadResponse.serializer().serialize(readResponse, readCtx.bufOut_, message.getVersion());
 
             byte[] bytes = new byte[readCtx.bufOut_.getLength()];
             System.arraycopy(readCtx.bufOut_.getData(), 0, bytes, 0, bytes.length);
 
-            Message response = message.getReply(FBUtilities.getLocalAddress(), bytes);
+            Message response = message.getReply(FBUtilities.getLocalAddress(), bytes, message.getVersion());
             if (logger_.isDebugEnabled())
-              logger_.debug("Read key " + command.key + "; sending response to " + message.getMessageId() + "@" + message.getFrom());
-            MessagingService.instance.sendOneWay(response, message.getFrom());
-
-            /* Do read repair if header of the message says so */
-            if (message.getHeader(ReadCommand.DO_REPAIR) != null)
-            {
-                List<InetAddress> endpoints = StorageService.instance.getLiveNaturalEndpoints(command.table, command.key);
-                if (endpoints.size() > 1)
-                    StorageService.instance.doConsistencyCheck(row, endpoints, command);
-            }
+              logger_.debug(String.format("Read key %s; sending response to %s@%s",
+                                          ByteBufferUtil.bytesToHex(command.key), id, message.getFrom()));
+            MessagingService.instance().sendReply(response, id, message.getFrom());
         }
         catch (IOException ex)
         {
             throw new RuntimeException(ex);
+        }
+    }
+
+    public static ReadResponse getResponse(ReadCommand command, Row row)
+    {
+        if (command.isDigestQuery())
+        {
+            if (logger_.isDebugEnabled())
+                logger_.debug("digest is " + ByteBufferUtil.bytesToHex(ColumnFamily.digest(row.cf)));
+            return new ReadResponse(ColumnFamily.digest(row.cf));
+        }
+        else
+        {
+            return new ReadResponse(row);
         }
     }
 }

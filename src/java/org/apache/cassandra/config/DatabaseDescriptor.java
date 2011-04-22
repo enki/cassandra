@@ -19,13 +19,13 @@
 package org.apache.cassandra.config;
 
 import java.io.*;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.*;
 
+import com.google.common.base.Charsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,10 +34,10 @@ import org.apache.cassandra.auth.AllowAllAuthority;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.auth.IAuthority;
 import org.apache.cassandra.config.Config.RequestSchedulerId;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.DefsTable;
 import org.apache.cassandra.db.Table;
-import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.dht.IPartitioner;
@@ -46,7 +46,7 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.*;
 import org.apache.cassandra.scheduler.IRequestScheduler;
 import org.apache.cassandra.scheduler.NoScheduler;
-import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.yaml.snakeyaml.Loader;
@@ -54,14 +54,14 @@ import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.error.YAMLException;
 
-public class    DatabaseDescriptor
+public class DatabaseDescriptor
 {
     private static Logger logger = LoggerFactory.getLogger(DatabaseDescriptor.class);
 
     private static IEndpointSnitch snitch;
     private static InetAddress listenAddress; // leave null so we can fall through to getLocalHost
     private static InetAddress rpcAddress;
-    private static Set<InetAddress> seeds = new HashSet<InetAddress>();
+    private static SeedProvider seedProvider;
     /* Current index into the above list of directories */
     private static int currentIndex = 0;
     private static int consistencyThreads = 4; // not configurable
@@ -86,7 +86,7 @@ public class    DatabaseDescriptor
     private static RequestSchedulerOptions requestSchedulerOptions;
 
     public static final UUID INITIAL_VERSION = new UUID(4096, 0); // has type nibble set to 1, everything else to zero.
-    private static UUID defsVersion = INITIAL_VERSION;
+    private static volatile UUID defsVersion = INITIAL_VERSION;
 
     /**
      * Inspect the classpath to find storage configuration file
@@ -101,8 +101,9 @@ public class    DatabaseDescriptor
         try
         {
             url = new URL(configUrl);
+            url.openStream(); // catches well-formed but bogus URLs
         }
-        catch (MalformedURLException e)
+        catch (Exception e)
         {
             ClassLoader loader = DatabaseDescriptor.class.getClassLoader();
             url = loader.getResource(configUrl);
@@ -112,25 +113,28 @@ public class    DatabaseDescriptor
 
         return url;
     }
-
+    
     static
     {
         try
         {
             URL url = getStorageConfigURL();
             logger.info("Loading settings from " + url);
-            
-            InputStream input = url.openStream();
+
+            InputStream input = null;
+            try
+            {
+                input = url.openStream();
+            }
+            catch (IOException e)
+            {
+                // getStorageConfigURL should have ruled this out
+                throw new AssertionError(e);
+            }
             org.yaml.snakeyaml.constructor.Constructor constructor = new org.yaml.snakeyaml.constructor.Constructor(Config.class);
-            TypeDescription desc = new TypeDescription(Config.class);
-            desc.putListPropertyType("keyspaces", RawKeyspace.class);
-            TypeDescription ksDesc = new TypeDescription(RawKeyspace.class);
-            ksDesc.putListPropertyType("column_families", RawColumnFamily.class);
-            TypeDescription cfDesc = new TypeDescription(RawColumnFamily.class);
-            cfDesc.putListPropertyType("column_metadata", RawColumnDefinition.class);
-            constructor.addTypeDescription(desc);
-            constructor.addTypeDescription(ksDesc);
-            constructor.addTypeDescription(cfDesc);
+            TypeDescription seedDesc = new TypeDescription(SeedProviderDef.class);
+            seedDesc.putMapPropertyType("parameters", String.class, String.class);
+            constructor.addTypeDescription(seedDesc);
             Yaml yaml = new Yaml(new Loader(constructor));
             conf = (Config)yaml.load(input);
             
@@ -222,6 +226,14 @@ public class    DatabaseDescriptor
                 throw new ConfigurationException("concurrent_writes must be at least 2");
             }
 
+            if (conf.concurrent_replicates != null && conf.concurrent_replicates < 2)
+            {
+                throw new ConfigurationException("conf.concurrent_replicates must be at least 2");
+            }
+
+            if (conf.memtable_total_space_in_mb == null)
+                conf.memtable_total_space_in_mb = (int) (Runtime.getRuntime().maxMemory() / (3 * 1048576));
+
             /* Memtable flush writer threads */
             if (conf.memtable_flush_writers != null && conf.memtable_flush_writers < 1)
             {
@@ -252,7 +264,16 @@ public class    DatabaseDescriptor
             
             /* Local IP or hostname to bind RPC server to */
             if (conf.rpc_address != null)
-                rpcAddress = InetAddress.getByName(conf.rpc_address);
+            {
+                try
+                {
+                    rpcAddress = InetAddress.getByName(conf.rpc_address);
+                }
+                catch (UnknownHostException e)
+                {
+                    throw new ConfigurationException("Unknown host in rpc_address " + conf.rpc_address);
+                }
+            }
 
             if (conf.thrift_framed_transport_size_in_mb > 0 && conf.thrift_max_message_length_in_mb < conf.thrift_framed_transport_size_in_mb)
             {
@@ -290,6 +311,10 @@ public class    DatabaseDescriptor
                 {
                     throw new ConfigurationException("Invalid Request Scheduler class " + conf.request_scheduler);
                 }
+                catch (Exception e)
+                {
+                    throw new ConfigurationException("Unable to instantiate request scheduler", e);
+                }
             }
             else
             {
@@ -315,7 +340,13 @@ public class    DatabaseDescriptor
             {
                 throw new ConfigurationException("in_memory_compaction_limit_in_mb must be a positive integer");
             }
-            
+
+            if (conf.compaction_multithreading == null)
+                conf.compaction_multithreading = true;
+
+            if (conf.compaction_throughput_mb_per_sec == null)
+                conf.compaction_throughput_mb_per_sec = 16;
+
             /* data file and commit log directories. they get created later, when they're needed. */
             if (conf.commitlog_directory != null && conf.data_file_directories != null && conf.saved_caches_directory != null)
             {
@@ -340,52 +371,55 @@ public class    DatabaseDescriptor
                     throw new ConfigurationException("saved_caches_directory missing");
             }
 
-            /* threshold after which commit log should be rotated. */
-            if (conf.commitlog_rotation_threshold_in_mb != null)
-                CommitLog.setSegmentSize(conf.commitlog_rotation_threshold_in_mb * 1024 * 1024);
-
             // Hardcoded system tables
             KSMetaData systemMeta = new KSMetaData(Table.SYSTEM_TABLE,
                                                    LocalStrategy.class,
-                                                   null,
-                                                   1,
+                                                   KSMetaData.optsWithRF(1),
                                                    CFMetaData.StatusCf,
                                                    CFMetaData.HintsCf,
                                                    CFMetaData.MigrationsCf,
                                                    CFMetaData.SchemaCf,
-                                                   CFMetaData.IndexCf);
+                                                   CFMetaData.IndexCf,
+                                                   CFMetaData.NodeIdCf);
             CFMetaData.map(CFMetaData.StatusCf);
             CFMetaData.map(CFMetaData.HintsCf);
             CFMetaData.map(CFMetaData.MigrationsCf);
             CFMetaData.map(CFMetaData.SchemaCf);
             CFMetaData.map(CFMetaData.IndexCf);
+            CFMetaData.map(CFMetaData.NodeIdCf);
             tables.put(Table.SYSTEM_TABLE, systemMeta);
             
             /* Load the seeds for node contact points */
-            if (conf.seeds == null || conf.seeds.length <= 0)
+            if (conf.seed_provider == null)
             {
-                throw new ConfigurationException("seeds missing; a minimum of one seed is required.");
+                throw new ConfigurationException("seeds configuration is missing; a minimum of one seed is required.");
             }
-            for( int i = 0; i < conf.seeds.length; ++i )
+            try 
             {
-                seeds.add(InetAddress.getByName(conf.seeds[i]));
+                Class seedProviderClass = Class.forName(conf.seed_provider.class_name);
+                seedProvider = (SeedProvider)seedProviderClass.getConstructor(Map.class).newInstance(conf.seed_provider.parameters);
             }
+            // there are about 5 checked exceptions that could be thrown here.
+            catch (Exception e)
+            {
+                logger.error("Fatal configuration error", e);
+                System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
+                System.exit(1);
+            }
+            if (seedProvider.getSeeds().size() == 0)
+                throw new ConfigurationException("The seed provider lists no seeds.");
         }
         catch (ConfigurationException e)
         {
-            logger.error("Fatal error: " + e.getMessage());
-            System.err.println("Bad configuration; unable to start server");
+            logger.error("Fatal configuration error", e);
+            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
             System.exit(1);
         }
         catch (YAMLException e)
         {
-            logger.error("Fatal error: " + e.getMessage());
-            System.err.println("Bad configuration; unable to start server");
+            logger.error("Fatal configuration error error", e);
+            System.err.println(e.getMessage() + "\nInvalid yaml; unable to start server.  See log for stacktrace.");
             System.exit(1);
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException(e);
         }
     }
 
@@ -394,7 +428,7 @@ public class    DatabaseDescriptor
         IEndpointSnitch snitch = FBUtilities.construct(endpointSnitchClassName, "snitch");
         return conf.dynamic_snitch ? new DynamicEndpointSnitch(snitch) : snitch;
     }
-    
+
     /** load keyspace (table) definitions, but do not initialize the table instances. */
     public static void loadSchemas() throws IOException                         
     {
@@ -430,10 +464,9 @@ public class    DatabaseDescriptor
             }
             
             if (hasExistingTables)
-                logger.info("Found table data in data directories. Consider using JMX to call org.apache.cassandra.service.StorageService.loadSchemaFromYaml().");
+                logger.info("Found table data in data directories. Consider using the CLI to define your schema.");
             else
-                logger.info("Consider using JMX to org.apache.cassandra.service.StorageService.loadSchemaFromYaml() or set up a schema using the system_* calls provided via thrift.");
-            
+                logger.info("To create keyspaces and column families, see 'help create keyspace' in the CLI, or set up a schema using the thrift system_* calls.");
         }
         else
         {
@@ -466,158 +499,8 @@ public class    DatabaseDescriptor
                 // set defsVersion so that migrations leading up to emptiness aren't replayed.
                 defsVersion = uuid;
             }
-            
-            // since we loaded definitions from local storage, log a warning if definitions exist in yaml.
-            if (conf.keyspaces != null && conf.keyspaces.size() > 0)
-                logger.warn("Schema definitions were defined both locally and in " + DEFAULT_CONFIGURATION +
-                    ". Definitions in " + DEFAULT_CONFIGURATION + " were ignored.");
-            
         }
         CFMetaData.fixMaxId();
-    }
-
-    /** reads xml. doesn't populate any internal structures. */
-    public static Collection<KSMetaData> readTablesFromYaml() throws ConfigurationException
-    {
-        List<KSMetaData> defs = new ArrayList<KSMetaData>();
-        
-        
-        /* Read the table related stuff from config */
-        for (RawKeyspace keyspace : conf.keyspaces)
-        {
-            /* parsing out the table name */
-            if (keyspace.name == null)
-            {
-                throw new ConfigurationException("Keyspace name attribute is required");
-            }
-            
-            if (keyspace.name.equalsIgnoreCase(Table.SYSTEM_TABLE))
-            {
-                throw new ConfigurationException("'system' is a reserved table name for Cassandra internals");
-            }
-            
-            /* See which replica placement strategy to use */
-            if (keyspace.replica_placement_strategy == null)
-            {
-                throw new ConfigurationException("Missing replica_placement_strategy directive for " + keyspace.name);
-            }
-            String strategyClassName = KSMetaData.convertOldStrategyName(keyspace.replica_placement_strategy);
-            Class<AbstractReplicationStrategy> strategyClass = FBUtilities.classForName(strategyClassName, "replication-strategy");
-            
-            /* Data replication factor */
-            if (keyspace.replication_factor == null)
-            {
-                throw new ConfigurationException("Missing replication_factor directory for keyspace " + keyspace.name);
-            }
-            
-            int size2 = keyspace.column_families.length;
-            CFMetaData[] cfDefs = new CFMetaData[size2];
-            int j = 0;
-            for (RawColumnFamily cf : keyspace.column_families)
-            {
-                if (cf.name == null)
-                {
-                    throw new ConfigurationException("ColumnFamily name attribute is required");
-                }
-                if (!cf.name.matches(Migration.NAME_VALIDATOR_REGEX))
-                {
-                    throw new ConfigurationException("ColumnFamily name contains invalid characters.");
-                }
-                
-                // Parse out the column comparators and validators
-                AbstractType comparator = getComparator(cf.compare_with);
-                AbstractType subcolumnComparator = null;
-                AbstractType default_validator = getComparator(cf.default_validation_class);
-
-                ColumnFamilyType cfType = cf.column_type == null ? ColumnFamilyType.Standard : cf.column_type;
-                if (cfType == ColumnFamilyType.Super)
-                {
-                    subcolumnComparator = getComparator(cf.compare_subcolumns_with);
-                }
-                else if (cf.compare_subcolumns_with != null)
-                {
-                    throw new ConfigurationException("compare_subcolumns_with is only a valid attribute on super columnfamilies (not regular columnfamily " + cf.name + ")");
-                }
-
-                if (cf.read_repair_chance < 0.0 || cf.read_repair_chance > 1.0)
-                {                        
-                    throw new ConfigurationException("read_repair_chance must be between 0.0 and 1.0 (0% and 100%)");
-                }
-
-                if (conf.dynamic_snitch_badness_threshold < 0.0 || conf.dynamic_snitch_badness_threshold > 1.0)
-                {
-                    throw new ConfigurationException("dynamic_snitch_badness_threshold must be between 0.0 and 1.0 (0% and 100%)");
-                }
-                
-                if (cf.min_compaction_threshold < 0 || cf.max_compaction_threshold < 0)
-                {
-                    throw new ConfigurationException("min/max_compaction_thresholds must be positive integers.");
-                }
-                if ((cf.min_compaction_threshold > cf.max_compaction_threshold) && cf.max_compaction_threshold != 0)
-                {
-                    throw new ConfigurationException("min_compaction_threshold must be smaller than max_compaction_threshold, or either must be 0 (disabled)");
-                }
-
-                if (cf.memtable_throughput_in_mb == null)
-                {
-                    cf.memtable_throughput_in_mb = sizeMemtableThroughput();
-                    logger.info("memtable_throughput_in_mb not configured for " + cf.name + ", using " + cf.memtable_throughput_in_mb);
-                }
-                if (cf.memtable_operations_in_millions == null)
-                {
-                    cf.memtable_operations_in_millions = sizeMemtableOperations(cf.memtable_throughput_in_mb);
-                    logger.info("memtable_operations_in_millions not configured for " + cf.name + ", using " + cf.memtable_operations_in_millions);
-                }
-
-                if (cf.memtable_operations_in_millions != null && cf.memtable_operations_in_millions <= 0)
-                {
-                    throw new ConfigurationException("memtable_operations_in_millions must be a positive double");
-                }
-
-                 Map<byte[], ColumnDefinition> metadata = new TreeMap<byte[], ColumnDefinition>(FBUtilities.byteArrayComparator);
-
-                for (RawColumnDefinition rcd : cf.column_metadata)
-                {
-                    try
-                    {
-                        byte[] columnName = rcd.name.getBytes("UTF-8");
-                        metadata.put(columnName, new ColumnDefinition(columnName, rcd.validator_class, rcd.index_type, rcd.index_name));
-                    }
-                    catch (UnsupportedEncodingException e)
-                    {
-                        throw new AssertionError(e);
-                    }
-                }
-
-                cfDefs[j++] = new CFMetaData(keyspace.name, 
-                                             cf.name, 
-                                             cfType,
-                                             comparator, 
-                                             subcolumnComparator, 
-                                             cf.comment, 
-                                             cf.rows_cached,
-                                             cf.preload_row_cache, 
-                                             cf.keys_cached, 
-                                             cf.read_repair_chance,
-                                             cf.gc_grace_seconds,
-                                             default_validator,
-                                             cf.min_compaction_threshold,
-                                             cf.max_compaction_threshold,
-                                             cf.row_cache_save_period_in_seconds,
-                                             cf.key_cache_save_period_in_seconds,
-                                             cf.memtable_flush_after_mins,
-                                             cf.memtable_throughput_in_mb,
-                                             cf.memtable_operations_in_millions,
-                                             metadata);
-            }
-            defs.add(new KSMetaData(keyspace.name,
-                                    strategyClass,
-                                    keyspace.strategy_options,
-                                    keyspace.replication_factor,
-                                    cfDefs));
-        }
-
-        return defs;
     }
 
     public static IAuthenticator getAuthenticator()
@@ -645,12 +528,12 @@ public class    DatabaseDescriptor
         return conf.thrift_framed_transport_size_in_mb * 1024 * 1024;
     }
 
-    public static AbstractType getComparator(String compareWith) throws ConfigurationException
+    public static AbstractType getComparator(CharSequence compareWith) throws ConfigurationException
     {
         if (compareWith == null)
             compareWith = "BytesType";
 
-        return FBUtilities.getComparator(compareWith);
+        return FBUtilities.getComparator(compareWith.toString());
     }
 
     /**
@@ -693,6 +576,10 @@ public class    DatabaseDescriptor
     {
         return snitch;
     }
+    public static void setEndpointSnitch(IEndpointSnitch eps)
+    {
+        snitch = eps;
+    }
 
     public static IRequestScheduler getRequestScheduler()
     {
@@ -707,14 +594,6 @@ public class    DatabaseDescriptor
     public static RequestSchedulerId getRequestSchedulerId()
     {
         return requestSchedulerId;
-    }
-
-    public static Class<? extends AbstractReplicationStrategy> getReplicaPlacementStrategyClass(String table)
-    {
-    	KSMetaData meta = tables.get(table);
-    	if (meta == null)
-            throw new RuntimeException(table + " not found. Failure to call loadSchemas() perhaps?");
-        return meta.strategyClass;
     }
 
     public static KSMetaData getKSMetaData(String table)
@@ -735,7 +614,7 @@ public class    DatabaseDescriptor
 
     public static String getInitialToken()
     {
-        return conf.initial_token;
+        return System.getProperty("cassandra.initial_token", conf.initial_token);
     }
 
    public static String getClusterName()
@@ -802,17 +681,12 @@ public class    DatabaseDescriptor
 
     public static int getStoragePort()
     {
-        return conf.storage_port;
+        return Integer.parseInt(System.getProperty("cassandra.storage_port", conf.storage_port.toString()));
     }
 
     public static int getRpcPort()
     {
-        return conf.rpc_port;
-    }
-
-    public static int getReplicationFactor(String table)
-    {
-        return tables.get(table).replicationFactor;
+        return Integer.parseInt(System.getProperty("cassandra.rpc_port", conf.rpc_port.toString()));
     }
 
     public static long getRpcTimeout()
@@ -840,6 +714,11 @@ public class    DatabaseDescriptor
         return conf.concurrent_writes;
     }
 
+    public static int getConcurrentReplicators()
+    {
+        return conf.concurrent_replicates;
+    }
+
     public static int getFlushWriters()
     {
             return conf.memtable_flush_writers;
@@ -849,7 +728,22 @@ public class    DatabaseDescriptor
     {
         return conf.in_memory_compaction_limit_in_mb * 1024 * 1024;
     }
-    
+
+    public static boolean getCompactionMultithreading()
+    {
+        return conf.compaction_multithreading;
+    }
+
+    public static int getCompactionThroughputMbPerSec()
+    {
+        return conf.compaction_throughput_mb_per_sec;
+    }
+
+    public static void setCompactionThroughputMbPerSec(int value)
+    {
+        conf.compaction_throughput_mb_per_sec = value;
+    }
+
     public static String[] getAllDataFileLocations()
     {
         return conf.data_file_directories;
@@ -880,6 +774,14 @@ public class    DatabaseDescriptor
         currentIndex = (currentIndex + 1) % conf.data_file_directories.length;
         return dataFileDirectory;
     }
+    
+    /* threshold after which commit log should be rotated. */
+    public static int getCommitLogSegmentSize() 
+    {
+        return conf.commitlog_rotation_threshold_in_mb != null ?
+               conf.commitlog_rotation_threshold_in_mb * 1024 * 1024 :
+               128*1024*1024;
+    }
 
     public static String getCommitLogLocation()
     {
@@ -893,7 +795,7 @@ public class    DatabaseDescriptor
     
     public static Set<InetAddress> getSeeds()
     {
-        return seeds;
+        return Collections.unmodifiableSet(new HashSet(seedProvider.getSeeds()));
     }
 
     /*
@@ -918,6 +820,8 @@ public class    DatabaseDescriptor
           maxDiskIndex = i;
         }
       }
+        logger.debug("expected data files size is {}; largest free partition has {} bytes free",
+                     expectedCompactedFileSize, maxFreeDisk);
       // Load factor of 0.9 we do not want to use the entire disk that is too risky.
       maxFreeDisk = (long)(0.9 * maxFreeDisk);
       if( expectedCompactedFileSize < maxFreeDisk )
@@ -932,12 +836,12 @@ public class    DatabaseDescriptor
         return dataFileDirectory;
     }
     
-    public static AbstractType getComparator(String tableName, String cfName)
+    public static AbstractType getComparator(String ksName, String cfName)
     {
-        assert tableName != null;
-        CFMetaData cfmd = getCFMetaData(tableName, cfName);
+        assert ksName != null;
+        CFMetaData cfmd = getCFMetaData(ksName, cfName);
         if (cfmd == null)
-            throw new IllegalArgumentException("Unknown ColumnFamily " + cfName + " in keyspace " + tableName);
+            throw new IllegalArgumentException("Unknown ColumnFamily " + cfName + " in keyspace " + ksName);
         return cfmd.comparator;
     }
 
@@ -945,26 +849,6 @@ public class    DatabaseDescriptor
     {
         assert tableName != null;
         return getCFMetaData(tableName, cfName).subcolumnComparator;
-    }
-
-    /**
-     * @return The absolute number of keys that should be cached per table.
-     */
-    public static int getKeysCachedFor(String tableName, String columnFamilyName, long expectedKeys)
-    {
-        CFMetaData cfm = getCFMetaData(tableName, columnFamilyName);
-        double v = (cfm == null) ? CFMetaData.DEFAULT_KEY_CACHE_SIZE : cfm.keyCacheSize;
-        return (int)Math.min(FBUtilities.absoluteFromFraction(v, expectedKeys), Integer.MAX_VALUE);
-    }
-
-    /**
-     * @return The absolute number of rows that should be cached for the columnfamily.
-     */
-    public static int getRowsCachedFor(String tableName, String columnFamilyName, long expectedRows)
-    {
-        CFMetaData cfm = getCFMetaData(tableName, columnFamilyName);
-        double v = (cfm == null) ? CFMetaData.DEFAULT_ROW_CACHE_SIZE : cfm.rowCacheSize;
-        return (int)Math.min(FBUtilities.absoluteFromFraction(v, expectedRows), Integer.MAX_VALUE);
     }
 
     public static KSMetaData getTableDefinition(String table)
@@ -976,15 +860,14 @@ public class    DatabaseDescriptor
     // process of mutating an individual keyspace, rather than setting manually here.
     public static void setTableDefinition(KSMetaData ksm, UUID newVersion)
     {
-        tables.put(ksm.name, ksm);
+        if (ksm != null)
+            tables.put(ksm.name, ksm);
         DatabaseDescriptor.defsVersion = newVersion;
-        StorageService.instance.initReplicationStrategy(ksm.name);
     }
     
     public static void clearTableDefinition(KSMetaData ksm, UUID newVersion)
     {
         tables.remove(ksm.name);
-        StorageService.instance.clearReplicationStrategy(ksm.name);
         DatabaseDescriptor.defsVersion = newVersion;
     }
     
@@ -1008,6 +891,16 @@ public class    DatabaseDescriptor
         return conf.rpc_keepalive;
     }
 
+    public static Integer getRpcMinThreads()
+    {
+        return conf.rpc_min_threads;
+    }
+    
+    public static Integer getRpcMaxThreads()
+    {
+        return conf.rpc_max_threads;
+    }
+    
     public static Integer getRpcSendBufferSize()
     {
         return conf.rpc_send_buff_size_in_bytes;
@@ -1077,7 +970,12 @@ public class    DatabaseDescriptor
         return conf.hinted_handoff_enabled;
     }
 
-    public static AbstractType getValueValidator(String keyspace, String cf, byte[] column)
+    public static int getMaxHintWindow()
+    {
+        return conf.max_hint_window_in_ms;
+    }
+
+    public static AbstractType getValueValidator(String keyspace, String cf, ByteBuffer column)
     {
         return getCFMetaData(keyspace, cf).getValueValidator(column);
     }
@@ -1092,24 +990,27 @@ public class    DatabaseDescriptor
         return conf.index_interval;
     }
 
-    public static File getSerializedRowCachePath(String ksName, String cfName)
+    public static File getSerializedCachePath(String ksName, String cfName, ColumnFamilyStore.CacheType cacheType)
     {
-        return new File(conf.saved_caches_directory + File.separator + ksName + "-" + cfName + "-RowCache");
-    }
-
-    public static File getSerializedKeyCachePath(String ksName, String cfName)
-    {
-        return new File(conf.saved_caches_directory + File.separator + ksName + "-" + cfName + "-KeyCache");
+        return new File(conf.saved_caches_directory + File.separator + ksName + "-" + cfName + "-" + cacheType);
     }
 
     public static int getDynamicUpdateInterval()
     {
         return conf.dynamic_snitch_update_interval_in_ms;
     }
+    public static void setDynamicUpdateInterval(Integer dynamicUpdateInterval)
+    {
+        conf.dynamic_snitch_update_interval_in_ms = dynamicUpdateInterval;
+    }
 
     public static int getDynamicResetInterval()
     {
         return conf.dynamic_snitch_reset_interval_in_ms;
+    }
+    public static void setDynamicResetInterval(Integer dynamicResetInterval)
+    {
+        conf.dynamic_snitch_reset_interval_in_ms = dynamicResetInterval;
     }
 
     public static double getDynamicBadnessThreshold()
@@ -1117,12 +1018,80 @@ public class    DatabaseDescriptor
         return conf.dynamic_snitch_badness_threshold;
     }
 
-    public static int sizeMemtableThroughput() {
-        return (int) (Runtime.getRuntime().maxMemory() / (1048576 * 8));
+    public static void setDynamicBadnessThreshold(Double dynamicBadnessThreshold)
+    {
+        conf.dynamic_snitch_badness_threshold = dynamicBadnessThreshold;
     }
 
-    public static double sizeMemtableOperations(int mem_throughput) {
-        return 0.3 * mem_throughput / 64.0;
+    public static EncryptionOptions getEncryptionOptions()
+    {
+        return conf.encryption_options;
     }
 
+    public static double getFlushLargestMemtablesAt()
+    {
+        return conf.flush_largest_memtables_at;
+    }
+
+    public static double getReduceCacheSizesAt()
+    {
+        return conf.reduce_cache_sizes_at;
+    }
+
+    public static double getReduceCacheCapacityTo()
+    {
+        return conf.reduce_cache_capacity_to;
+    }
+
+    public static int getHintedHandoffThrottleDelay()
+    {
+        return conf.hinted_handoff_throttle_delay_in_ms;
+    }
+
+    public static boolean getPreheatKeyCache()
+    {
+        return conf.compaction_preheat_key_cache;
+    }
+
+    public static void validateMemtableThroughput(int sizeInMB) throws ConfigurationException
+    {
+        if (sizeInMB <= 0)
+            throw new ConfigurationException("memtable_throughput_in_mb must be greater than 0.");
+    }
+
+    public static void validateMemtableOperations(double operationsInMillions) throws ConfigurationException
+    {
+        if (operationsInMillions <= 0)
+            throw new ConfigurationException("memtable_operations_in_millions must be greater than 0.0.");
+        if (operationsInMillions > Long.MAX_VALUE / 1024 * 1024)
+            throw new ConfigurationException("memtable_operations_in_millions must be less than " + Long.MAX_VALUE / 1024 * 1024);
+    }
+
+    public static void validateMemtableFlushPeriod(int minutes) throws ConfigurationException
+    {
+        if (minutes <= 0)
+            throw new ConfigurationException("memtable_flush_after_mins must be greater than 0.");
+    }
+
+    public static boolean incrementalBackupsEnabled()
+    {
+        return conf.incremental_backups;
+    }
+
+    public static int getFlushQueueSize()
+    {
+        return conf.memtable_flush_queue_size;
+    }
+
+    public static int getTotalMemtableSpaceInMB()
+    {
+        // should only be called if estimatesRealMemtableSize() is true
+        assert conf.memtable_total_space_in_mb > 0;
+        return conf.memtable_total_space_in_mb;
+    }
+
+    public static boolean estimatesRealMemtableSize()
+    {
+        return conf.memtable_total_space_in_mb > 0;
+    }
 }

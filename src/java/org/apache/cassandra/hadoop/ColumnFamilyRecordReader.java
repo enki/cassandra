@@ -24,19 +24,17 @@ package org.apache.cassandra.hadoop;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.AbstractIterator;
 
 import org.apache.cassandra.auth.SimpleAuthenticator;
-
 import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.thrift.*;
-import org.apache.cassandra.thrift.Column;
-import org.apache.cassandra.thrift.SuperColumn;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.hadoop.conf.Configuration;
@@ -44,15 +42,14 @@ import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.thrift.TException;
-import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 
-public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byte[], IColumn>>
+public class ColumnFamilyRecordReader extends RecordReader<ByteBuffer, SortedMap<ByteBuffer, IColumn>>
 {
     private ColumnFamilySplit split;
     private RowIterator iter;
-    private Pair<byte[], SortedMap<byte[], IColumn>> currentRow;
+    private Pair<ByteBuffer, SortedMap<ByteBuffer, IColumn>> currentRow;
     private SlicePredicate predicate;
     private int totalRowCount; // total number of rows to fetch
     private int batchRowCount; // fetch this many per batch
@@ -60,6 +57,7 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
     private String keyspace;
     private TSocket socket;
     private Cassandra.Client client;
+    private ConsistencyLevel consistencyLevel;
 
     public void close() 
     {
@@ -71,12 +69,12 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
         }
     }
     
-    public byte[] getCurrentKey()
+    public ByteBuffer getCurrentKey()
     {
         return currentRow.left;
     }
 
-    public SortedMap<byte[], IColumn> getCurrentValue()
+    public SortedMap<ByteBuffer, IColumn> getCurrentValue()
     {
         return currentRow.right;
     }
@@ -95,6 +93,9 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
         totalRowCount = ConfigHelper.getInputSplitSize(conf);
         batchRowCount = ConfigHelper.getRangeBatchSize(conf);
         cfName = ConfigHelper.getInputColumnFamily(conf);
+        consistencyLevel = ConsistencyLevel.valueOf(ConfigHelper.getReadConsistencyLevel(conf));
+        
+        
         keyspace = ConfigHelper.getInputKeyspace(conf);
         
         try
@@ -172,7 +173,7 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
         return split.getLocations()[0];
     }
 
-    private class RowIterator extends AbstractIterator<Pair<byte[], SortedMap<byte[], IColumn>>>
+    private class RowIterator extends AbstractIterator<Pair<ByteBuffer, SortedMap<ByteBuffer, IColumn>>>
     {
         private List<KeySlice> rows;
         private String startToken;
@@ -241,7 +242,7 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
                 rows = client.get_range_slices(new ColumnParent(cfName),
                                                predicate,
                                                keyRange,
-                                               ConsistencyLevel.ONE);
+                                               consistencyLevel);
                   
                 // nothing new? reached the end
                 if (rows.isEmpty())
@@ -255,7 +256,7 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
                 
                 // prepare for the next slice to be read
                 KeySlice lastRow = rows.get(rows.size() - 1);
-                byte[] rowkey = lastRow.getKey();
+                ByteBuffer rowkey = lastRow.key;
                 startToken = partitioner.getTokenFactory().toString(partitioner.getToken(rowkey));
             }
             catch (Exception e)
@@ -272,8 +273,7 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
             return totalRead;
         }
 
-        @Override
-        protected Pair<byte[], SortedMap<byte[], IColumn>> computeNext()
+        protected Pair<ByteBuffer, SortedMap<ByteBuffer, IColumn>> computeNext()
         {
             maybeInit();
             if (rows == null)
@@ -281,13 +281,13 @@ public class ColumnFamilyRecordReader extends RecordReader<byte[], SortedMap<byt
             
             totalRead++;
             KeySlice ks = rows.get(i++);
-            SortedMap<byte[], IColumn> map = new TreeMap<byte[], IColumn>(comparator);
+            SortedMap<ByteBuffer, IColumn> map = new TreeMap<ByteBuffer, IColumn>(comparator);
             for (ColumnOrSuperColumn cosc : ks.columns)
             {
                 IColumn column = unthriftify(cosc);
                 map.put(column.name(), column);
             }
-            return new Pair<byte[], SortedMap<byte[], IColumn>>(ks.key, map);
+            return new Pair<ByteBuffer, SortedMap<ByteBuffer, IColumn>>(ks.key, map);
         }
 
         private IColumn unthriftify(ColumnOrSuperColumn cosc)

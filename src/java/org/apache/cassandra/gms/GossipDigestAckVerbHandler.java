@@ -21,12 +21,6 @@ package org.apache.cassandra.gms;
  */
 
 
-import org.apache.cassandra.net.IVerbHandler;
-import org.apache.cassandra.net.Message;
-import org.apache.cassandra.net.MessagingService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -35,22 +29,35 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.net.IVerbHandler;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessagingService;
+
 public class GossipDigestAckVerbHandler implements IVerbHandler
 {
     private static Logger logger_ = LoggerFactory.getLogger(GossipDigestAckVerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         InetAddress from = message.getFrom();
         if (logger_.isTraceEnabled())
             logger_.trace("Received a GossipDigestAckMessage from {}", from);
+        if (!Gossiper.instance.isEnabled())
+        {
+            if (logger_.isTraceEnabled())
+                logger_.trace("Ignoring GossipDigestAckMessage because gossip is disabled");
+            return;
+        }
 
         byte[] bytes = message.getMessageBody();
         DataInputStream dis = new DataInputStream( new ByteArrayInputStream(bytes) );
 
         try
         {
-            GossipDigestAckMessage gDigestAckMessage = GossipDigestAckMessage.serializer().deserialize(dis);
+            GossipDigestAckMessage gDigestAckMessage = GossipDigestAckMessage.serializer().deserialize(dis, message.getVersion());
             List<GossipDigest> gDigestList = gDigestAckMessage.getGossipDigestList();
             Map<InetAddress, EndpointState> epStateMap = gDigestAckMessage.getEndpointStateMap();
 
@@ -72,10 +79,10 @@ public class GossipDigestAckVerbHandler implements IVerbHandler
             }
 
             GossipDigestAck2Message gDigestAck2 = new GossipDigestAck2Message(deltaEpStateMap);
-            Message gDigestAck2Message = Gossiper.instance.makeGossipDigestAck2Message(gDigestAck2);
+            Message gDigestAck2Message = Gossiper.instance.makeGossipDigestAck2Message(gDigestAck2, message.getVersion());
             if (logger_.isTraceEnabled())
                 logger_.trace("Sending a GossipDigestAck2Message to {}", from);
-            MessagingService.instance.sendOneWay(gDigestAck2Message, from);
+            MessagingService.instance().sendOneWay(gDigestAck2Message, from);
         }
         catch ( IOException e )
         {

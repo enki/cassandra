@@ -19,31 +19,34 @@
 package org.apache.cassandra.dht;
 
  import java.io.IOException;
- import java.io.UnsupportedEncodingException;
  import java.net.InetAddress;
  import java.util.*;
- import java.util.concurrent.locks.Condition;
  import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.locks.Condition;
 
+ import com.google.common.base.Charsets;
  import com.google.common.collect.ArrayListMultimap;
  import com.google.common.collect.HashMultimap;
  import com.google.common.collect.Multimap;
+ import org.apache.cassandra.gms.Gossiper;
  import org.apache.commons.lang.ArrayUtils;
  import org.apache.commons.lang.StringUtils;
  import org.slf4j.Logger;
  import org.slf4j.LoggerFactory;
 
+ import org.apache.cassandra.config.ConfigurationException;
  import org.apache.cassandra.config.DatabaseDescriptor;
+ import org.apache.cassandra.db.Table;
  import org.apache.cassandra.gms.FailureDetector;
  import org.apache.cassandra.gms.IFailureDetector;
  import org.apache.cassandra.locator.AbstractReplicationStrategy;
- import org.apache.cassandra.config.ConfigurationException;
  import org.apache.cassandra.locator.TokenMetadata;
  import org.apache.cassandra.net.IAsyncCallback;
  import org.apache.cassandra.net.IVerbHandler;
  import org.apache.cassandra.net.Message;
  import org.apache.cassandra.net.MessagingService;
  import org.apache.cassandra.service.StorageService;
+ import org.apache.cassandra.streaming.OperationType;
  import org.apache.cassandra.streaming.StreamIn;
  import org.apache.cassandra.utils.FBUtilities;
  import org.apache.cassandra.utils.SimpleCondition;
@@ -106,8 +109,8 @@ public class BootStrapper
                     }
                 };
                 if (logger.isDebugEnabled())
-                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(ranges, ", "));
-                StreamIn.requestRanges(source, table, ranges, callback);
+                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(entry.getValue(), ", "));
+                StreamIn.requestRanges(source, table, entry.getValue(), callback, OperationType.BOOTSTRAP);
             }
         }
 
@@ -190,7 +193,7 @@ public class BootStrapper
     Multimap<Range, InetAddress> getRangesWithSources(String table)
     {
         assert tokenMetadata.sortedTokens().size() > 0;
-        final AbstractReplicationStrategy strat = StorageService.instance.getReplicationStrategy(table);
+        final AbstractReplicationStrategy strat = Table.open(table).getReplicationStrategy();
         Collection<Range> myRanges = strat.getPendingAddressRanges(tokenMetadata, token, address);
 
         Multimap<Range, InetAddress> myRangeAddresses = ArrayListMultimap.create();
@@ -213,13 +216,16 @@ public class BootStrapper
 
     static Token<?> getBootstrapTokenFrom(InetAddress maxEndpoint)
     {
-        Message message = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.BOOTSTRAP_TOKEN, ArrayUtils.EMPTY_BYTE_ARRAY);
+        Message message = new Message(FBUtilities.getLocalAddress(), 
+                                      StorageService.Verb.BOOTSTRAP_TOKEN, 
+                                      ArrayUtils.EMPTY_BYTE_ARRAY, 
+                                      Gossiper.instance.getVersion(maxEndpoint));
         BootstrapTokenCallback btc = new BootstrapTokenCallback();
-        MessagingService.instance.sendRR(message, maxEndpoint, btc);
+        MessagingService.instance().sendRR(message, maxEndpoint, btc);
         return btc.getToken();
     }
 
-    static Multimap<InetAddress, Range> getWorkMap(Multimap<Range, InetAddress> rangesWithSourceTarget)
+    public static Multimap<InetAddress, Range> getWorkMap(Multimap<Range, InetAddress> rangesWithSourceTarget)
     {
         return getWorkMap(rangesWithSourceTarget, FailureDetector.instance);
     }
@@ -249,20 +255,12 @@ public class BootStrapper
 
     public static class BootstrapTokenVerbHandler implements IVerbHandler
     {
-        public void doVerb(Message message)
+        public void doVerb(Message message, String id)
         {
             StorageService ss = StorageService.instance;
             String tokenString = StorageService.getPartitioner().getTokenFactory().toString(ss.getBootstrapToken());
-            Message response;
-            try
-            {
-                response = message.getReply(FBUtilities.getLocalAddress(), tokenString.getBytes("UTF-8"));
-            }
-            catch (UnsupportedEncodingException e)
-            {
-                throw new AssertionError();
-            }
-            MessagingService.instance.sendOneWay(response, message.getFrom());
+            Message response = message.getInternalReply(tokenString.getBytes(Charsets.UTF_8), message.getVersion());
+            MessagingService.instance().sendReply(response, id, message.getFrom());
         }
     }
 
@@ -286,15 +284,13 @@ public class BootStrapper
 
         public void response(Message msg)
         {
-            try
-            {
-                token = StorageService.getPartitioner().getTokenFactory().fromString(new String(msg.getMessageBody(), "UTF-8"));
-            }
-            catch (UnsupportedEncodingException e)
-            {
-                throw new AssertionError();
-            }
+            token = StorageService.getPartitioner().getTokenFactory().fromString(new String(msg.getMessageBody(), Charsets.UTF_8));
             condition.signalAll();
+        }
+
+        public boolean isLatencyForSnitch()
+        {
+            return false;
         }
     }
 }

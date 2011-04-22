@@ -23,11 +23,12 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.util.concurrent.ExecutionException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Handles the TRUNCATE verb
@@ -39,14 +40,14 @@ public class TruncateVerbHandler implements IVerbHandler
 {
     private static Logger logger = LoggerFactory.getLogger(TruncateVerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         byte[] bytes = message.getMessageBody();
         ByteArrayInputStream buffer = new ByteArrayInputStream(bytes);
 
         try
         {
-            Truncation t = Truncation.serializer().deserialize(new DataInputStream(buffer));
+            Truncation t = Truncation.serializer().deserialize(new DataInputStream(buffer), message.getVersion());
             logger.debug("Applying {}", t);
 
             try
@@ -75,9 +76,8 @@ public class TruncateVerbHandler implements IVerbHandler
 
             TruncateResponse response = new TruncateResponse(t.keyspace, t.columnFamily, true);
             Message responseMessage = TruncateResponse.makeTruncateResponseMessage(message, response);
-            logger.debug("{} applied.  Sending response to {}@{} ",
-                    new Object[]{t, message.getMessageId(), message.getFrom()});
-            MessagingService.instance.sendOneWay(responseMessage, message.getFrom());
+            logger.debug("{} applied.  Sending response to {}@{} ", new Object[]{ t, id, message.getFrom()});
+            MessagingService.instance().sendReply(responseMessage, id, message.getFrom());
         }
         catch (IOException e)
         {
@@ -100,6 +100,6 @@ public class TruncateVerbHandler implements IVerbHandler
     {
         TruncateResponse response = new TruncateResponse(t.keyspace, t.columnFamily, false);
         Message responseMessage = TruncateResponse.makeTruncateResponseMessage(truncateRequestMessage, response);
-        MessagingService.instance.sendOneWay(responseMessage, truncateRequestMessage.getFrom());
+        MessagingService.instance().sendOneWay(responseMessage, truncateRequestMessage.getFrom());
     }
 }

@@ -21,13 +21,16 @@ package org.apache.cassandra.auth;
  */
 
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Properties;
 import java.util.Map;
+import java.util.Properties;
 
 import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.thrift.AuthenticationException;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -43,14 +46,12 @@ public class SimpleAuthenticator implements IAuthenticator
         PLAIN, MD5,
     };
 
-    @Override
     public AuthenticatedUser defaultUser()
     {
         // users must log in
         return null;
     }
 
-    @Override
     public AuthenticatedUser authenticate(Map<? extends CharSequence,? extends CharSequence> credentials) throws AuthenticationException
     {
         String pmode_plain = System.getProperty(PMODE_PROPERTY);
@@ -92,12 +93,12 @@ public class SimpleAuthenticator implements IAuthenticator
 
         boolean authenticated = false;
 
+        InputStream in = null;
         try
         {
-            FileInputStream in = new FileInputStream(pfilename);
+            in = new BufferedInputStream(new FileInputStream(pfilename));
             Properties props = new Properties();
             props.load(in);
-            in.close();
 
             // note we keep the message here and for the wrong password exactly the same to prevent attackers from guessing what users are valid
             if (null == props.getProperty(username)) throw new AuthenticationException(authenticationErrorMessage(mode, username));
@@ -107,15 +108,11 @@ public class SimpleAuthenticator implements IAuthenticator
                     authenticated = password.equals(props.getProperty(username));
                     break;
                 case MD5:
-                    authenticated = MessageDigest.isEqual(MessageDigest.getInstance("MD5").digest(password.getBytes()), FBUtilities.hexToBytes(props.getProperty(username)));
+                    authenticated = MessageDigest.isEqual(FBUtilities.threadLocalMD5Digest().digest(password.getBytes()), FBUtilities.hexToBytes(props.getProperty(username)));
                     break;
                 default:
                     throw new RuntimeException("Unknown PasswordMode " + mode);
             }
-        }
-        catch (NoSuchAlgorithmException e)
-        {
-            throw new RuntimeException("You requested MD5 checking but the MD5 digest algorithm is not available: " + e.getMessage());
         }
         catch (IOException e)
         {
@@ -125,14 +122,17 @@ public class SimpleAuthenticator implements IAuthenticator
         {
             throw new RuntimeException("Unexpected authentication problem", e);
         }
+        finally
+        {
+            FileUtils.closeQuietly(in);
+        }
 
         if (!authenticated) throw new AuthenticationException(authenticationErrorMessage(mode, username));
 
         return new AuthenticatedUser(username);
     }
 
-    @Override
-    public void validateConfiguration() throws ConfigurationException 
+    public void validateConfiguration() throws ConfigurationException
     {
         String pfilename = System.getProperty(SimpleAuthenticator.PASSWD_FILENAME_PROPERTY);
         if (pfilename == null)

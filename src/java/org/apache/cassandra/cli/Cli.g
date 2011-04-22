@@ -36,26 +36,31 @@ tokens {
     //
     NODE_CONNECT;
     NODE_DESCRIBE_TABLE;
+    NODE_DESCRIBE_CLUSTER;
     NODE_USE_TABLE;
     NODE_EXIT;
     NODE_HELP;
     NODE_NO_OP;
     NODE_SHOW_CLUSTER_NAME;
     NODE_SHOW_VERSION;
-    NODE_SHOW_TABLES;
+    NODE_SHOW_KEYSPACES;
     NODE_THRIFT_GET;
+    NODE_THRIFT_GET_WITH_CONDITIONS;
     NODE_THRIFT_SET;
     NODE_THRIFT_COUNT;
     NODE_THRIFT_DEL;
+    NODE_THRIFT_INCR;
+    NODE_THRIFT_DECR;
     NODE_ADD_COLUMN_FAMILY;
     NODE_ADD_KEYSPACE;
     NODE_DEL_KEYSPACE;
     NODE_DEL_COLUMN_FAMILY;
-    NODE_RENAME_KEYSPACE;
     NODE_UPDATE_KEYSPACE;
-    NODE_RENAME_COLUMN_FAMILY;
     NODE_UPDATE_COLUMN_FAMILY;
     NODE_LIST;
+    NODE_TRUNCATE;
+    NODE_ASSUME;
+    NODE_CONSISTENCY_LEVEL;
 
     // Internal Nodes.
     NODE_COLUMN_ACCESS;
@@ -65,12 +70,14 @@ tokens {
     
     CONVERT_TO_TYPE;
     FUNCTION_CALL;
+    CONDITION;
+    CONDITIONS;
     ARRAY;
     HASH;
     PAIR;
 
     NODE_LIMIT;
-    NODE_KEY_RANGE_ACCESS;
+    NODE_KEY_RANGE;
 }
 
 @parser::header {
@@ -85,7 +92,22 @@ package org.apache.cassandra.cli;
 {
     public void reportError(RecognitionException e) 
     {
-        throw new RuntimeException("Syntax error at " + e.line + "-" + e.charPositionInLine + ": " + this.getErrorMessage(e, this.getTokenNames()));
+        StringBuilder errorMessage = new StringBuilder("Syntax error at position " + e.charPositionInLine + ": ");
+
+        if (e instanceof NoViableAltException)
+        {
+            int index = e.charPositionInLine;
+            String error = this.input.substring(index, index);
+            String statement = this.input.substring(0, this.input.size() - 1);
+
+            errorMessage.append("unexpected \"" + error + "\" for `" + statement + "`.");
+        }
+        else
+        {
+            errorMessage.append(this.getErrorMessage(e, this.getTokenNames()));
+        }
+
+        throw new RuntimeException(errorMessage.toString());
     }
 }
 
@@ -93,7 +115,18 @@ package org.apache.cassandra.cli;
 {
     public void reportError(RecognitionException e) 
     {
-        throw new RuntimeException("Syntax error at " + e.line + "-" + e.charPositionInLine + ": " + this.getErrorMessage(e, this.getTokenNames()));
+        String errorMessage;
+
+        if (e instanceof NoViableAltException)
+        {
+            errorMessage = "Command not found: `" + this.input + "`. Type 'help;' or '?' for help.";
+        }
+        else
+        {
+            errorMessage = "Syntax error at position " + e.charPositionInLine + ": " + this.getErrorMessage(e, this.getTokenNames());
+        }
+
+        throw new RuntimeException(errorMessage);
     }
 }
 
@@ -109,206 +142,242 @@ statement
     | exitStatement
     | countStatement
     | describeTable
+    | describeCluster
     | addKeyspace
     | addColumnFamily
     | updateKeyspace
     | updateColumnFamily
     | delColumnFamily
     | delKeyspace
-    | renameColumnFamily
-    | renameKeyspace
-    | useTable
+    | useKeyspace
     | delStatement
     | getStatement
     | helpStatement
     | setStatement
+    | incrStatement
     | showStatement
     | listStatement
+    | truncateStatement
+    | assumeStatement
+    | consistencyLevelStatement
     | -> ^(NODE_NO_OP)
     ;
 
 connectStatement
-    : K_CONNECT host SLASH port 
-        -> ^(NODE_CONNECT host port)
-    | K_CONNECT ipaddr SLASH port 
-        -> ^(NODE_CONNECT ipaddr port)
+    : CONNECT host '/' port (username password)?
+        -> ^(NODE_CONNECT host port (username password)?)
+    | CONNECT ip_address '/' port (username password)?
+        -> ^(NODE_CONNECT ip_address port (username password)?)
     ;
 
 helpStatement
-    : K_HELP K_HELP 
+    : HELP HELP 
         -> ^(NODE_HELP NODE_HELP)
-    | K_HELP K_CONNECT 
+    | HELP CONNECT 
         -> ^(NODE_HELP NODE_CONNECT)
-    | K_HELP K_USE 
+    | HELP USE 
         -> ^(NODE_HELP NODE_USE_TABLE)
-    | K_HELP K_DESCRIBE K_TABLE 
+    | HELP DESCRIBE KEYSPACE 
         -> ^(NODE_HELP NODE_DESCRIBE_TABLE)
-    | K_HELP K_EXIT 
+    | HELP DESCRIBE 'CLUSTER'
+        -> ^(NODE_HELP NODE_DESCRIBE_CLUSTER)
+    | HELP EXIT 
         -> ^(NODE_HELP NODE_EXIT)
-    | K_HELP K_QUIT 
+    | HELP QUIT 
         -> ^(NODE_HELP NODE_EXIT)
-    | K_HELP K_SHOW K_CLUSTER K_NAME 
+    | HELP SHOW 'CLUSTER NAME'
         -> ^(NODE_HELP NODE_SHOW_CLUSTER_NAME)
-    | K_HELP K_SHOW K_TABLES 
-        -> ^(NODE_HELP NODE_SHOW_TABLES)
-    | K_HELP K_SHOW K_VERSION 
+    | HELP SHOW KEYSPACES 
+        -> ^(NODE_HELP NODE_SHOW_KEYSPACES)
+    | HELP SHOW API_VERSION
         -> ^(NODE_HELP NODE_SHOW_VERSION)
-    | K_HELP K_CREATE K_TABLE 
+    | HELP CREATE KEYSPACE 
         -> ^(NODE_HELP NODE_ADD_KEYSPACE)
-    | K_HELP K_UPDATE K_TABLE
+    | HELP UPDATE KEYSPACE
         -> ^(NODE_HELP NODE_UPDATE_KEYSPACE)
-    | K_HELP K_CREATE K_COLUMN K_FAMILY 
+    | HELP CREATE COLUMN FAMILY 
         -> ^(NODE_HELP NODE_ADD_COLUMN_FAMILY)
-    | K_HELP K_UPDATE K_COLUMN K_FAMILY
+    | HELP UPDATE COLUMN FAMILY
         -> ^(NODE_HELP NODE_UPDATE_COLUMN_FAMILY)
-    | K_HELP K_DROP K_TABLE 
+    | HELP DROP KEYSPACE 
         -> ^(NODE_HELP NODE_DEL_KEYSPACE)
-    | K_HELP K_DROP K_COLUMN K_FAMILY 
+    | HELP DROP COLUMN FAMILY 
         -> ^(NODE_HELP NODE_DEL_COLUMN_FAMILY)
-    | K_HELP K_RENAME K_TABLE 
-        -> ^(NODE_HELP NODE_RENAME_KEYSPACE)
-    | K_HELP K_RENAME K_COLUMN K_FAMILY 
-        -> ^(NODE_HELP NODE_RENAME_COLUMN_FAMILY)
-    | K_HELP K_GET 
+    | HELP GET 
         -> ^(NODE_HELP NODE_THRIFT_GET)
-    | K_HELP K_SET 
+    | HELP SET 
         -> ^(NODE_HELP NODE_THRIFT_SET)
-    | K_HELP K_DEL 
+    | HELP INCR
+        -> ^(NODE_HELP NODE_THRIFT_INCR)
+    | HELP DECR
+        -> ^(NODE_HELP NODE_THRIFT_DECR)
+    | HELP DEL 
         -> ^(NODE_HELP NODE_THRIFT_DEL)
-    | K_HELP K_COUNT 
+    | HELP COUNT 
         -> ^(NODE_HELP NODE_THRIFT_COUNT)
-    | K_HELP K_LIST 
+    | HELP LIST 
         -> ^(NODE_HELP NODE_LIST)
-    | K_HELP 
+    | HELP TRUNCATE
+        -> ^(NODE_HELP NODE_TRUNCATE)
+    | HELP ASSUME
+        -> ^(NODE_HELP NODE_ASSUME)
+    | HELP CONSISTENCYLEVEL
+        -> ^(NODE_HELP NODE_CONSISTENCY_LEVEL)
+    | HELP 
         -> ^(NODE_HELP)
     | '?'    
         -> ^(NODE_HELP)
     ;
 
 exitStatement
-    : K_QUIT -> ^(NODE_EXIT)
-    | K_EXIT -> ^(NODE_EXIT)
+    : QUIT -> ^(NODE_EXIT)
+    | EXIT -> ^(NODE_EXIT)
     ;
 
 getStatement
-    : K_GET columnFamilyExpr ('AS' typeIdentifier)?
+    : GET columnFamilyExpr ('AS' typeIdentifier)?
         -> ^(NODE_THRIFT_GET columnFamilyExpr ( ^(CONVERT_TO_TYPE typeIdentifier) )? )
+    | GET columnFamily 'WHERE' getCondition ('AND' getCondition)* ('LIMIT' limit=IntegerPositiveLiteral)*
+        -> ^(NODE_THRIFT_GET_WITH_CONDITIONS columnFamily ^(CONDITIONS getCondition+) ^(NODE_LIMIT $limit)*) 
+    ;
+
+getCondition
+    : columnOrSuperColumn operator value
+        -> ^(CONDITION operator columnOrSuperColumn value)
+    ;
+
+operator
+    : '=' | '>' | '<' | '>=' | '<='
     ;
 
 typeIdentifier
-    : Identifier | StringLiteral | IntegerLiteral 
+    : Identifier | StringLiteral | IntegerPositiveLiteral 
     ;
 
 setStatement
-    : K_SET columnFamilyExpr '=' value 
-        -> ^(NODE_THRIFT_SET columnFamilyExpr value)
+    : SET columnFamilyExpr '=' objectValue=value (WITH TTL '=' ttlValue=IntegerPositiveLiteral)?
+        -> ^(NODE_THRIFT_SET columnFamilyExpr $objectValue ( $ttlValue )?)
+    ;
+
+incrStatement
+    : INCR columnFamilyExpr (BY byValue=incrementValue)?
+        -> ^(NODE_THRIFT_INCR columnFamilyExpr ( $byValue )?)
+    | DECR columnFamilyExpr (BY byValue=incrementValue)?
+        -> ^(NODE_THRIFT_DECR columnFamilyExpr ( $byValue )?)
     ;
 
 countStatement
-    : K_COUNT columnFamilyExpr 
+    : COUNT columnFamilyExpr 
         -> ^(NODE_THRIFT_COUNT columnFamilyExpr)
     ;
 
 delStatement
-    : K_DEL columnFamilyExpr 
+    : DEL columnFamilyExpr 
         -> ^(NODE_THRIFT_DEL columnFamilyExpr)
     ;
 
 showStatement
     : showClusterName
     | showVersion
-    | showTables
+    | showKeyspaces
     ;
 
 listStatement
-    : K_LIST keyRangeExpr limitClause?
-        -> ^(NODE_LIST keyRangeExpr limitClause?)
+    : LIST columnFamily keyRangeExpr? ('LIMIT' limit=IntegerPositiveLiteral)?
+        -> ^(NODE_LIST columnFamily keyRangeExpr? ^(NODE_LIMIT $limit)?)
     ;
 
-limitClause
-    : K_LIMIT^ IntegerLiteral
+truncateStatement
+    : TRUNCATE columnFamily
+        -> ^(NODE_TRUNCATE columnFamily)
+    ;
+
+assumeStatement
+    : ASSUME columnFamily assumptionElement=Identifier 'AS' defaultType=Identifier
+        -> ^(NODE_ASSUME columnFamily $assumptionElement $defaultType)
+    ;
+
+consistencyLevelStatement
+    : CONSISTENCYLEVEL 'AS' defaultType=Identifier
+        -> ^(NODE_CONSISTENCY_LEVEL $defaultType)
     ;
 
 showClusterName
-    : K_SHOW K_CLUSTER K_NAME 
+    : SHOW 'CLUSTER NAME'
         -> ^(NODE_SHOW_CLUSTER_NAME)
     ;
 
 addKeyspace
-    : K_CREATE K_TABLE keyValuePairExpr 
+    : CREATE KEYSPACE keyValuePairExpr 
         -> ^(NODE_ADD_KEYSPACE keyValuePairExpr)
     ;
 
 addColumnFamily
-    : K_CREATE K_COLUMN K_FAMILY keyValuePairExpr 
+    : CREATE COLUMN FAMILY keyValuePairExpr 
         -> ^(NODE_ADD_COLUMN_FAMILY keyValuePairExpr)
     ;
 
 updateKeyspace
-    : K_UPDATE K_TABLE keyValuePairExpr
+    : UPDATE KEYSPACE keyValuePairExpr
         -> ^(NODE_UPDATE_KEYSPACE keyValuePairExpr)
     ;
 
 updateColumnFamily
-    : K_UPDATE K_COLUMN K_FAMILY keyValuePairExpr
+    : UPDATE COLUMN FAMILY keyValuePairExpr
         -> ^(NODE_UPDATE_COLUMN_FAMILY keyValuePairExpr)
     ;
 
 delKeyspace
-    : K_DROP K_TABLE keyspace 
+    : DROP KEYSPACE keyspace 
         -> ^(NODE_DEL_KEYSPACE keyspace)
     ;
 
 delColumnFamily
-    : K_DROP K_COLUMN K_FAMILY columnFamily 
+    : DROP COLUMN FAMILY columnFamily 
         -> ^(NODE_DEL_COLUMN_FAMILY columnFamily)
     ;
 
-renameKeyspace
-    : K_RENAME K_TABLE keyspace keyspaceNewName 
-        -> ^(NODE_RENAME_KEYSPACE keyspace keyspaceNewName)
-    ;
-
-renameColumnFamily
-    : K_RENAME K_COLUMN K_FAMILY columnFamily newColumnFamily 
-        -> ^(NODE_RENAME_COLUMN_FAMILY columnFamily newColumnFamily)
-    ;
-
-
 showVersion
-    : K_SHOW K_VERSION 
+    : SHOW API_VERSION
         -> ^(NODE_SHOW_VERSION)
     ;
 
-showTables
-    : K_SHOW K_TABLES 
-        -> ^(NODE_SHOW_TABLES)
+showKeyspaces
+    : SHOW KEYSPACES 
+        -> ^(NODE_SHOW_KEYSPACES)
     ;
 
 describeTable
-    : K_DESCRIBE K_TABLE table 
-        -> ^(NODE_DESCRIBE_TABLE table)
+    : DESCRIBE KEYSPACE (keyspace)?
+        -> ^(NODE_DESCRIBE_TABLE (keyspace)?)
     ;
     
-useTable
-    : K_USE table ( username )? ( password )? 
-        -> ^(NODE_USE_TABLE table ( username )? ( password )?)
+describeCluster
+    : DESCRIBE 'CLUSTER'
+        -> ^(NODE_DESCRIBE_CLUSTER)
+    ;
+
+useKeyspace
+    : USE keyspace ( username )? ( password )? 
+        -> ^(NODE_USE_TABLE keyspace ( username )? ( password )?)
     ;
 
 
 keyValuePairExpr
-    : objectName ( (K_AND | K_WITH) keyValuePair )* 
+    : objectName ( (AND | WITH) keyValuePair )* 
         -> ^(NODE_NEW_KEYSPACE_ACCESS objectName ( keyValuePair )* )
     ;
             
 keyValuePair 
-    : attr_name '=' attrValue -> attr_name attrValue
+    : attr_name '=' attrValue 
+    	-> attr_name attrValue
     ;
 
 attrValue
     : arrayConstruct
     | attrValueString
     | attrValueInt
+    | attrValueDouble
     ;
 
 
@@ -327,77 +396,129 @@ hashElementPair
         -> ^(PAIR rowKey value)
     ;
 
-
-
 columnFamilyExpr
     : columnFamily '[' rowKey ']' 
-        ( '[' a+=columnOrSuperColumn ']' 
-            ('[' a+=columnOrSuperColumn ']')? 
+        ( '[' column=columnOrSuperColumn ']' 
+            ('[' super_column=columnOrSuperColumn ']')? 
         )?
-      -> ^(NODE_COLUMN_ACCESS columnFamily rowKey ($a+)?)
+      -> ^(NODE_COLUMN_ACCESS columnFamily rowKey ($column ($super_column)? )?)
     ;
 
 keyRangeExpr
-    :    columnFamily '[' startKey ':' endKey ']' ('[' columnOrSuperColumn ']')?
-      -> ^(NODE_KEY_RANGE_ACCESS columnFamily startKey endKey columnOrSuperColumn?)
+    :    '[' ( startKey? ':' endKey? )? ']'
+      -> ^(NODE_KEY_RANGE startKey? endKey?)
     ;
 
-table: Identifier;
+columnName
+	: Identifier
+	;
 
-columnName: Identifier;
+attr_name
+	: Identifier
+	;
 
-attr_name: Identifier;
-
-attrValueString: (Identifier | StringLiteral);
+attrValueString
+	: (Identifier | StringLiteral)
+	;
       
-attrValueInt: IntegerLiteral;
+attrValueInt
+	: IntegerPositiveLiteral
+  | IntegerNegativeLiteral
+	;
+
+attrValueDouble
+	: DoubleLiteral
+	;
   
-objectName: Identifier;
+objectName
+	: Identifier
+	;
 
-keyspace: Identifier;
+keyspace
+	: Identifier
+	;
 
-replica_placement_strategy: StringLiteral;
+replica_placement_strategy
+	: StringLiteral
+	;
 
-replication_factor: IntegerLiteral;
+keyspaceNewName
+	: Identifier
+	;
 
-keyspaceNewName: Identifier;
-
-comparator: StringLiteral;
+comparator
+	: StringLiteral
+	;
       
-command: Identifier;
+command	: Identifier
+	;
 
-newColumnFamily: Identifier;
+newColumnFamily
+	: Identifier
+	;
 
-username: Identifier;
+username: Identifier
+	;
 
-password: StringLiteral;
+password: StringLiteral
+	;
 
-columnFamily: Identifier;
+columnFamily
+	: Identifier
+	;
 
-rowKey:   (Identifier | StringLiteral);
+rowKey	
+    :  (Identifier | StringLiteral | IntegerPositiveLiteral | IntegerNegativeLiteral | functionCall)
+	;
 
-value: (Identifier | IntegerLiteral | StringLiteral | functionCall );
+value	
+    : (Identifier | IntegerPositiveLiteral | IntegerNegativeLiteral | StringLiteral | functionCall)
+	;
 
 functionCall 
-    : functionName=Identifier '(' functionArgument ')'
-        -> ^(FUNCTION_CALL $functionName functionArgument)
+    : functionName=Identifier '(' functionArgument? ')'
+        -> ^(FUNCTION_CALL $functionName functionArgument?)
     ;
 
 functionArgument 
-    : Identifier | StringLiteral | IntegerLiteral
+    : Identifier | StringLiteral | IntegerPositiveLiteral | IntegerNegativeLiteral
     ;
 
-startKey: (Identifier | StringLiteral);
+startKey
+    : (Identifier | StringLiteral)
+	;
 
-endKey: (Identifier | StringLiteral);
+endKey	
+    : (Identifier | StringLiteral)
+	;
 
-columnOrSuperColumn: (Identifier | IntegerLiteral | StringLiteral);
+columnOrSuperColumn
+	: (Identifier | IntegerPositiveLiteral | IntegerNegativeLiteral | StringLiteral | functionCall)
+	;
 
-host: id+=Identifier (id+=DOT id+=Identifier)* -> ^(NODE_ID_LIST $id+);
+host	
+    : host_name
+        -> ^(NODE_ID_LIST host_name)
+	;
 
-ipaddr: id+=IntegerLiteral id+=DOT id+=IntegerLiteral id+=DOT id+=IntegerLiteral id+=DOT id+=IntegerLiteral -> ^(NODE_ID_LIST $id+);
+host_name
+	: Identifier ('.' Identifier)*
+	;
+	
+ip_address
+	: IP_ADDRESS 
+	    -> ^(NODE_ID_LIST IP_ADDRESS)
+	;
 
-port: IntegerLiteral;
+
+port	
+    : IntegerPositiveLiteral
+	;
+
+incrementValue
+    : IntegerPositiveLiteral
+    | IntegerNegativeLiteral
+    ;
 
 //
 // Lexer Section
@@ -409,34 +530,42 @@ port: IntegerLiteral;
 // CLI is case-insensitive with respect to these keywords.
 // However, they MUST be listed in upper case here.
 // 
-K_CONFIG:     'CONFIG';
-K_CONNECT:    'CONNECT';
-K_COUNT:      'COUNT';
-K_CLUSTER:    'CLUSTER';
-K_DEL:        'DEL';
-K_DESCRIBE:   'DESCRIBE';
-K_USE:        'USE';
-K_GET:        'GET';
-K_HELP:       'HELP';
-K_EXIT:       'EXIT';
-K_FILE:       'FILE';
-K_NAME:       'NAME';
-K_QUIT:       'QUIT';
-K_SET:        'SET';
-K_SHOW:       'SHOW';
-K_TABLE:      'KEYSPACE';
-K_TABLES:     'KEYSPACES';
-K_VERSION:    'API VERSION';
-K_CREATE:     'CREATE';
-K_DROP:       'DROP';
-K_RENAME:     'RENAME';
-K_COLUMN:     'COLUMN';
-K_FAMILY:     'FAMILY';
-K_WITH:       'WITH';
-K_AND:        'AND';
-K_UPDATE:     'UPDATE';
-K_LIST:       'LIST';
-K_LIMIT:      'LIMIT';
+CONFIG:      'CONFIG';
+CONNECT:     'CONNECT';
+COUNT:       'COUNT';
+DEL:         'DEL';
+DESCRIBE:    'DESCRIBE';
+USE:         'USE';
+GET:         'GET';
+HELP:        'HELP';
+EXIT:        'EXIT';
+FILE:        'FILE';
+QUIT:        'QUIT';
+SET:         'SET';
+INCR:        'INCR';
+DECR:        'DECR';
+SHOW:        'SHOW';
+KEYSPACE:    'KEYSPACE';
+KEYSPACES:   'KEYSPACES';
+API_VERSION: 'API VERSION';
+CREATE:      'CREATE';
+DROP:        'DROP';
+COLUMN:      'COLUMN';
+FAMILY:      'FAMILY';
+WITH:        'WITH';
+BY:          'BY';
+AND:         'AND';
+UPDATE:      'UPDATE';
+LIST:        'LIST';
+LIMIT:       'LIMIT';
+TRUNCATE:    'TRUNCATE';
+ASSUME:      'ASSUME';
+TTL:         'TTL';
+CONSISTENCYLEVEL:   'CONSISTENCYLEVEL';
+
+IP_ADDRESS 
+    : IntegerPositiveLiteral '.' IntegerPositiveLiteral '.' IntegerPositiveLiteral '.' IntegerPositiveLiteral
+    ;
 
 // private syntactic rules
 fragment
@@ -457,9 +586,16 @@ Alnum
     ;
 
 // syntactic Elements
-IntegerLiteral
+IntegerPositiveLiteral
    : Digit+
    ;
+
+IntegerNegativeLiteral
+   : '-' Digit+
+   ;
+   
+DoubleLiteral
+   : Digit+ '.' Digit+;
 
 Identifier
     : (Letter | Alnum) (Alnum | '_' | '-' )*
@@ -474,14 +610,6 @@ StringLiteral
 //
 // syntactic elements
 //
-
-DOT
-    : '.'
-    ;
-	
-SLASH
-    : '/'
-    ;
 
 SEMICOLON
     : ';'

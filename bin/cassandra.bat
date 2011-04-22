@@ -18,34 +18,32 @@
 if "%OS%" == "Windows_NT" setlocal
 
 if NOT DEFINED CASSANDRA_HOME set CASSANDRA_HOME=%~dp0..
-if NOT DEFINED CASSANDRA_CONF set CASSANDRA_CONF=%CASSANDRA_HOME%\conf
 if NOT DEFINED CASSANDRA_MAIN set CASSANDRA_MAIN=org.apache.cassandra.thrift.CassandraDaemon
 if NOT DEFINED JAVA_HOME goto err
 
 REM ***** JAVA options *****
 set JAVA_OPTS=^
  -ea^
- -Xdebug^
- -Xrunjdwp:transport=dt_socket,server=y,address=8888,suspend=n^
- -Xms128m^
+ -Xms1G^
  -Xmx1G^
- -XX:TargetSurvivorRatio=90^
- -XX:+AggressiveOpts^
+ -XX:+HeapDumpOnOutOfMemoryError^
  -XX:+UseParNewGC^
  -XX:+UseConcMarkSweepGC^
  -XX:+CMSParallelRemarkEnabled^
- -XX:+HeapDumpOnOutOfMemoryError^
- -XX:SurvivorRatio=128^
- -XX:MaxTenuringThreshold=0^
- -Dcom.sun.management.jmxremote.port=8080^
+ -XX:SurvivorRatio=8^
+ -XX:MaxTenuringThreshold=1^
+ -XX:CMSInitiatingOccupancyFraction=75^
+ -XX:+UseCMSInitiatingOccupancyOnly^
+ -Dcom.sun.management.jmxremote.port=7199^
  -Dcom.sun.management.jmxremote.ssl=false^
  -Dcom.sun.management.jmxremote.authenticate=false^
- -Dlog4j.configuration=log4j-server.properties
+ -Dlog4j.configuration=log4j-server.properties^
+ -Dlog4j.defaultInitOverride=true
 
 REM ***** CLASSPATH library setting *****
 
 REM Ensure that any user defined CLASSPATH variables are not used on startup
-set CLASSPATH=%CASSANDRA_HOME%\conf
+set CLASSPATH="%CASSANDRA_HOME%\conf"
 
 REM For each jar in the CASSANDRA_HOME lib directory call append to build the CLASSPATH variable.
 for %%i in ("%CASSANDRA_HOME%\lib\*.jar") do call :append "%%i"
@@ -56,8 +54,8 @@ set CLASSPATH=%CLASSPATH%;%1
 goto :eof
 
 :okClasspath
-REM Include the build\classes directory so it works in development
-set CASSANDRA_CLASSPATH=%CLASSPATH%;"%CASSANDRA_HOME%\build\classes"
+REM Include the build\classes\main directory so it works in development
+set CASSANDRA_CLASSPATH=%CLASSPATH%;"%CASSANDRA_HOME%\build\classes\main";"%CASSANDRA_HOME%\build\classes\thrift"
 set CASSANDRA_PARAMS=-Dcassandra -Dcassandra-foreground=yes
 goto runDaemon
 

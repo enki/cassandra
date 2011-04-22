@@ -28,25 +28,47 @@ public class MessageDeliveryTask implements Runnable
 {
     private static final Logger logger_ = LoggerFactory.getLogger(MessageDeliveryTask.class);    
 
-    private Message message_;
-    private final long constructionTime_ = System.currentTimeMillis();
+    private Message message;
+    private final long constructionTime = System.currentTimeMillis();
+    private final String id;
 
-    public MessageDeliveryTask(Message message)
+    public MessageDeliveryTask(Message message, String id)
     {
-        message_ = message;    
+        assert message != null;
+        this.message = message;
+        this.id = id;
     }
     
     public void run()
     { 
-        if (System.currentTimeMillis() >  constructionTime_ + DatabaseDescriptor.getRpcTimeout())
+        StorageService.Verb verb = message.getVerb();
+        switch (verb)
         {
-            MessagingService.incrementDroppedMessages();
-            return;
+            case BINARY:
+            case MUTATION:
+            case READ:
+            case RANGE_SLICE:
+            case READ_REPAIR:
+            case REQUEST_RESPONSE:
+                if (System.currentTimeMillis() > constructionTime + DatabaseDescriptor.getRpcTimeout())
+                {
+                    MessagingService.instance().incrementDroppedMessages(verb);
+                    return;
+                }
+                break;
+            
+            // don't bother.
+            case UNUSED_1:
+            case UNUSED_2:
+            case UNUSED_3:
+                return;
+            
+            default:
+                break;
         }
 
-        StorageService.Verb verb = message_.getVerb();
-        IVerbHandler verbHandler = MessagingService.instance.getVerbHandler(verb);
+        IVerbHandler verbHandler = MessagingService.instance().getVerbHandler(verb);
         assert verbHandler != null : "unknown verb " + verb;
-        verbHandler.doVerb(message_);
+        verbHandler.doVerb(message, id);
     }
 }

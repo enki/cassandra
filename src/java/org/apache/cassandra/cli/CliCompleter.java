@@ -36,6 +36,7 @@ public class CliCompleter extends SimpleCompletor
             "drop column family",
             "rename keyspace",
             "rename column family",
+            "consistencylevel",
             
             "help connect",
             "help describe keyspace",
@@ -55,12 +56,19 @@ public class CliCompleter extends SimpleCompletor
             "help set",
             "help del",
             "help count",
+            "help list",
+            "help truncate",
+            "help consistencylevel"
     };
     private static String[] keyspaceCommands = {
             "get",
             "set",
             "count",
-            "del"
+            "del",
+            "list",
+            "truncate",
+            "incr",
+            "decr"
     };
 
     public CliCompleter()

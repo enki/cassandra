@@ -28,10 +28,11 @@ import java.io.IOException;
 
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessageProducer;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
-class StreamReply
+class StreamReply implements MessageProducer
 {
     static enum Status
     {
@@ -53,12 +54,12 @@ class StreamReply
         this.sessionId = sessionId;
     }
 
-    public Message createMessage() throws IOException
+    public Message getMessage(Integer version) throws IOException
     {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream( bos );
-        serializer.serialize(this, dos);
-        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.STREAM_REPLY, bos.toByteArray());
+        serializer.serialize(this, dos, version);
+        return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.STREAM_REPLY, bos.toByteArray(), version);
     }
 
     @Override
@@ -73,14 +74,14 @@ class StreamReply
 
     private static class FileStatusSerializer implements ICompactSerializer<StreamReply>
     {
-        public void serialize(StreamReply reply, DataOutputStream dos) throws IOException
+        public void serialize(StreamReply reply, DataOutputStream dos, int version) throws IOException
         {
             dos.writeLong(reply.sessionId);
             dos.writeUTF(reply.file);
             dos.writeInt(reply.action.ordinal());
         }
 
-        public StreamReply deserialize(DataInputStream dis) throws IOException
+        public StreamReply deserialize(DataInputStream dis, int version) throws IOException
         {
             long sessionId = dis.readLong();
             String targetFile = dis.readUTF();

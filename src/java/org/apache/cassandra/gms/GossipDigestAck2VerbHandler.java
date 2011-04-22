@@ -21,22 +21,23 @@ package org.apache.cassandra.gms;
  */
 
 
-import org.apache.cassandra.net.IVerbHandler;
-import org.apache.cassandra.net.Message;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.net.IVerbHandler;
+import org.apache.cassandra.net.Message;
+
 public class GossipDigestAck2VerbHandler implements IVerbHandler
 {
     private static Logger logger_ = LoggerFactory.getLogger(GossipDigestAck2VerbHandler.class);
 
-    public void doVerb(Message message)
+    public void doVerb(Message message, String id)
     {
         InetAddress from = message.getFrom();
         if (logger_.isTraceEnabled())
@@ -47,7 +48,7 @@ public class GossipDigestAck2VerbHandler implements IVerbHandler
         GossipDigestAck2Message gDigestAck2Message;
         try
         {
-            gDigestAck2Message = GossipDigestAck2Message.serializer().deserialize(dis);
+            gDigestAck2Message = GossipDigestAck2Message.serializer().deserialize(dis, message.getVersion());
         }
         catch (IOException e)
         {

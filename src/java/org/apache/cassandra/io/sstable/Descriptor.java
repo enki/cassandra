@@ -38,7 +38,7 @@ import org.apache.cassandra.utils.Pair;
 public class Descriptor
 {
     public static final String LEGACY_VERSION = "a";
-    public static final String CURRENT_VERSION = "e";
+    public static final String CURRENT_VERSION = "f";
 
     public final File directory;
     public final String version;
@@ -52,6 +52,7 @@ public class Descriptor
     public final boolean hasIntRowSize;
     public final boolean hasEncodedKeys;
     public final boolean isLatestVersion;
+    public final boolean usesOldBloomFilter;
 
     /**
      * A descriptor that assumes CURRENT_VERSION.
@@ -75,6 +76,7 @@ public class Descriptor
         hasStringsInBloomFilter = version.compareTo("c") < 0;
         hasIntRowSize = version.compareTo("d") < 0;
         hasEncodedKeys = version.compareTo("e") < 0;
+        usesOldBloomFilter = version.compareTo("f") < 0;
         isLatestVersion = version.compareTo(CURRENT_VERSION) == 0;
     }
 
@@ -82,12 +84,8 @@ public class Descriptor
     {
         return filenameFor(component.name());
     }
-
-    /**
-     * @param suffix A component suffix, such as 'Data.db'/'Index.db'/etc
-     * @return A filename for this descriptor with the given suffix.
-     */
-    public String filenameFor(String suffix)
+    
+    private String baseFilename()
     {
         StringBuilder buff = new StringBuilder();
         buff.append(directory).append(File.separatorChar);
@@ -96,9 +94,17 @@ public class Descriptor
             buff.append(SSTable.TEMPFILE_MARKER).append("-");
         if (!LEGACY_VERSION.equals(version))
             buff.append(version).append("-");
-        buff.append(generation).append("-");
-        buff.append(suffix);
+        buff.append(generation);
         return buff.toString();
+    }
+
+    /**
+     * @param suffix A component suffix, such as 'Data.db'/'Index.db'/etc
+     * @return A filename for this descriptor with the given suffix.
+     */
+    public String filenameFor(String suffix)
+    {
+        return baseFilename() + "-" + suffix;
     }
 
     /**
@@ -117,7 +123,7 @@ public class Descriptor
      * Filename of the form "<ksname>/<cfname>-[tmp-][<version>-]<gen>-<component>"
      * @return A Descriptor for the SSTable, and the Component remainder.
      */
-    static Pair<Descriptor,String> fromFilename(File directory, String name)
+    public static Pair<Descriptor,String> fromFilename(File directory, String name)
     {
         // name of parent directory is keyspace name
         String ksname = directory.getName();
@@ -174,10 +180,15 @@ public class Descriptor
         return true;
     }
 
+    public boolean isFromTheFuture()
+    {
+        return version.compareTo(CURRENT_VERSION) > 0;
+    }
+
     @Override
     public String toString()
     {
-        return this.filenameFor("<>");
+        return baseFilename();
     }
 
     @Override

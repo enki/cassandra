@@ -20,8 +20,12 @@
 package org.apache.cassandra.locator;
 
 import java.net.InetAddress;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 
+import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.dht.Token;
 
 /**
@@ -98,5 +102,27 @@ public class OldNetworkTopologyStrategy extends AbstractReplicationStrategy
         }
 
         return endpoints;
+    }
+
+    public int getReplicationFactor()
+    {
+        return Integer.parseInt(this.configOptions.get("replication_factor"));
+    }
+
+    public void validateOptions() throws ConfigurationException
+    {
+        if (this.configOptions == null)
+        {
+            throw new ConfigurationException("OldNetworkTopologyStrategy requires a replication_factor strategy option.");
+        }
+        if (this.configOptions.get("replication_factor") == null)
+        {
+            throw new ConfigurationException("OldNetworkTopologyStrategy requires a replication_factor strategy option.");
+        }
+        int rf = Integer.parseInt(this.configOptions.get("replication_factor"));
+        if (rf < 0)
+        {
+            throw new ConfigurationException("Replication factor for OldNetworkTopologyStrategy must be non-negative, "+rf+" given.");
+        }
     }
 }

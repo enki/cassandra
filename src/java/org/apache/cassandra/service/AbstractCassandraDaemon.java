@@ -21,27 +21,31 @@ package org.apache.cassandra.service;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.UUID;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.log4j.PropertyConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CompactionManager;
 import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.migration.Migration;
+import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Mx4jTool;
-import org.mortbay.thread.ThreadPool;
 
 /**
  * The <code>CassandraDaemon</code> is an abstraction for a Cassandra daemon
@@ -52,14 +56,33 @@ import org.mortbay.thread.ThreadPool;
  */
 public abstract class AbstractCassandraDaemon implements CassandraDaemon
 {
-    private static Logger logger = LoggerFactory
-            .getLogger(AbstractCassandraDaemon.class);
+    //Initialize logging in such a way that it checks for config changes every 10 seconds.
+    static
+    {
+        String config = System.getProperty("log4j.configuration", "log4j-server.properties");
+        URL configLocation = null;
+        try 
+        {
+            // try loading from a physical location first.
+            configLocation = new URL(config);
+        }
+        catch (MalformedURLException ex) 
+        {
+            // load from the classpath.
+            configLocation = AbstractCassandraDaemon.class.getClassLoader().getResource(config);
+            if (configLocation == null)
+                throw new RuntimeException("Couldn't figure out log4j configuration.");
+        }
+        PropertyConfigurator.configureAndWatch(configLocation.getFile(), 10000);
+        org.apache.log4j.Logger.getLogger(AbstractCassandraDaemon.class).info("Logging initialized");
+    }
+
+    private static Logger logger = LoggerFactory.getLogger(AbstractCassandraDaemon.class);
     
     protected InetAddress listenAddr;
     protected int listenPort;
+    protected volatile boolean isRunning = false;
     
-    public static final int MIN_WORKER_THREADS = 64;
-
     /**
      * This is a hook for concrete daemons to initialize themselves suitably.
      *
@@ -69,7 +92,8 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
      */
     protected void setup() throws IOException
     {
-    	FBUtilities.tryMlockall();
+        logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
+    	CLibrary.tryMlockall();
 
         listenPort = DatabaseDescriptor.getRpcPort();
         listenAddr = DatabaseDescriptor.getRpcAddress();
@@ -136,6 +160,15 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
             Table.open(table);
         }
 
+        try
+        {
+            GCInspector.instance.start();
+        }
+        catch (Throwable t)
+        {
+            logger.warn("Unable to start GCInspector (currently only supported on the Sun JVM)");
+        }
+
         // replay the log if necessary and check for compaction candidates
         CommitLog.recover();
         CompactionManager.instance.checkAllColumnFamilies();
@@ -153,14 +186,15 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
         SystemTable.purgeIncompatibleHints();
 
         // start server internals
+        StorageService.instance.registerDaemon(this);
         try
         {
             StorageService.instance.initServer();
         }
         catch (ConfigurationException e)
         {
-            logger.error("Fatal error: " + e.getMessage());
-            System.err.println("Bad configuration; unable to start server");
+            logger.error("Fatal configuration error", e);
+            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
             System.exit(1);
         }
 
@@ -183,17 +217,83 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
     
     /**
      * Start the Cassandra Daemon, assuming that it has already been
-     * initialized, via either {@link #init(String[])} or
-     * {@link #load(String[])}.
-     * 
+     * initialized via {@link #init(String[])}
+     *
+     * Hook for JSVC
+     *
      * @throws IOException
      */
-    public abstract void start() throws IOException;
+    public void start()
+    {
+        if (Boolean.parseBoolean(System.getProperty("cassandra.start_rpc", "true")))
+        {
+            startRPCServer();
+        }
+        else
+        {
+            logger.info("Not starting RPC server as requested. Use JMX (StorageService->startRPCServer()) to start it");
+        }
+    }
     
     /**
      * Stop the daemon, ideally in an idempotent manner.
+     *
+     * Hook for JSVC
      */
-    public abstract void stop();
+    public void stop()
+    {
+        // this doesn't entirely shut down Cassandra, just the RPC server.
+        // jsvc takes care of taking the rest down
+        logger.info("Cassandra shutting down...");
+        stopRPCServer();
+    }
+
+    /**
+     * Start the underlying RPC server in idempotent manner.
+     */
+    public void startRPCServer()
+    {
+        if (!isRunning)
+        {
+            startServer();
+            isRunning = true;
+        }
+    }
+
+    /**
+     * Stop the underlying RPC server in idempotent manner.
+     */
+    public void stopRPCServer()
+    {
+        if (isRunning)
+        {
+            stopServer();
+            isRunning = false;
+        }
+    }
+
+    /**
+     * Returns whether the underlying RPC server is running or not.
+     */
+    public boolean isRPCServerRunning()
+    {
+        return isRunning;
+    }
+
+    /**
+     * Start the underlying RPC server.
+     * This method shoud be able to restart a server stopped through stopServer().
+     * Should throw a RuntimeException if the server cannot be started
+     */
+    protected abstract void startServer();
+
+    /**
+     * Stop the underlying RPC server.
+     * This method should be able to stop server started through startServer().
+     * Should throw a RuntimeException if the server cannot be stopped
+     */
+    protected abstract void stopServer();
+
     
     /**
      * Clean up all resources obtained during the lifetime of the daemon. This
@@ -251,7 +351,7 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
      * A subclass of Java's ThreadPoolExecutor which implements Jetty's ThreadPool
      * interface (for integration with Avro), and performs ClientState cleanup.
      */
-    public static class CleaningThreadPool extends ThreadPoolExecutor implements ThreadPool
+    public static class CleaningThreadPool extends ThreadPoolExecutor 
     {
         private ThreadLocal<ClientState> state;
         public CleaningThreadPool(ThreadLocal<ClientState> state, int minWorkerThread, int maxWorkerThreads)
@@ -264,45 +364,10 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
         protected void afterExecute(Runnable r, Throwable t)
         {
             super.afterExecute(r, t);
+            DebuggableThreadPoolExecutor.logExceptionsAfterExecute(r, t);
             state.get().logout();
         }
 
-        /*********************************************************************/
-        /**   The following are cribbed from org.mortbay.thread.concurrent   */
-        /*********************************************************************/
 
-        public boolean dispatch(Runnable job)
-        {
-            try
-            {       
-                execute(job);
-                return true;
-            }
-            catch(RejectedExecutionException e)
-            {
-                logger.error("Failed to dispatch thread:", e);
-                return false;
-            }
-        }
-
-        public int getIdleThreads()
-        {
-            return getPoolSize()-getActiveCount();
-        }
-
-        public int getThreads()
-        {
-            return getPoolSize();
-        }
-
-        public boolean isLowOnThreads()
-        {
-            return getActiveCount()>=getMaximumPoolSize();
-        }
-
-        public void join() throws InterruptedException
-        {
-            this.awaitTermination(Long.MAX_VALUE,TimeUnit.MILLISECONDS);
-        }
     }
 }

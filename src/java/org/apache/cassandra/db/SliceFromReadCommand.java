@@ -20,26 +20,26 @@ package org.apache.cassandra.db;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.List;
+import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.ColumnParent;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class SliceFromReadCommand extends ReadCommand
 {
-    public final byte[] start, finish;
+    public final ByteBuffer start, finish;
     public final boolean reversed;
     public final int count;
 
-    public SliceFromReadCommand(String table, byte[] key, ColumnParent column_parent, byte[] start, byte[] finish, boolean reversed, int count)
+    public SliceFromReadCommand(String table, ByteBuffer key, ColumnParent column_parent, ByteBuffer start, ByteBuffer finish, boolean reversed, int count)
     {
         this(table, key, new QueryPath(column_parent), start, finish, reversed, count);
     }
 
-    public SliceFromReadCommand(String table, byte[] key, QueryPath path, byte[] start, byte[] finish, boolean reversed, int count)
+    public SliceFromReadCommand(String table, ByteBuffer key, QueryPath path, ByteBuffer start, ByteBuffer finish, boolean reversed, int count)
     {
         super(table, key, path, CMD_TYPE_GET_SLICE);
         this.start = start;
@@ -48,7 +48,6 @@ public class SliceFromReadCommand extends ReadCommand
         this.count = count;
     }
 
-    @Override
     public ReadCommand copy()
     {
         ReadCommand readCommand = new SliceFromReadCommand(table, key, queryPath, start, finish, reversed, count);
@@ -56,10 +55,9 @@ public class SliceFromReadCommand extends ReadCommand
         return readCommand;
     }
 
-    @Override
     public Row getRow(Table table) throws IOException
     {
-        DecoratedKey dk = StorageService.getPartitioner().decorateKey(key);
+        DecoratedKey<?> dk = StorageService.getPartitioner().decorateKey(key);
         return table.getRow(QueryFilter.getSliceFilter(dk, queryPath, start, finish, reversed, count));
     }
 
@@ -68,7 +66,7 @@ public class SliceFromReadCommand extends ReadCommand
     {
         return "SliceFromReadCommand(" +
                "table='" + table + '\'' +
-               ", key='" + FBUtilities.bytesToHex(key) + '\'' +
+               ", key='" + ByteBufferUtil.bytesToHex(key) + '\'' +
                ", column_parent='" + queryPath + '\'' +
                ", start='" + getComparator().getString(start) + '\'' +
                ", finish='" + getComparator().getString(finish) + '\'' +
@@ -81,28 +79,28 @@ public class SliceFromReadCommand extends ReadCommand
 class SliceFromReadCommandSerializer extends ReadCommandSerializer
 {
     @Override
-    public void serialize(ReadCommand rm, DataOutputStream dos) throws IOException
+    public void serialize(ReadCommand rm, DataOutputStream dos, int version) throws IOException
     {
         SliceFromReadCommand realRM = (SliceFromReadCommand)rm;
         dos.writeBoolean(realRM.isDigestQuery());
         dos.writeUTF(realRM.table);
-        FBUtilities.writeShortByteArray(realRM.key, dos);
+        ByteBufferUtil.writeWithShortLength(realRM.key, dos);
         realRM.queryPath.serialize(dos);
-        FBUtilities.writeShortByteArray(realRM.start, dos);
-        FBUtilities.writeShortByteArray(realRM.finish, dos);
+        ByteBufferUtil.writeWithShortLength(realRM.start, dos);
+        ByteBufferUtil.writeWithShortLength(realRM.finish, dos);
         dos.writeBoolean(realRM.reversed);
         dos.writeInt(realRM.count);
     }
 
     @Override
-    public ReadCommand deserialize(DataInputStream dis) throws IOException
+    public ReadCommand deserialize(DataInputStream dis, int version) throws IOException
     {
         boolean isDigest = dis.readBoolean();
         SliceFromReadCommand rm = new SliceFromReadCommand(dis.readUTF(),
-                                                           FBUtilities.readShortByteArray(dis),
+                                                           ByteBufferUtil.readWithShortLength(dis),
                                                            QueryPath.deserialize(dis),
-                                                           FBUtilities.readShortByteArray(dis),
-                                                           FBUtilities.readShortByteArray(dis),
+                                                           ByteBufferUtil.readWithShortLength(dis),
+                                                           ByteBufferUtil.readWithShortLength(dis),
                                                            dis.readBoolean(),
                                                            dis.readInt());
         rm.setDigestQuery(isDigest);

@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import com.google.common.collect.Multimap;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -67,13 +68,6 @@ public abstract class AbstractWriteResponseHandler implements IWriteResponseHand
         {
             throw new TimeoutException();
         }
-    }
-
-    public void addHintCallback(Message hintedMessage, InetAddress destination)
-    {
-        // (non-destination hints are part of the callback and count towards consistency only under CL.ANY)
-        if (writeEndpoints.contains(destination) || consistencyLevel == ConsistencyLevel.ANY)
-            MessagingService.instance.addCallback(this, hintedMessage.getMessageId());
     }
 
     /** null message means "response from local write" */

@@ -1,3 +1,106 @@
+0.8
+===
+
+Upgrading
+---------
+    - Upgrading from version 0.7.1 or later can be done with a rolling
+      restart, one node at a time.  You do not need to bring down the
+      whole cluster.
+    - Avro record classes used in map/reduce and Hadoop streaming code have
+      moved from org.apache.cassandra.avro to org.apache.cassandra.hadoop.avro,
+      applications using these classes will need to be updated accordingly.
+    - The loadbalance command has been removed from nodetool.  For similar
+      behavior, decommission then rebootstrap with empty initial_token.
+    - repair now works on a token range, rather than the entire ring. This
+      means that "run repair against each node" will now repair the ring with
+      no redundant work.
+
+Features
+--------
+    - added CQL client API and JDBC/DBAPI2-compliant drivers for Java and
+      Python, respectively (see: drivers/ subdirectory and doc/cql)
+    - added distributed Counters feature; 
+      see http://wiki.apache.org/cassandra/Counters
+    - optional intranode encryption; see comments around 'encryption_options'
+      in cassandra.yaml
+    - compaction multithreading and rate-limiting; see 
+      'compaction_multithreading' and 'compaction_throughput_mb_per_sec' in
+      cassandra.yaml
+
+Other
+-----
+    In the past, sstable2json would write column names and values as hex
+    strings, and now creates human readable values based on the
+    comparator/validator.  As a result, JSON dumps created with older 
+    versions of sstable2json are no longer compatible with json2sstable,
+    and imports must be made with a configuration that is identical to
+    the export.
+
+JMX
+---
+    - By default, JMX now listens on port 7199.
+
+
+0.7.4
+=====
+
+Upgrading
+---------
+    - Nothing specific to 0.7.4, but see 0.7.3 Upgrading if upgrading
+      from earlier than 0.7.1.
+
+Features
+--------
+    - Output to Pig is now supported as well as input
+
+
+0.7.3
+=====
+
+Upgrading
+---------
+    - 0.7.1 and 0.7.2 shipped with a bug that caused incorrect row-level
+      bloom filters to be generated when compacting sstables generated
+      with earlier versions.  This would manifest in IOExceptions during
+      column name-based queries.  0.7.3 provides "nodetool scrub" to 
+      rebuild sstables with correct bloom filters, with no data lost.
+      (If your cluster was never on 0.7.0 or earlier, you don't have to
+      worry about this.)  Note that nodetool scrub will snapshot your
+      data files before rebuilding, just in case.
+
+
+0.7.1
+=====
+
+Upgrading
+---------
+    - 0.7.1 is completely backwards compatible with 0.7.0.  Just restart
+      each node with the new version, one at a time.  (The cluster does
+      not all need to be upgraded simultaneously.)
+
+Features
+--------
+    - added flush_largest_memtables_at and reduce_cache_sizes_at options
+      to cassandra.yaml as an escape valve for memory pressure
+    - added option to specify -Dcassandra.join_ring=false on startup
+      to allow "warm spare" nodes or performing JMX maintenance before
+      joining the ring
+
+Performance
+-----------
+    - Disk writes and sequential scans avoid polluting page cache
+      (requires JNA to be enabled)
+    - Cassandra performs writes efficiently across datacenters by
+      sending a single copy of the mutation and having the recipient
+      forward that to other replicas in its datacenter.
+    - Improved network buffering
+    - Reduced lock contention on memtable flush
+    - Optimized supercolumn deserialization
+    - Zero-copy reads from mmapped sstable files
+    - Explicitly set higher JVM new generation size
+    - Reduced i/o contention during saving of caches
+
+
 0.7.0
 =====
 
@@ -61,7 +164,11 @@ Upgrading
 Thrift API
 ----------
     - The Cassandra server now defaults to framed mode, rather than
-      unframed.  Unframed is obsolete and will be removed in the future.
+      unframed.  Unframed is obsolete and will be removed in the next
+      major release.
+    - The Cassandra Thrift interface file has been updated for Thrift 0.5.
+      If you are compiling your own client code from the interface, you
+      will need to upgrade the Thrift compiler to match.
     - Row keys are now bytes: keys stored by versions prior to 0.7.0 will be
       returned as UTF-8 encoded bytes. OrderPreservingPartitioner and
       CollatingOrderPreservingPartitioner continue to expect that keys contain
@@ -131,7 +238,7 @@ Upgrading
 ---------
     - We try to keep minor versions 100% compatible (data format,
       commitlog format, network format) within the major series, but
-      we introduced a network-level incompatibility in this 0.6.1.
+      we introduced a network-level incompatibility in 0.6.1.
       Thus, if you are upgrading from 0.6.0 to any higher version
       (0.6.1, 0.6.2, etc.) then you will need to restart your entire
       cluster with the new version, instead of being able to do a
